@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#1a1a2e" />
+  <meta name="description" content="Fe2O3 FTC Scouting App" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.svg" />
+  <title>Fe2O3 Scouting</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- ====== SCREEN: Login ====== -->
+  <section id="screen-login" class="screen active">
+    <div class="card login-card">
+      <div class="logo">
+        <h1>Fe₂O₃</h1>
+        <p class="subtitle">FTC Scouting App</p>
+      </div>
+
+      <!-- Auth tabs: Sign In / Sign Up -->
+      <div id="auth-tabs" class="tabs" style="margin-bottom:20px">
+        <button class="tab active" data-tab="signin">Sign In</button>
+        <button class="tab" data-tab="signup">Sign Up</button>
+      </div>
+
+      <!-- ====== SIGN IN FORM ====== -->
+      <div id="tab-signin" class="tab-content auth-form active">
+        <input type="email" id="input-signin-email" placeholder="Email address" autocomplete="email" />
+        <input type="password" id="input-signin-password" placeholder="Password" autocomplete="current-password" />
+        <button id="btn-signin" class="btn btn-primary">Sign In</button>
+        <button id="btn-forgot-password" class="btn-link">Forgot password?</button>
+        <p id="signin-error" class="error-message"></p>
+      </div>
+
+      <!-- ====== SIGN UP FORM ====== -->
+      <div id="tab-signup" class="tab-content auth-form">
+        <input type="email" id="input-signup-email" placeholder="Email address" autocomplete="email" />
+        <input type="password" id="input-signup-password" placeholder="Password (min 6 characters)" autocomplete="new-password" />
+        <input type="password" id="input-signup-confirm" placeholder="Confirm password" autocomplete="new-password" />
+        <button id="btn-signup" class="btn btn-primary">Create Account</button>
+        <p id="signup-error" class="error-message"></p>
+      </div>
+
+      <!-- Divider -->
+      <div class="divider"><span>or</span></div>
+
+      <!-- Google button appears on both tabs -->
+      <button id="btn-google-login" class="btn btn-google">
+        <svg viewBox="0 0 48 48" width="20" height="20"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.54 28.59A14.5 14.5 0 0 1 9.5 24c0-1.59.28-3.14.76-4.59l-7.98-6.19A23.99 23.99 0 0 0 0 24c0 3.77.87 7.35 2.56 10.56l7.98-5.97z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 5.97C6.51 42.62 14.62 48 24 48z"/></svg>
+        Sign in with Google
+      </button>
+      <p id="login-error" class="error-message"></p>
+    </div>
+  </section>
+
+  <!-- ====== SCREEN: Email Verification (interstitial) ====== -->
+  <section id="screen-verify-email" class="screen">
+    <div class="card" style="text-align:center">
+      <div class="logo">
+        <h1 style="font-size:3rem; margin-bottom:8px">📧</h1>
+        <p class="subtitle" style="margin-bottom:16px">Verify your email</p>
+      </div>
+      <p class="help-text" id="verify-message">
+        We sent a verification email to <strong id="verify-email-display"></strong>.
+        Please check your inbox and click the link to verify your account.
+      </p>
+      <button id="btn-resend-verification" class="btn btn-primary" style="margin-top:8px">Resend verification email</button>
+      <button id="btn-check-verified" class="btn btn-outline" style="margin-top:12px; width:100%">I've verified — continue</button>
+      <button id="btn-verify-sign-out" class="btn-link" style="margin-top:16px">Use a different account</button>
+      <p id="verify-error" class="error-message"></p>
+    </div>
+  </section>
+
+  <!-- ====== SCREEN: Forgot Password (enter email to get reset link) ====== -->
+  <section id="screen-forgot-password" class="screen">
+    <div class="card" style="text-align:center">
+      <div class="logo">
+        <p class="subtitle" style="margin-bottom:16px">Reset your password</p>
+      </div>
+      <p class="help-text">Enter your email address and we'll send you a password reset link.</p>
+      <input type="email" id="input-reset-email" placeholder="Email address" autocomplete="email" />
+      <button id="btn-send-reset" class="btn btn-primary">Send reset link</button>
+      <button id="btn-back-to-login" class="btn-link" style="margin-top:12px">Back to sign in</button>
+      <p id="reset-error" class="error-message"></p>
+      <p id="reset-success" class="success-message"></p>
+    </div>
+  </section>
+
+  <!-- ====== SCREEN: Set New Password (from reset link oobCode) ====== -->
+  <section id="screen-set-password" class="screen">
+    <div class="card" style="text-align:center">
+      <div class="logo">
+        <p class="subtitle" style="margin-bottom:16px">Create a new password</p>
+      </div>
+      <input type="password" id="input-new-password" placeholder="New password (min 6 characters)" autocomplete="new-password" />
+      <input type="password" id="input-new-password-confirm" placeholder="Confirm new password" autocomplete="new-password" />
+      <button id="btn-set-password" class="btn btn-primary">Reset Password</button>
+      <button id="btn-back-to-login-from-reset" class="btn-link" style="margin-top:12px">Back to sign in</button>
+      <p id="set-password-error" class="error-message"></p>
+      <p id="set-password-success" class="success-message"></p>
+    </div>
+  </section>
+
+  <!-- ====== SCREEN: Team Join / Create ====== -->
+  <section id="screen-team" class="screen">
+    <div class="card">
+      <h2>Join or Create a Team</h2>
+      <div class="user-info" id="user-info">
+        <img id="user-avatar" src="" alt="" />
+        <span id="user-name"></span>
+        <button id="btn-sign-out" class="btn btn-small btn-outline">Sign Out</button>
+      </div>
+
+      <div class="tabs">
+        <button class="tab active" data-tab="join">Join Team</button>
+        <button class="tab" data-tab="create">Create Team</button>
+      </div>
+
+      <!-- Join -->
+      <div id="tab-join" class="tab-content active">
+        <p class="help-text">Enter the join code shared by your team lead.</p>
+        <input type="text" id="input-join-code" placeholder="e.g. FE2O3-ABC" maxlength="12" />
+        <button id="btn-join-team" class="btn btn-primary">Join Team</button>
+        <p id="join-error" class="error-message"></p>
+      </div>
+
+      <!-- Create -->
+      <div id="tab-create" class="tab-content">
+        <p class="help-text">Create a new scouting team. A join code will be generated.</p>
+        <input type="text" id="input-team-name" placeholder="Team name (e.g. Fe2O3)" maxlength="50" />
+        <button id="btn-create-team" class="btn btn-primary">Create Team</button>
+        <div id="join-code-created" class="join-code-card hidden">
+          <p class="help-text" style="margin-bottom:8px">✅ Team created! Your join code:</p>
+          <div class="code-with-copy">
+            <code id="created-join-code"></code>
+            <button id="btn-copy-created-code" class="btn btn-small btn-outline">Copy</button>
+          </div>
+          <p class="help-text" style="margin-top:8px; font-size:0.8rem">Share this with your team members so they can join.</p>
+        </div>
+        <p id="create-error" class="error-message"></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== SCREEN: Main App / Dashboard ====== -->
+  <section id="screen-main" class="screen">
+    <div class="card" style="max-width:560px">
+      <!-- Dashboard header with team name + sign out -->
+      <div id="dashboard-header">
+        <div id="dashboard-team-info">
+          <h2 id="main-team-name"></h2>
+        </div>
+        <button id="btn-main-sign-out" class="btn btn-small btn-outline">Sign Out</button>
+      </div>
+
+      <!-- Dashboard tab bar -->
+      <div id="dashboard-tabs" class="tabs" style="margin-top:16px">
+        <button class="tab active" data-dtab="scouting">Scouting</button>
+        <button class="tab" data-dtab="myteam">My Team</button>
+        <button class="tab" data-dtab="more">More</button>
+      </div>
+
+      <!-- ====== SCOUTING TAB ====== -->
+      <div id="dtab-scouting" class="dtab-content active">
+
+        <!-- Sticky Event Selection at Top -->
+        <div style="margin-top:0">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">EVENT</h3>
+          <p class="help-text">Select the tournament you're scouting at.</p>
+
+          <!-- Season selector -->
+          <div class="season-selector">
+            <label for="select-season" class="help-text" style="margin-bottom:4px; display:block">FTC Season</label>
+            <select id="select-season"></select>
+          </div>
+
+          <!-- Search with autocomplete -->
+          <div class="event-search" style="position:relative">
+            <input type="text" id="input-event-search" placeholder="Search by event name or code..." autocomplete="off" />
+            <button id="btn-search-events" class="btn btn-primary">Search</button>
+            <div id="search-suggestions" class="suggestions-dropdown hidden"></div>
+          </div>
+          <div id="event-results" class="event-list"></div>
+          <div id="selected-event-area" class="hidden" style="margin-top:16px; padding:12px; background:var(--surface); border-radius:8px">
+            <p><strong id="selected-event-name"></strong></p>
+            <p class="help-text" id="selected-event-code"></p>
+            <p class="help-text" id="selected-event-teams-count"></p>
+          </div>
+          <p id="event-error" class="error-message"></p>
+        </div>
+
+        <!-- Scouting Subtabs (Match Scouting / Pit Scouting) -->
+        <div id="scouting-subtabs" class="tabs" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
+          <button class="tab active" data-subtab="match">Match Scouting</button>
+          <button class="tab" data-subtab="pit">Pit Scouting</button>
+        </div>
+
+        <!-- ====== MATCH SCOUTING SUBTAB CONTENT ====== -->
+        <div id="subtab-match" class="subtab-content active" style="margin-top:16px">
+          <!-- Team list for Match Scouting -->
+          <div style="margin-top:10px">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (MATCH)</h3>
+            <p class="help-text" id="team-list-status-match">Select an event above to load teams.</p>
+            <div id="team-list-match" class="team-list"></div>
+          </div>
+
+          <!-- Team Detail View for Match Scouting -->
+          <div id="team-detail-area-match" class="hidden" style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAM DETAIL</h3>
+            <div id="team-detail-card-match" style="background:var(--surface); border-radius:8px; padding:16px">
+              <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px">
+                <div>
+                  <h4 id="td-team-number" style="font-size:1.2rem; color:var(--primary)"></h4>
+                  <p id="td-team-name" class="help-text" style="margin-bottom:4px"></p>
+                  <p id="td-team-location" class="help-text" style="font-size:0.8rem; margin-bottom:0"></p>
+                </div>
+                <span id="td-opr-badge" class="member-role-badge" style="font-size:0.8rem; padding:4px 10px">OPR: --</span>
+              </div>
+              <div id="td-awards" style="margin-top:12px">
+                <p class="help-text" style="font-size:0.8rem; margin-bottom:6px; font-weight:600">AWARDS</p>
+                <div id="td-awards-list"></div>
+              </div>
+              <!-- ====== Match Scouting Section in Team Detail ====== -->
+              <div id="td-match-scouting-section" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px">
+                  <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted)">MATCH SCOUTING ENTRIES</p>
+                  <button id="btn-add-match-entry" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Match</button>
+                </div>
+                <p class="help-text" id="td-match-count" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
+                <div id="td-match-entries"></div>
+              </div>
+            </div>
+            <p id="td-error" class="error-message"></p>
+          </div>
+        </div>
+
+        <!-- ====== PIT SCOUTING SUBTAB CONTENT ====== -->
+        <div id="subtab-pit" class="subtab-content hidden" style="margin-top:16px">
+          <!-- Team list for Pit Scouting -->
+          <div style="margin-top:10px">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (PIT)</h3>
+            <p class="help-text" id="team-list-status-pit">Select an event above to load teams.</p>
+            <div id="team-list-pit" class="team-list"></div>
+          </div>
+
+          <!-- Team Detail View for Pit Scouting -->
+          <div id="team-detail-area-pit" class="hidden" style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAM PIT DETAIL</h3>
+            <div id="team-detail-card-pit" style="background:var(--surface); border-radius:8px; padding:16px">
+              <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px">
+                <div>
+                  <h4 id="td-pit-team-number" style="font-size:1.2rem; color:var(--primary)"></h4>
+                  <p id="td-pit-team-name" class="help-text" style="margin-bottom:4px"></p>
+                  <p id="td-pit-team-location" class="help-text" style="font-size:0.8rem; margin-bottom:0"></p>
+                </div>
+                <span id="td-pit-opr-badge" class="member-role-badge" style="font-size:0.8rem; padding:4px 10px">OPR: --</span>
+              </div>
+              <div id="td-pit-awards" style="margin-top:12px">
+                <p class="help-text" style="font-size:0.8rem; margin-bottom:6px; font-weight:600">AWARDS</p>
+                <div id="td-pit-awards-list"></div>
+              </div>
+              <button id="btn-scout-team" class="btn btn-primary" style="margin-top:16px">Scout This Team (Pit)</button>
+            </div>
+            <p id="td-pit-error" class="error-message"></p>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ====== MY TEAM TAB ====== -->
+      <div id="dtab-myteam" class="dtab-content">
+
+        <!-- Join code section -->
+        <div class="join-code-card" style="margin-top:0">
+          <p class="help-text" style="margin-bottom:8px">Team join code — share this with your members:</p>
+          <div class="code-with-copy">
+            <code id="myteam-join-code-value"></code>
+            <button id="btn-copy-myteam-code" class="btn btn-small btn-outline">Copy</button>
+          </div>
+        </div>
+
+        <!-- Member list -->
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">MEMBERS</h3>
+          <div id="member-list" class="team-list"></div>
+          <p id="member-list-status" class="help-text">Loading members...</p>
+        </div>
+
+        <!-- Pit Scouting Form Builder section container -->
+        <div id="pit-form-config-section" style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">PIT SCOUTING FORM</h3>
+          <p class="help-text">Configure what fields appear on the pit scouting form.</p>
+          <button id="btn-open-form-builder" class="btn btn-primary">Edit Pit Scouting Form</button>
+        </div>
+
+        <!-- Match Scouting Form Builder section container -->
+        <div id="match-form-config-section" style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">MATCH SCOUTING FORM</h3>
+          <p class="help-text">Configure what fields appear on the match scouting form.</p>
+          <button id="btn-open-match-form-builder" class="btn btn-primary">Edit Match Scouting Form</button>
+        </div>
+
+      </div>
+
+      <!-- ====== MORE TAB (placeholder) ====== -->
+      <div id="dtab-more" class="dtab-content">
+        <div style="text-align:center; padding:40px 0">
+          <p class="help-text" style="font-size:1rem">Coming soon...</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ====== Pit Scouting Modal ====== -->
+  <div id="pit-modal" class="modal-overlay hidden">
+    <div id="pit-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="pit-modal-title">Scout Team</h3>
+        <button id="btn-pit-cancel" class="btn-modal-close">&times;</button>
+      </div>
+      <form id="pit-form" onsubmit="return false">
+        <!-- Dynamic fields are rendered here by dynamic-form.js -->
+        <div id="pit-dynamic-fields"></div>
+
+        <p id="pit-modal-error" class="error-message"></p>
+        <p id="pit-modal-success" class="success-message"></p>
+
+        <div class="pit-modal-actions">
+          <button type="button" id="btn-pit-cancel-inline" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-pit-save" class="btn btn-primary">Save Scout Data</button>
+        </div>
+        <button type="button" id="pit-delete-btn" class="btn btn-link btn-delete hidden" style="margin-top:12px; color:var(--error)">Delete this scouting data</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ====== Match Scouting Modal ====== -->
+  <div id="match-modal" class="modal-overlay hidden">
+    <div id="match-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="match-modal-title">Match Scout Team</h3>
+        <button id="btn-match-cancel" class="btn-modal-close">&times;</button>
+      </div>
+      <form id="match-form" onsubmit="return false">
+        <!-- Dynamic fields are rendered here by dynamic-form.js -->
+        <div id="match-dynamic-fields"></div>
+
+        <p id="match-modal-error" class="error-message"></p>
+        <p id="match-modal-success" class="success-message"></p>
+
+        <div class="pit-modal-actions">
+          <button type="button" id="btn-match-cancel-inline" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-match-save" class="btn btn-primary">Save Match Data</button>
+        </div>
+        <button type="button" id="match-delete-btn" class="btn btn-link btn-delete hidden" style="margin-top:12px; color:var(--error)">Delete this match entry</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- ====== Form Builder Modal (Captain only) ====== -->
+  <div id="builder-modal" class="modal-overlay hidden">
+    <div id="builder-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:560px">
+      <div class="modal-header">
+        <h3 id="builder-modal-title">Form Builder</h3>
+        <button id="btn-builder-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <!-- Builder type tabs -->
+        <div class="tabs" style="margin-bottom:16px">
+          <button class="tab builder-type-tab active" data-builder-type="pitScouting">Pit Scouting</button>
+          <button class="tab builder-type-tab" data-builder-type="matchScouting">Match Scouting</button>
+        </div>
+        <p class="help-text" style="margin-bottom:16px">
+          Add, edit, reorder, or remove fields. Changes affect all team members immediately.
+        </p>
+        <div id="builder-field-list" class="builder-field-list"></div>
+        <button id="btn-builder-add-field" class="btn btn-outline" style="margin-top:12px; width:100%">+ Add Field</button>
+        <p id="builder-error" class="error-message"></p>
+        <p id="builder-success" class="success-message"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Field Editor Sub-Modal (inside builder) ====== -->
+  <div id="field-editor-modal" class="modal-overlay hidden">
+    <div id="field-editor-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:480px">
+      <div class="modal-header">
+        <h3 id="field-editor-title">Edit Field</h3>
+        <button id="btn-bld-cancel" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <div class="pit-field">
+          <label for="bld-field-label">Field Label</label>
+          <input type="text" id="bld-field-label" placeholder="e.g. Drive Type" />
+        </div>
+        <div class="pit-field">
+          <label for="bld-field-id">Field ID (database key)</label>
+          <input type="text" id="bld-field-id" placeholder="e.g. driveType" />
+          <p id="bld-field-id-warning" class="help-text" style="font-size:0.75rem; margin-top:4px; margin-bottom:0">
+            Must start with a letter. Use letters, numbers, and underscores only. Changing this will lose connection to existing saved data.
+          </p>
+        </div>
+        <div class="pit-field">
+          <label for="bld-field-type">Field Type</label>
+          <select id="bld-field-type">
+            <option value="dropdown">Dropdown (select one)</option>
+            <option value="text">Short Text</option>
+            <option value="number">Number</option>
+            <option value="textarea">Long Text / Notes</option>
+          </select>
+        </div>
+        <div class="pit-field" id="bld-field-options-group">
+          <label for="bld-field-options">Dropdown Options (one per line)</label>
+          <textarea id="bld-field-options" placeholder="Option 1&#10;Option 2&#10;Option 3" rows="4"></textarea>
+        </div>
+        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
+          <input type="checkbox" id="bld-field-required" style="width:auto; margin:0" />
+          <label for="bld-field-required" style="margin:0">Required (must be filled in)</label>
+        </div>
+        <div class="pit-modal-actions" style="margin-top:20px">
+          <button type="button" id="btn-bld-cancel-inline" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-bld-save" class="btn btn-primary">Save Field</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Loading overlay -->
+  <div id="loading-overlay" class="loading-overlay hidden">
+    <div class="spinner"></div>
+    <p id="loading-text">Loading...</p>
+  </div>
+
+  <!-- Firebase App (compat) -->
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <script src="js/firebase-config.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/team.js"></script>
+  <script src="js/members.js"></script>
+  <script src="js/first-api.js"></script>
+  <script src="js/ftcscout.js"></script>
+  <script src="js/dynamic-form.js"></script>
+  <script src="js/pit-scout.js"></script>
+  <script src="js/match-scout.js"></script>
+  <script src="js/form-builder.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

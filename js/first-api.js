@@ -1,0 +1,598 @@
+// ====== FIRST FTC Events API Integration (via Cloudflare Worker) ======
+
+// ⚠️ UPDATE THIS URL after deploying the worker:
+//    wrangler deploy → it will print your worker URL
+const FTC_PROXY_BASE = 'https://fe2o3-ftc-proxy.fe2o3-scouting.workers.dev';
+
+// Currently selected event data
+let selectedEvent = null;
+let isSearching = false;
+let debounceTimer = null;
+
+// ====== In-memory event cache (keyed by season) ======
+const eventCache = {};
+
+// ====== Compute the current FTC season ======
+function getCurrentFtcSeason() {
+  const now = new Date();
+  const month = now.getMonth() + 1;
+  return month >= 9 ? now.getFullYear() : now.getFullYear() - 1;
+}
+
+// ====== Populate season dropdown ======
+function populateSeasonDropdown() {
+  const select = document.getElementById('select-season');
+  const current = getCurrentFtcSeason();
+  const startYear = Math.max(current - 8, 2020);
+
+  for (let y = current; y >= startYear; y--) {
+    const option = document.createElement('option');
+    option.value = y;
+    const nextYear = y + 1;
+    const label = current === y ? `${y}-${nextYear} (current)` : `${y}-${nextYear}`;
+    option.textContent = label;
+    if (y === current) {
+      option.selected = true;
+    }
+    select.appendChild(option);
+  }
+}
+
+// ====== Get selected season from dropdown ======
+function getSelectedSeason() {
+  return document.getElementById('select-season').value;
+}
+
+// ====== Fetch helper for the worker ======
+async function callWorker(endpoint) {
+  const url = `${FTC_PROXY_BASE}${endpoint}`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    const body = await response.text();
+    let msg = `Worker error ${response.status}`;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed.error) msg = parsed.error;
+    } catch (_) {}
+    throw new Error(msg);
+  }
+
+  return await response.json();
+}
+
+// ====== Cache freshness: re-fetch if older than 1 hour ======
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// ====== Fetch and cache all events for a season ======
+async function ensureEventsLoaded(season) {
+  // Already in memory and fresh
+  if (eventCache[season]) return eventCache[season];
+
+  // Try Firestore cache first
+  const cacheDoc = await db.collection('eventCache').doc('season_' + season).get();
+  if (cacheDoc.exists) {
+    const data = cacheDoc.data();
+    if (data.events && data.events.length > 0) {
+      // Check freshness: if cachedAt is recent enough, use it
+      const cachedAt = data.cachedAt ? data.cachedAt.toMillis() : 0;
+      const age = Date.now() - cachedAt;
+      if (age < CACHE_TTL_MS) {
+        eventCache[season] = data.events;
+        return data.events;
+      }
+      // Stale cache — fall through to re-fetch
+      console.log(`[cache] season ${season} cache is ${Math.round(age/1000/60)}m old, re-fetching`);
+    }
+  }
+
+  // Fetch from Worker
+  const result = await callWorker(`/events?season=${encodeURIComponent(season)}`);
+  const events = result.events || [];
+
+  // Store in memory
+  eventCache[season] = events;
+
+  // Persist to Firestore for offline reuse
+  try {
+    await db.collection('eventCache').doc('season_' + season).set({
+      events: events,
+      cachedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (err) {
+    // Non-critical — cache will re-fetch next time
+    console.warn('Failed to cache events to Firestore:', err);
+  }
+
+  return events;
+}
+
+// ====== Filter events client-side by query ======
+function filterEvents(events, query) {
+  if (!query || !query.trim()) return events.slice(0, 50);
+  const q = query.trim().toLowerCase();
+  return events.filter(evt =>
+    (evt.name && evt.name.toLowerCase().includes(q)) ||
+    (evt.code && evt.code.toLowerCase().includes(q))
+  );
+}
+
+// ====== Get teams for a specific event via Worker ======
+async function getEventTeams(eventCode, season) {
+  const result = await callWorker(`/teams?eventCode=${encodeURIComponent(eventCode)}&season=${encodeURIComponent(season || getSelectedSeason())}`);
+  return result.teams || [];
+}
+
+// ====== Cache event data to Firestore ======
+async function cacheEventToFirestore(eventData, ftcTeams) {
+  if (!eventData || !eventData.code) return;
+
+  const eventRef = db.collection('events').doc(eventData.code);
+  await eventRef.set({
+    name: eventData.name,
+    date: eventData.startDate ? new Date(eventData.startDate) : null,
+    ftcTeams: ftcTeams.map(t => ({
+      teamNumber: t.teamNumber,
+      name: t.name || t.nameFull || t.nameShort || t.teamNameCalc || ''
+    })),
+    cachedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  return eventRef;
+}
+
+// ====== Load cached event from Firestore ======
+async function getCachedEvent(eventCode) {
+  const doc = await db.collection('events').doc(eventCode).get();
+  if (doc.exists) {
+    const data = doc.data();
+    // Normalize ftcTeams if stored as numbers or objects
+    if (data.ftcTeams) {
+      data.ftcTeams = data.ftcTeams.map(t => {
+        if (typeof t === 'number') return { teamNumber: t, name: '' };
+        return t;
+      });
+    }
+    return { id: doc.id, ...data };
+  }
+  return null;
+}
+
+// ====== Render event list (full results area) ======
+function renderEventList(events) {
+  const container = document.getElementById('event-results');
+  container.innerHTML = '';
+
+  if (!events || events.length === 0) {
+    container.innerHTML = '<p class="help-text">No events found. Try a different search term.</p>';
+    return;
+  }
+
+  events.forEach(evt => {
+    const item = document.createElement('div');
+    item.className = 'event-item';
+    if (selectedEvent && selectedEvent.code === evt.code) {
+      item.classList.add('selected');
+    }
+    item.dataset.code = evt.code;
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'event-name';
+    nameEl.textContent = evt.name;
+
+    const codeEl = document.createElement('div');
+    codeEl.className = 'event-code';
+    codeEl.textContent = `${evt.code}  •  ${evt.startDate || 'Date TBD'}`;
+
+    item.appendChild(nameEl);
+    item.appendChild(codeEl);
+
+    item.addEventListener('click', () => selectEvent(evt));
+
+    container.appendChild(item);
+  });
+}
+
+// ====== Render suggestions dropdown ======
+function renderSuggestions(events) {
+  const dropdown = document.getElementById('search-suggestions');
+
+  if (!events || events.length === 0) {
+    dropdown.classList.add('hidden');
+    return;
+  }
+
+  dropdown.innerHTML = '';
+  events.forEach(evt => {
+    const item = document.createElement('div');
+    item.className = 'suggestion-item';
+    item.dataset.code = evt.code;
+
+    const nameEl = document.createElement('div');
+    nameEl.className = 'suggestion-name';
+    nameEl.textContent = evt.name;
+
+    const codeEl = document.createElement('div');
+    codeEl.className = 'suggestion-code';
+    codeEl.textContent = `${evt.code}  •  ${evt.startDate || ''}`;
+
+    item.appendChild(nameEl);
+    item.appendChild(codeEl);
+
+    item.addEventListener('click', () => {
+      clearSelectedEvent();
+      selectEvent(evt);
+      hideSuggestions();
+      document.getElementById('input-event-search').value = evt.name;
+    });
+
+    dropdown.appendChild(item);
+  });
+
+  dropdown.classList.remove('hidden');
+}
+
+function hideSuggestions() {
+  document.getElementById('search-suggestions').classList.add('hidden');
+}
+
+// ====== Clear any previously selected event's info, team list, search results, and team detail ======
+function clearSelectedEvent() {
+  selectedEvent = null;
+  const area = document.getElementById('selected-event-area');
+  if (area) area.classList.add('hidden');
+  const nameEl = document.getElementById('selected-event-name');
+  if (nameEl) nameEl.textContent = '';
+  const codeEl = document.getElementById('selected-event-code');
+  if (codeEl) codeEl.textContent = '';
+  const countEl = document.getElementById('selected-event-teams-count');
+  if (countEl) countEl.textContent = '';
+
+  const teamListMatch = document.getElementById('team-list-match');
+  if (teamListMatch) teamListMatch.innerHTML = '';
+  const statusMatch = document.getElementById('team-list-status-match');
+  if (statusMatch) statusMatch.textContent = 'Select an event above to load teams.';
+
+  const teamListPit = document.getElementById('team-list-pit');
+  if (teamListPit) teamListPit.innerHTML = '';
+  const statusPit = document.getElementById('team-list-status-pit');
+  if (statusPit) statusPit.textContent = 'Select an event above to load teams.';
+
+  const eventResults = document.getElementById('event-results');
+  if (eventResults) eventResults.innerHTML = '';
+
+  const teamDetailMatch = document.getElementById('team-detail-area-match');
+  if (teamDetailMatch) teamDetailMatch.classList.add('hidden');
+  const teamDetailPit = document.getElementById('team-detail-area-pit');
+  if (teamDetailPit) teamDetailPit.classList.add('hidden');
+
+  const tdError = document.getElementById('td-error');
+  if (tdError) tdError.textContent = '';
+
+  // Remove .selected class from all event items
+  document.querySelectorAll('.event-item').forEach(el => el.classList.remove('selected'));
+  // Stop watching pit scouting status for the previous event
+  if (typeof watchPitScoutStatus === 'function') {
+    watchPitScoutStatus(null);
+  }
+  // Stop watching match scouting status for the previous event
+  if (typeof watchMatchScoutStatus === 'function') {
+    watchMatchScoutStatus(null);
+  }
+}
+
+// ====== Select an event ======
+async function selectEvent(eventData) {
+  selectedEvent = eventData;
+
+  // Highlight this event in the search results list (if rendered)
+  document.querySelectorAll('.event-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.code === eventData.code);
+  });
+
+  // Show selected event info
+  document.getElementById('selected-event-name').textContent = eventData.name;
+  document.getElementById('selected-event-code').textContent = `Code: ${eventData.code}`;
+  document.getElementById('selected-event-teams-count').textContent = 'Loading teams...';
+  document.getElementById('selected-event-area').classList.remove('hidden');
+
+  showLoading(`Fetching teams for ${eventData.code}...`);
+  try {
+    // Try cache first
+    let ftcTeams = null;
+    const cached = await getCachedEvent(eventData.code);
+    if (cached && cached.ftcTeams && cached.ftcTeams.length > 0) {
+      ftcTeams = cached.ftcTeams.map(t => typeof t === 'number' ? { teamNumber: t, name: '' } : t);
+    } else {
+      // Fetch from Worker (which calls FIRST API server-side)
+      ftcTeams = await getEventTeams(eventData.code, getSelectedSeason());
+      // Cache result
+      await cacheEventToFirestore(eventData, ftcTeams);
+    }
+
+    hideLoading();
+    document.getElementById('selected-event-teams-count').textContent = `${ftcTeams.length} team(s) registered`;
+    renderTeamList(ftcTeams);
+
+    // Start watching pit scouting status for this event (live snapshot listener)
+    if (typeof watchPitScoutStatus === 'function') {
+      watchPitScoutStatus(eventData.code);
+    }
+
+    // Start watching match scouting status for this event
+    if (typeof watchMatchScoutStatus === 'function') {
+      watchMatchScoutStatus(eventData.code);
+    }
+  } catch (err) {
+    hideLoading();
+    console.error('Failed to fetch teams:', err);
+    document.getElementById('selected-event-teams-count').textContent = 'Failed to load teams';
+    showError('event-error', 'Could not load teams. Check your connection and try again.');
+  }
+}
+
+// ====== Callback for scouted state changes (set by pit-scout.js) ======
+let onScoutedStateChanged = null;
+
+// ====== Render team lists for both match and pit scouting ======
+function renderTeamList(teams) {
+  renderMatchTeamList(teams);
+  renderPitTeamList(teams);
+}
+
+function renderMatchTeamList(teams) {
+  const container = document.getElementById('team-list-match');
+  const status = document.getElementById('team-list-status-match');
+  if (!container || !status) return;
+  container.innerHTML = '';
+
+  if (!teams || teams.length === 0) {
+    status.textContent = 'No teams found for this event.';
+    return;
+  }
+
+  status.textContent = `${teams.length} team(s)`;
+  const sorted = [...teams].sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+
+  sorted.forEach(team => {
+    const item = document.createElement('div');
+    item.className = 'team-item';
+    item.dataset.teamNumber = team.teamNumber;
+
+    const leftGroup = document.createElement('div');
+    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0; cursor:pointer';
+    leftGroup.addEventListener('click', () => {
+      wireTeamMatchDetailClick(team.teamNumber, selectedEvent?.code || '', team);
+    });
+
+    const numSpan = document.createElement('span');
+    numSpan.className = 'team-number';
+    numSpan.textContent = `#${team.teamNumber}`;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'team-name';
+    nameSpan.textContent = team.name || team.nameFull || team.nameShort || team.schoolName || team.teamNameCalc || '';
+
+    leftGroup.appendChild(numSpan);
+    leftGroup.appendChild(nameSpan);
+
+    // Match scout quick button (+ Match Scout)
+    const scoutBtn = document.createElement('button');
+    scoutBtn.className = 'btn btn-small btn-primary';
+    scoutBtn.style.cssText = 'width: auto; padding: 4px 10px; font-size: 0.8rem; flex-shrink: 0;';
+    scoutBtn.textContent = '+ Match Scout';
+    scoutBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (selectedEvent?.code && typeof openMatchScoutForm === 'function') {
+        openMatchScoutForm(team.teamNumber, selectedEvent.code);
+      }
+    });
+
+    item.appendChild(leftGroup);
+    item.appendChild(scoutBtn);
+    container.appendChild(item);
+  });
+}
+
+function renderPitTeamList(teams) {
+  const container = document.getElementById('team-list-pit');
+  const status = document.getElementById('team-list-status-pit');
+  if (!container || !status) return;
+  container.innerHTML = '';
+
+  if (!teams || teams.length === 0) {
+    status.textContent = 'No teams found for this event.';
+    return;
+  }
+
+  status.textContent = `${teams.length} team(s)`;
+  const sorted = [...teams].sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+
+  sorted.forEach(team => {
+    const item = document.createElement('div');
+    item.className = 'team-item team-item-pit';
+    item.dataset.teamNumber = team.teamNumber;
+
+    const leftGroup = document.createElement('div');
+    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0; cursor:pointer';
+    leftGroup.addEventListener('click', () => {
+      wireTeamPitDetailClick(team.teamNumber, selectedEvent?.code || '', team);
+    });
+
+    const numSpan = document.createElement('span');
+    numSpan.className = 'team-number';
+    numSpan.textContent = `#${team.teamNumber}`;
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'team-name';
+    nameSpan.textContent = team.name || team.nameFull || team.nameShort || team.teamNameCalc || '';
+
+    leftGroup.appendChild(numSpan);
+    leftGroup.appendChild(nameSpan);
+
+    const scoutBtn = document.createElement('button');
+    scoutBtn.className = 'btn-scout-quick btn-scout-quick-pit';
+    scoutBtn.style.cssText = 'width: auto; padding: 4px 10px; font-size: 0.8rem; flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px;';
+    
+    const isScouted = typeof isTeamScouted === 'function' ? isTeamScouted(team.teamNumber, selectedEvent?.code) : false;
+    if (isScouted) {
+      scoutBtn.classList.add('btn-scouted');
+      const checkSpan = document.createElement('span');
+      checkSpan.textContent = '✓';
+      const textSpan = document.createElement('span');
+      textSpan.textContent = 'Pit Scout';
+      scoutBtn.appendChild(checkSpan);
+      scoutBtn.appendChild(textSpan);
+    } else {
+      scoutBtn.textContent = '+ Pit Scout';
+    }
+
+    scoutBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (selectedEvent?.code && typeof openPitScoutForm === 'function') {
+        openPitScoutForm(team.teamNumber, selectedEvent.code);
+      }
+    });
+
+    item.appendChild(leftGroup);
+    item.appendChild(scoutBtn);
+    container.appendChild(item);
+  });
+
+  if (typeof refreshTeamListScoutedState === 'function') {
+    refreshTeamListScoutedState();
+  }
+}
+
+// ====== Wire Team Detail Clicks ======
+function wireTeamMatchDetailClick(teamNumber, eventCode, teamObj) {
+  console.log('Team detail handler fired for team:', teamNumber, 'teamObj:', teamObj);
+  if (typeof loadTeamDetail === 'function') {
+    loadTeamDetail(teamNumber, eventCode);
+  } else {
+    console.error('loadTeamDetail function is not defined!');
+  }
+}
+
+function wireTeamPitDetailClick(teamNumber, eventCode, teamObj) {
+  const area = document.getElementById('team-detail-area-pit');
+  if (area) area.classList.remove('hidden');
+  document.getElementById('td-pit-team-number').textContent = `#${teamNumber}`;
+  const teamName = teamObj?.name || teamObj?.nameFull || teamObj?.nameShort || teamObj?.schoolName || teamObj?.teamNameCalc || 'Team Name Unavailable';
+  document.getElementById('td-pit-team-name').textContent = teamName;
+
+  if (typeof loadTeamDetail === 'function') {
+    loadTeamDetail(teamNumber, eventCode, 'td-pit-');
+  }
+
+  const scoutBtn = document.getElementById('team-detail-card-pit')?.querySelector('#btn-scout-team') || document.getElementById('team-detail-card-pit')?.querySelector('.btn-primary');
+  if (scoutBtn) {
+    const newBtn = scoutBtn.cloneNode(true);
+    scoutBtn.parentNode.replaceChild(newBtn, scoutBtn);
+    newBtn.addEventListener('click', () => {
+      if (typeof openPitScoutForm === 'function') {
+        openPitScoutForm(teamNumber, eventCode);
+      }
+    });
+  }
+}
+
+// ====== Handle search button click ======
+async function doSearch() {
+  if (isSearching) return;
+  clearErrors();
+  hideSuggestions();
+  const query = document.getElementById('input-event-search').value.trim();
+
+  // Empty search: clear everything and return
+  if (!query) {
+    clearSelectedEvent();
+    return;
+  }
+
+  // Clear any previously selected event before showing new results
+  clearSelectedEvent();
+  const season = getSelectedSeason();
+
+  isSearching = true;
+  showLoading('Searching events...');
+  try {
+    // This loads the full list if not already cached, then filters
+    const allEvents = await ensureEventsLoaded(season);
+    const filtered = filterEvents(allEvents, query);
+    hideLoading();
+    renderEventList(filtered);
+  } catch (err) {
+    hideLoading();
+    console.error('Event search error:', err);
+    showError('event-error', 'Failed to search events. Check your connection and try again.');
+  } finally {
+    isSearching = false;
+  }
+}
+
+// ====== Event Search Button ======
+document.getElementById('btn-search-events').addEventListener('click', doSearch);
+
+// ====== Live Autocomplete (client-side, no API calls) ======
+document.getElementById('input-event-search').addEventListener('input', () => {
+  if (debounceTimer) clearTimeout(debounceTimer);
+
+  const query = document.getElementById('input-event-search').value.trim();
+  if (!query) {
+    hideSuggestions();
+    return;
+  }
+
+  debounceTimer = setTimeout(() => {
+    const season = getSelectedSeason();
+    const allEvents = eventCache[season];
+    if (!allEvents) {
+      // Cache not loaded yet — don't show suggestions, just wait for search
+      hideSuggestions();
+      return;
+    }
+
+    const matches = filterEvents(allEvents, query).slice(0, 8);
+    renderSuggestions(matches);
+  }, 150); // 150ms debounce — fast since it's local
+});
+
+// ====== Hide suggestions on blur / Escape ======
+document.getElementById('input-event-search').addEventListener('blur', () => {
+  setTimeout(hideSuggestions, 200);
+});
+
+document.getElementById('input-event-search').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    hideSuggestions();
+  } else if (e.key === 'Enter') {
+    hideSuggestions();
+    doSearch();
+  }
+});
+
+// ====== When season changes, clear everything and re-fetch ======
+document.getElementById('select-season').addEventListener('change', async () => {
+  const season = getSelectedSeason();
+
+  // Clear all previous state immediately
+  clearSelectedEvent();
+  document.getElementById('input-event-search').value = '';
+
+  // If we don't have this season cached yet, pre-load it in the background
+  if (!eventCache[season]) {
+    try {
+      await ensureEventsLoaded(season);
+    } catch (err) {
+      // Silently fail — the search button will handle errors
+    }
+  }
+});
+
+// ====== Pre-load current season on page load ======
+populateSeasonDropdown();
+
+// Kick off background load of the current season's events
+const initialSeason = getSelectedSeason();
+ensureEventsLoaded(initialSeason).catch(() => {});

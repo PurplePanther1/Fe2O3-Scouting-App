@@ -1,0 +1,99 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function isTeamMember(teamId) {
+      return isAuth()
+        && exists(/databases/$(database)/documents/teams/$(teamId))
+        && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([request.auth.uid]);
+    }
+
+    function isCaptain(teamData) {
+      return teamData != null && teamData.roles != null && teamData.roles[request.auth.uid] == 'captain';
+    }
+
+    function canEditTemplates(teamId) {
+      let teamDoc = get(/databases/$(database)/documents/teams/$(teamId));
+      let teamData = teamDoc != null ? teamDoc.data : null;
+      return isAuth() && teamData != null && (
+        isCaptain(teamData) ||
+        (teamData.permissions != null && 
+         teamData.permissions[request.auth.uid] != null && 
+         teamData.permissions[request.auth.uid].canEditTemplates == true)
+      );
+    }
+
+    function canEditOrDeleteEntry(teamId, entry) {
+      let teamDoc = teamId != null ? get(/databases/$(database)/documents/teams/$(teamId)) : null;
+      let teamData = teamDoc != null ? teamDoc.data : null;
+      return isAuth() && (
+        (teamData != null && isCaptain(teamData)) ||
+        entry.scoutedBy == request.auth.uid ||
+        (teamData != null && teamData.permissions != null &&
+         teamData.permissions[request.auth.uid] != null &&
+         teamData.permissions[request.auth.uid].canEditOtherEntries == true)
+      );
+    }
+
+    match /teams/{teamId} {
+      allow read: if isAuth();
+      allow create: if isAuth();
+      allow update: if isTeamMember(teamId)
+        && (!request.resource.data.keys().hasAny(['roles', 'permissions'])
+            || resource.data.roles[request.auth.uid] == 'captain');
+      allow delete: if false;
+
+      match /{document=**} {
+        allow read, update: if isTeamMember(teamId);
+        allow create: if isAuth() && request.resource.data.members.hasAny([request.auth.uid]);
+        allow delete: if false;
+      }
+    }
+
+    match /events/{eventCode} {
+      allow read: if isAuth();
+      allow create, update: if isAuth();
+      allow delete: if false;
+    }
+
+    match /eventCache/{documentId} {
+      allow read, write: if isAuth();
+    }
+
+    match /teamDetails/{documentId} {
+      allow read, write: if isAuth();
+    }
+
+    match /teams/{teamId}/formConfig/{configDoc} {
+      allow read: if isAuth();
+      allow create, update: if isAuth()
+        && exists(/databases/$(database)/documents/teams/$(teamId))
+        && canEditTemplates(teamId);
+      allow delete: if false;
+    }
+
+    match /pitScouting/{documentId} {
+      allow read: if isAuth();
+      allow create: if isAuth();
+      allow update: if isAuth() 
+        && canEditOrDeleteEntry(resource.data.teamId, resource.data)
+        && request.resource.data.scoutedBy == resource.data.scoutedBy
+        && request.resource.data.scoutedByEmail == resource.data.scoutedByEmail;
+      allow delete: if isAuth() && canEditOrDeleteEntry(resource.data.teamId, resource.data);
+    }
+
+    match /matchScouting/{documentId} {
+      allow read: if isAuth();
+      allow create: if isAuth();
+      allow update: if isAuth() 
+        && canEditOrDeleteEntry(resource.data.teamId, resource.data)
+        && request.resource.data.scoutedBy == resource.data.scoutedBy
+        && request.resource.data.scoutedByEmail == resource.data.scoutedByEmail;
+      allow delete: if isAuth() && canEditOrDeleteEntry(resource.data.teamId, resource.data);
+    }
+  }
+}
