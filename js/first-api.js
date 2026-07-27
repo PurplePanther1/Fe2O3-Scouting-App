@@ -340,6 +340,10 @@ function renderTeamList(teams) {
   renderPitTeamList(teams);
 }
 
+// Shared selected team across sub-tabs
+let currentSelectedTeamNumber = null;
+let currentEventTeams = [];
+
 function renderMatchTeamList(teams) {
   const container = document.getElementById('team-list-match');
   const status = document.getElementById('team-list-status-match');
@@ -349,6 +353,11 @@ function renderMatchTeamList(teams) {
   if (!teams || teams.length === 0) {
     status.textContent = 'No teams found for this event.';
     return;
+  }
+
+  currentEventTeams = teams;
+  if (teams.length > 0) {
+    console.log('DEBUG: Raw first team object from FIRST API / cache:', teams[0]);
   }
 
   status.textContent = `${teams.length} team(s)`;
@@ -466,6 +475,7 @@ function renderPitTeamList(teams) {
 
 // ====== Wire Team Detail Clicks ======
 function wireTeamMatchDetailClick(teamNumber, eventCode, teamObj) {
+  currentSelectedTeamNumber = teamNumber;
   console.log('Team detail handler fired for team:', teamNumber, 'teamObj:', teamObj);
   if (typeof loadTeamDetail === 'function') {
     loadTeamDetail(teamNumber, eventCode);
@@ -475,6 +485,7 @@ function wireTeamMatchDetailClick(teamNumber, eventCode, teamObj) {
 }
 
 function wireTeamPitDetailClick(teamNumber, eventCode, teamObj) {
+  currentSelectedTeamNumber = teamNumber;
   const area = document.getElementById('team-detail-area-pit');
   if (area) area.classList.remove('hidden');
   document.getElementById('td-pit-team-number').textContent = `#${teamNumber}`;

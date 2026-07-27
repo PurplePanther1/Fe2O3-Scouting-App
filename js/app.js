@@ -31,12 +31,25 @@ document.addEventListener('DOMContentLoaded', () => {
       if (matchView) { matchView.classList.add('hidden'); matchView.classList.remove('active'); }
       if (pitView) { pitView.classList.remove('hidden'); pitView.classList.add('active'); }
       console.log('Switched to Pit Scouting View');
+
+      // If a team is currently selected, auto-load its pit detail
+      if (typeof currentSelectedTeamNumber !== 'undefined' && currentSelectedTeamNumber && typeof selectedEvent !== 'undefined' && selectedEvent?.code) {
+        const foundTeam = (typeof currentEventTeams !== 'undefined' ? currentEventTeams : []).find(t => t.teamNumber === currentSelectedTeamNumber);
+        wireTeamPitDetailClick(currentSelectedTeamNumber, selectedEvent.code, foundTeam || { teamNumber: currentSelectedTeamNumber });
+      }
     } else {
       if (matchTab) matchTab.classList.add('active');
       if (pitTab) pitTab.classList.remove('active');
       if (matchView) { matchView.classList.remove('hidden'); matchView.classList.add('active'); }
       if (pitView) { pitView.classList.add('hidden'); pitView.classList.remove('active'); }
       console.log('Switched to Match Scouting View');
+
+      // If a team is currently selected, auto-load its match detail
+      if (typeof currentSelectedTeamNumber !== 'undefined' && currentSelectedTeamNumber && typeof selectedEvent !== 'undefined' && selectedEvent?.code) {
+        if (typeof loadTeamDetail === 'function') {
+          loadTeamDetail(currentSelectedTeamNumber, selectedEvent.code);
+        }
+      }
     }
   };
 
