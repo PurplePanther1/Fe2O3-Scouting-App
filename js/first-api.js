@@ -358,27 +358,45 @@ async function selectEvent(eventData) {
           const batchWriteTimerLabel = `[Timing] Chunk #${index} batched Firestore write`;
           console.time(timerLabel);
           try {
-            const batchResults = await fetchTeamDetailsBatch(chunkTeamNums, season);
-            console.timeEnd(timerLabel);
+        const batchResults = await fetchTeamDetailsBatch(chunkTeamNums, season);
+        console.timeEnd(timerLabel);
+        
+        console.time(batchWriteTimerLabel);
+        try {
+          let batch = db.batch();
+          let opCount = 0;
+          
+          for (let t of chunkTeams) {
+            const detail = batchResults[t.teamNumber];
+            if (!detail || detail.isError || !detail.name || detail.name.startsWith('Team #')) {
+              continue;
+            }
+            t.name = detail.name;
+            t.nameShort = detail.name;
             
-            console.time(batchWriteTimerLabel);
-            try {
-              const batch = db.batch();
-              let opCount = 0;
-              
-              for (let t of chunkTeams) {
-                const detail = batchResults[t.teamNumber];
-                if (!detail || detail.isError || !detail.name || detail.name.startsWith('Team #')) {
-                  continue;
-                }
-                t.name = detail.name;
-                t.nameShort = detail.name;
-                
-                const docRef = db.collection('teamDetails').doc(String(t.teamNumber));
-                batch.set(docRef, {
-                  ...detail,
-                  cachedAt: firebase.firestore.FieldValue.serverTimestamp()
-                }, { merge: true });
+            // Normalize raw GraphQL team detail into flat structure expected by renderTeamDetail & getCachedTeamDetail
+            const loc = detail.location || {};
+            const normalizedDetail = {
+              teamNumber: t.teamNumber,
+              name: detail.name || `Team #${t.teamNumber}`,
+              city: loc.city || '',
+              state: loc.state || '',
+              country: loc.country || '',
+              rookieYear: detail.rookieYear || null,
+              website: detail.website || null,
+              opr: detail.quickStats?.tot?.value || null,
+              auto: detail.quickStats?.auto?.value || null,
+              dc: detail.quickStats?.dc?.value || null,
+              eg: detail.quickStats?.eg?.value || null,
+              statsCount: detail.quickStats?.count || 0,
+              awards: detail.awards || []
+            };
+            
+            const docRef = db.collection('teamDetails').doc(String(t.teamNumber));
+            batch.set(docRef, {
+              ...normalizedDetail,
+              cachedAt: firebase.firestore.FieldValue.serverTimestamp()
+            }, { merge: true });
                 opCount++;
                 
                 // Firestore batch limit is 500 operations. Chunk size is 40, so this is well within limits.
@@ -441,9 +459,71 @@ function renderTeamList(teams) {
   console.timeEnd('[Timing] renderTeamList total');
 }
 
-// Shared selected team across sub-tabs
+// Shared selected team & search query across sub-tabs
 let currentSelectedTeamNumber = null;
 let currentEventTeams = [];
+let currentTeamSearchQuery = '';
+
+// ====== In-list team filtering & sync (Match & Pit) ======
+function applyTeamSearchFilter(query) {
+  currentTeamSearchQuery = query || '';
+  const q = currentTeamSearchQuery.trim().toLowerCase();
+
+  // Update both input values if they differ
+  const matchInput = document.getElementById('input-team-search-match');
+  const pitInput = document.getElementById('input-team-search-pit');
+  if (matchInput && matchInput.value !== currentTeamSearchQuery) {
+    matchInput.value = currentTeamSearchQuery;
+  }
+  if (pitInput && pitInput.value !== currentTeamSearchQuery) {
+    pitInput.value = currentTeamSearchQuery;
+  }
+
+  // Filter match team items
+  const matchContainer = document.getElementById('team-list-match');
+  if (matchContainer) {
+    matchContainer.querySelectorAll('.team-item').forEach(item => {
+      const text = item.textContent.toLowerCase();
+      item.style.display = (!q || text.includes(q)) ? '' : 'none';
+    });
+  }
+
+  // Filter pit team items
+  const pitContainer = document.getElementById('team-list-pit');
+  if (pitContainer) {
+    pitContainer.querySelectorAll('.team-item').forEach(item => {
+      const text = item.textContent.toLowerCase();
+      item.style.display = (!q || text.includes(q)) ? '' : 'none';
+    });
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const matchSearchInput = document.getElementById('input-team-search-match');
+  if (matchSearchInput) {
+    matchSearchInput.addEventListener('input', (e) => {
+      applyTeamSearchFilter(e.target.value);
+    });
+  }
+
+  const pitSearchInput = document.getElementById('input-team-search-pit');
+  if (pitSearchInput) {
+    pitSearchInput.addEventListener('input', (e) => {
+      applyTeamSearchFilter(e.target.value);
+    });
+  }
+
+  // Also hook into scouting subtab buttons to re-apply filter on tab switch without resetting
+  const subtabButtons = document.querySelectorAll('#scouting-subtabs .tab');
+  subtabButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      // Small timeout to let DOM active class update first
+      setTimeout(() => {
+        applyTeamSearchFilter(currentTeamSearchQuery);
+      }, 10);
+    });
+  });
+});
 
 function renderMatchTeamList(teams) {
   console.time('[Timing] renderMatchTeamList');
@@ -585,12 +665,12 @@ function renderPitTeamList(teams) {
     });
 
     const scoutBtn = document.createElement('button');
-    scoutBtn.className = 'btn-scout-quick btn-scout-quick-pit';
+    scoutBtn.className = 'btn btn-small btn-primary';
     scoutBtn.style.cssText = 'width: auto; padding: 4px 10px; font-size: 0.8rem; display: inline-flex; align-items: center; gap: 4px;';
     
     const isScouted = typeof isTeamScouted === 'function' ? isTeamScouted(team.teamNumber, selectedEvent?.code) : false;
     if (isScouted) {
-      scoutBtn.classList.add('btn-scouted');
+      scoutBtn.style.background = 'var(--success)';
       const checkSpan = document.createElement('span');
       checkSpan.textContent = '✓';
       const textSpan = document.createElement('span');
