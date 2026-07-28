@@ -198,7 +198,10 @@ function renderTeamDetail(detail, teamNumber, prefix = 'td-') {
   // Location
   const locEl = document.getElementById(`${prefix}team-location`);
   if (locEl) {
-    const parts = [detail.city, detail.state, detail.country].filter(Boolean);
+    const city = detail.city || detail.location?.city || '';
+    const state = detail.state || detail.location?.state || '';
+    const country = detail.country || detail.location?.country || '';
+    const parts = [city, state, country].filter(Boolean);
     locEl.textContent = parts.join(', ') || 'Location unknown';
   }
 
