@@ -525,6 +525,83 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
+// ====== Unified Team Selection, Deselection & UI Sync ======
+function setGlobalSelectedTeam(teamNumber, eventCode, teamObj) {
+  if (currentSelectedTeamNumber === teamNumber) {
+    // Deselect / Close
+    currentSelectedTeamNumber = null;
+  } else {
+    // Select new
+    currentSelectedTeamNumber = teamNumber;
+  }
+
+  // Update visibility and contents of detail areas
+  const detailMatch = document.getElementById('team-detail-area-match');
+  const detailPit = document.getElementById('team-detail-area-pit');
+
+  if (currentSelectedTeamNumber === null) {
+    if (detailMatch) detailMatch.classList.add('hidden');
+    if (detailPit) detailPit.classList.add('hidden');
+  } else {
+    // Determine team object if not provided
+    const obj = teamObj || currentEventTeams.find(t => t.teamNumber === currentSelectedTeamNumber);
+
+    // Show Match detail if active or update both
+    if (detailMatch) detailMatch.classList.remove('hidden');
+    if (typeof loadTeamDetail === 'function') {
+      loadTeamDetail(currentSelectedTeamNumber, eventCode || selectedEvent?.code || '');
+    }
+
+    // Show Pit detail if active or populate pit fields
+    if (detailPit) detailPit.classList.remove('hidden');
+    const pitNumEl = document.getElementById('td-pit-team-number');
+    if (pitNumEl) pitNumEl.textContent = `#${currentSelectedTeamNumber}`;
+    const teamName = obj?.name || obj?.nameFull || obj?.nameShort || obj?.schoolName || obj?.teamNameCalc || 'Team Name Unavailable';
+    const pitNameEl = document.getElementById('td-pit-team-name');
+    if (pitNameEl) pitNameEl.textContent = teamName;
+
+    if (typeof loadTeamDetail === 'function') {
+      loadTeamDetail(currentSelectedTeamNumber, eventCode || selectedEvent?.code || '', 'td-pit-');
+    }
+
+    const scoutBtn = document.getElementById('team-detail-card-pit')?.querySelector('#btn-scout-team') || document.getElementById('team-detail-card-pit')?.querySelector('.btn-primary');
+    if (scoutBtn) {
+      const newBtn = scoutBtn.cloneNode(true);
+      scoutBtn.parentNode.replaceChild(newBtn, scoutBtn);
+      newBtn.addEventListener('click', () => {
+        if (typeof openPitScoutForm === 'function') {
+          openPitScoutForm(currentSelectedTeamNumber, eventCode || selectedEvent?.code);
+        }
+      });
+    }
+  }
+
+  // Refresh both team lists to update button text/state ("View Detail" vs "Close Detail") across both tabs
+  if (currentEventTeams && currentEventTeams.length > 0) {
+    renderMatchTeamList(currentEventTeams);
+    renderPitTeamList(currentEventTeams);
+    // Re-apply search filter so filter state isn't lost on re-render
+    applyTeamSearchFilter(currentTeamSearchQuery);
+  }
+}
+
+// Wire up close detail buttons
+document.addEventListener('DOMContentLoaded', () => {
+  const closeMatchBtn = document.getElementById('btn-close-team-detail-match');
+  if (closeMatchBtn) {
+    closeMatchBtn.addEventListener('click', () => {
+      setGlobalSelectedTeam(null, selectedEvent?.code);
+    });
+  }
+
+  const closePitBtn = document.getElementById('btn-close-team-detail-pit');
+  if (closePitBtn) {
+    closePitBtn.addEventListener('click', () => {
+      setGlobalSelectedTeam(null, selectedEvent?.code);
+    });
+  }
+});
+
 function renderMatchTeamList(teams) {
   console.time('[Timing] renderMatchTeamList');
   const container = document.getElementById('team-list-match');
@@ -567,21 +644,16 @@ function renderMatchTeamList(teams) {
     const btnGroup = document.createElement('div');
     btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
 
-    // Dedicated View Detail button for Match with toggle behavior matching Pit
+    const isSelected = currentSelectedTeamNumber === team.teamNumber;
+
+    // View/Close Detail button for Match
     const viewDetailBtn = document.createElement('button');
-    viewDetailBtn.className = 'btn btn-small btn-secondary';
+    viewDetailBtn.className = isSelected ? 'btn btn-small btn-primary' : 'btn btn-small btn-secondary';
     viewDetailBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
-    viewDetailBtn.textContent = 'View Detail';
+    viewDetailBtn.textContent = isSelected ? 'Close Detail' : 'View Detail';
     viewDetailBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const detailMatch = document.getElementById('team-detail-area-match');
-      if (currentSelectedTeamNumber === team.teamNumber && detailMatch && !detailMatch.classList.contains('hidden')) {
-        // Toggle close / hide
-        currentSelectedTeamNumber = null;
-        detailMatch.classList.add('hidden');
-      } else {
-        wireTeamMatchDetailClick(team.teamNumber, selectedEvent?.code || '', team);
-      }
+      setGlobalSelectedTeam(team.teamNumber, selectedEvent?.code || '', team);
     });
 
     // Match scout quick button (+ Match Scout)
@@ -647,21 +719,16 @@ function renderPitTeamList(teams) {
     const btnGroup = document.createElement('div');
     btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
 
-    // Dedicated View Detail button for Pit with toggle behavior
+    const isSelected = currentSelectedTeamNumber === team.teamNumber;
+
+    // View/Close Detail button for Pit
     const viewDetailBtn = document.createElement('button');
-    viewDetailBtn.className = 'btn btn-small btn-secondary';
+    viewDetailBtn.className = isSelected ? 'btn btn-small btn-primary' : 'btn btn-small btn-secondary';
     viewDetailBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
-    viewDetailBtn.textContent = 'View Detail';
+    viewDetailBtn.textContent = isSelected ? 'Close Detail' : 'View Detail';
     viewDetailBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const detailPit = document.getElementById('team-detail-area-pit');
-      if (currentSelectedTeamNumber === team.teamNumber && detailPit && !detailPit.classList.contains('hidden')) {
-        // Toggle close / hide
-        currentSelectedTeamNumber = null;
-        detailPit.classList.add('hidden');
-      } else {
-        wireTeamPitDetailClick(team.teamNumber, selectedEvent?.code || '', team);
-      }
+      setGlobalSelectedTeam(team.teamNumber, selectedEvent?.code || '', team);
     });
 
     const scoutBtn = document.createElement('button');
@@ -700,44 +767,6 @@ function renderPitTeamList(teams) {
     refreshTeamListScoutedState();
   }
   console.timeEnd('[Timing] renderPitTeamList');
-}
-
-// ====== Wire Team Detail Clicks ======
-function wireTeamMatchDetailClick(teamNumber, eventCode, teamObj) {
-  currentSelectedTeamNumber = teamNumber;
-  console.log('Team detail handler fired for team:', teamNumber, 'teamObj:', teamObj);
-  const detailMatch = document.getElementById('team-detail-area-match');
-  if (detailMatch) detailMatch.classList.remove('hidden');
-
-  if (typeof loadTeamDetail === 'function') {
-    loadTeamDetail(teamNumber, eventCode);
-  } else {
-    console.error('loadTeamDetail function is not defined!');
-  }
-}
-
-function wireTeamPitDetailClick(teamNumber, eventCode, teamObj) {
-  currentSelectedTeamNumber = teamNumber;
-  const area = document.getElementById('team-detail-area-pit');
-  if (area) area.classList.remove('hidden');
-  document.getElementById('td-pit-team-number').textContent = `#${teamNumber}`;
-  const teamName = teamObj?.name || teamObj?.nameFull || teamObj?.nameShort || teamObj?.schoolName || teamObj?.teamNameCalc || 'Team Name Unavailable';
-  document.getElementById('td-pit-team-name').textContent = teamName;
-
-  if (typeof loadTeamDetail === 'function') {
-    loadTeamDetail(teamNumber, eventCode, 'td-pit-');
-  }
-
-  const scoutBtn = document.getElementById('team-detail-card-pit')?.querySelector('#btn-scout-team') || document.getElementById('team-detail-card-pit')?.querySelector('.btn-primary');
-  if (scoutBtn) {
-    const newBtn = scoutBtn.cloneNode(true);
-    scoutBtn.parentNode.replaceChild(newBtn, scoutBtn);
-    newBtn.addEventListener('click', () => {
-      if (typeof openPitScoutForm === 'function') {
-        openPitScoutForm(teamNumber, eventCode);
-      }
-    });
-  }
 }
 
 // ====== Handle search button click ======
