@@ -119,52 +119,72 @@ function filterEvents(events, query) {
 
 // ====== Get teams for a specific event via Worker ======
 async function getEventTeams(eventCode, season) {
-  const result = await callWorker(`/teams?eventCode=${encodeURIComponent(eventCode)}&season=${encodeURIComponent(season || getSelectedSeason())}`);
-  return result.teams || [];
+  console.time('[Timing] Worker /teams call');
+  try {
+    const result = await callWorker(`/teams?eventCode=${encodeURIComponent(eventCode)}&season=${encodeURIComponent(season || getSelectedSeason())}`);
+    console.timeEnd('[Timing] Worker /teams call');
+    return result.teams || [];
+  } catch (err) {
+    console.timeEnd('[Timing] Worker /teams call');
+    throw err;
+  }
 }
 
 // ====== Cache event data to Firestore ======
 async function cacheEventToFirestore(eventData, ftcTeams) {
   if (!eventData || !eventData.code) return;
 
-  const eventRef = db.collection('events').doc(eventData.code);
-  await eventRef.set({
-    name: eventData.name,
-    date: eventData.startDate ? new Date(eventData.startDate) : null,
-    ftcTeams: ftcTeams.map(t => ({
-      teamNumber: t.teamNumber,
-      name: t.name || t.nameFull || t.nameShort || t.schoolName || t.teamNameCalc || '',
-      nameShort: t.nameShort || '',
-      nameFull: t.nameFull || '',
-      schoolName: t.schoolName || '',
-      city: t.city || '',
-      stateProv: t.stateProv || '',
-      country: t.country || ''
-    })),
-    cachedAt: firebase.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
-
-  return eventRef;
+  console.time('[Timing] Firestore cache write (cacheEventToFirestore)');
+  try {
+    const eventRef = db.collection('events').doc(eventData.code);
+    await eventRef.set({
+      name: eventData.name,
+      date: eventData.startDate ? new Date(eventData.startDate) : null,
+      ftcTeams: ftcTeams.map(t => ({
+        teamNumber: t.teamNumber,
+        name: t.name || t.nameFull || t.nameShort || t.schoolName || t.teamNameCalc || '',
+        nameShort: t.nameShort || '',
+        nameFull: t.nameFull || '',
+        schoolName: t.schoolName || '',
+        city: t.city || '',
+        stateProv: t.stateProv || '',
+        country: t.country || ''
+      })),
+      cachedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+    console.timeEnd('[Timing] Firestore cache write (cacheEventToFirestore)');
+    return eventRef;
+  } catch (err) {
+    console.timeEnd('[Timing] Firestore cache write (cacheEventToFirestore)');
+    throw err;
+  }
 }
 
 // ====== Load cached event from Firestore ======
 async function getCachedEvent(eventCode) {
-  const doc = await db.collection('events').doc(eventCode).get();
-  if (doc.exists) {
-    const data = doc.data();
-    // Normalize ftcTeams if stored as numbers or objects
-    if (data.ftcTeams) {
-      data.ftcTeams = data.ftcTeams.map(t => {
-        if (typeof t === 'number') return { teamNumber: t, name: '', nameShort: '', nameFull: '', schoolName: '' };
-        return {
-          ...t,
-          name: t.name || t.nameShort || t.nameFull || t.schoolName || ''
-        };
-      });
+  console.time('[Timing] Firestore cache read (getCachedEvent)');
+  try {
+    const doc = await db.collection('events').doc(eventCode).get();
+    console.timeEnd('[Timing] Firestore cache read (getCachedEvent)');
+    if (doc.exists) {
+      const data = doc.data();
+      // Normalize ftcTeams if stored as numbers or objects
+      if (data.ftcTeams) {
+        data.ftcTeams = data.ftcTeams.map(t => {
+          if (typeof t === 'number') return { teamNumber: t, name: '', nameShort: '', nameFull: '', schoolName: '' };
+          return {
+            ...t,
+            name: t.name || t.nameShort || t.nameFull || t.schoolName || ''
+          };
+        });
+      }
+      return { id: doc.id, ...data };
     }
-    return { id: doc.id, ...data };
+    return null;
+  } catch (err) {
+    console.timeEnd('[Timing] Firestore cache read (getCachedEvent)');
+    throw err;
   }
-  return null;
 }
 
 // ====== Render event list (full results area) ======
@@ -292,6 +312,7 @@ function clearSelectedEvent() {
 
 // ====== Select an event ======
 async function selectEvent(eventData) {
+  console.time('[Timing] selectEvent total');
   selectedEvent = eventData;
 
   // Highlight this event in the search results list (if rendered)
@@ -316,34 +337,51 @@ async function selectEvent(eventData) {
       // Fetch from Worker (which calls FIRST API server-side)
       ftcTeams = await getEventTeams(eventData.code, getSelectedSeason());
       
-      // Batch fetch team details from FTCScout GraphQL API using batched aliasing for ALL teams in the event
+      // Batch fetch team details from FTCScout GraphQL API using batched aliasing for ALL teams in the event concurrently
       if (ftcTeams && ftcTeams.length > 0 && typeof fetchTeamDetailsBatch === 'function') {
         const season = getSelectedSeason();
         const batchSize = 40;
-        const allTeamNumbers = ftcTeams.map(t => t.teamNumber);
+        const chunks = [];
         
-        console.log(`[FTCScout Batch] Starting batched fetch for ${allTeamNumbers.length} teams in chunks of ${batchSize}`);
+        for (let i = 0; i < ftcTeams.length; i += batchSize) {
+          chunks.push({
+            chunkTeamNums: ftcTeams.slice(i, i + batchSize).map(t => t.teamNumber),
+            chunkTeams: ftcTeams.slice(i, i + batchSize),
+            index: i / batchSize
+          });
+        }
         
-        for (let i = 0; i < allTeamNumbers.length; i += batchSize) {
-          const chunkTeamNums = allTeamNumbers.slice(i, i + batchSize);
-          const chunkTeams = ftcTeams.slice(i, i + batchSize);
-          
+        console.log(`[FTCScout Batch] Starting concurrent batched fetch for ${ftcTeams.length} teams across ${chunks.length} chunks (batch size ${batchSize})`);
+        
+        await Promise.all(chunks.map(async ({ chunkTeamNums, chunkTeams, index }) => {
+          const timerLabel = `[FTCScout Batch] Chunk #${index} (${chunkTeamNums.length} teams)`;
+          const cacheTimerLabel = `[Timing] Chunk #${index} team detail caching`;
+          console.time(timerLabel);
           try {
             const batchResults = await fetchTeamDetailsBatch(chunkTeamNums, season);
+            console.timeEnd(timerLabel);
+            
+            console.time(cacheTimerLabel);
+            const cachePromises = [];
             for (let t of chunkTeams) {
               const detail = batchResults[t.teamNumber];
               if (detail && detail.name) {
                 t.name = detail.name;
                 t.nameShort = detail.name;
                 if (typeof cacheTeamDetail === 'function') {
-                  await cacheTeamDetail(t.teamNumber, detail);
+                  cachePromises.push(cacheTeamDetail(t.teamNumber, detail));
                 }
               }
             }
+            if (cachePromises.length > 0) {
+              await Promise.all(cachePromises);
+            }
+            console.timeEnd(cacheTimerLabel);
           } catch (batchErr) {
-            console.error('[FTCScout Batch] Batch fetch failed for chunk:', batchErr);
+            console.timeEnd(timerLabel);
+            console.error(`[FTCScout Batch] Batch fetch failed for chunk #${index}:`, batchErr);
           }
-        }
+        }));
       }
 
       // Cache result with populated names
@@ -363,8 +401,10 @@ async function selectEvent(eventData) {
     if (typeof watchMatchScoutStatus === 'function') {
       watchMatchScoutStatus(eventData.code);
     }
+    console.timeEnd('[Timing] selectEvent total');
   } catch (err) {
     hideLoading();
+    console.timeEnd('[Timing] selectEvent total');
     console.error('Failed to fetch teams:', err);
     document.getElementById('selected-event-teams-count').textContent = 'Failed to load teams';
     showError('event-error', 'Could not load teams. Check your connection and try again.');
@@ -376,8 +416,10 @@ let onScoutedStateChanged = null;
 
 // ====== Render team lists for both match and pit scouting ======
 function renderTeamList(teams) {
+  console.time('[Timing] renderTeamList total');
   renderMatchTeamList(teams);
   renderPitTeamList(teams);
+  console.timeEnd('[Timing] renderTeamList total');
 }
 
 // Shared selected team across sub-tabs
@@ -385,21 +427,22 @@ let currentSelectedTeamNumber = null;
 let currentEventTeams = [];
 
 function renderMatchTeamList(teams) {
+  console.time('[Timing] renderMatchTeamList');
   const container = document.getElementById('team-list-match');
   const status = document.getElementById('team-list-status-match');
-  if (!container || !status) return;
+  if (!container || !status) {
+    console.timeEnd('[Timing] renderMatchTeamList');
+    return;
+  }
   container.innerHTML = '';
 
   if (!teams || teams.length === 0) {
     status.textContent = 'No teams found for this event.';
+    console.timeEnd('[Timing] renderMatchTeamList');
     return;
   }
 
   currentEventTeams = teams;
-  if (teams.length > 0) {
-    console.log('DEBUG: Raw first team object from FIRST API / cache:', teams[0]);
-  }
-
   status.textContent = `${teams.length} team(s)`;
   const sorted = [...teams].sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
 
@@ -461,16 +504,22 @@ function renderMatchTeamList(teams) {
     item.appendChild(btnGroup);
     container.appendChild(item);
   });
+  console.timeEnd('[Timing] renderMatchTeamList');
 }
 
 function renderPitTeamList(teams) {
+  console.time('[Timing] renderPitTeamList');
   const container = document.getElementById('team-list-pit');
   const status = document.getElementById('team-list-status-pit');
-  if (!container || !status) return;
+  if (!container || !status) {
+    console.timeEnd('[Timing] renderPitTeamList');
+    return;
+  }
   container.innerHTML = '';
 
   if (!teams || teams.length === 0) {
     status.textContent = 'No teams found for this event.';
+    console.timeEnd('[Timing] renderPitTeamList');
     return;
   }
 
@@ -551,6 +600,7 @@ function renderPitTeamList(teams) {
   if (typeof refreshTeamListScoutedState === 'function') {
     refreshTeamListScoutedState();
   }
+  console.timeEnd('[Timing] renderPitTeamList');
 }
 
 // ====== Wire Team Detail Clicks ======
