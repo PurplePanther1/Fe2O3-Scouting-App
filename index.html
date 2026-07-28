@@ -187,6 +187,9 @@
             <p><strong id="selected-event-name"></strong></p>
             <p class="help-text" id="selected-event-code"></p>
             <p class="help-text" id="selected-event-teams-count"></p>
+            <button id="btn-export-event-sheets" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">📊 Export All Teams to Sheets</button>
+            <p id="event-export-error" class="error-message"></p>
+            <p id="event-export-success" class="success-message"></p>
           </div>
           <p id="event-error" class="error-message"></p>
         </div>
@@ -234,7 +237,10 @@
                 <p class="help-text" id="td-match-count" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
                 <div id="td-match-entries"></div>
               </div>
-              <button id="btn-close-team-detail-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">Close Detail</button>
+              <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📊 Export to Sheets</button>
+              <p id="td-export-match-error" class="error-message"></p>
+              <p id="td-export-match-success" class="success-message"></p>
+              <button id="btn-close-team-detail-match" class="btn btn-outline" style="margin-top:8px; width:100%; font-size:0.85rem;">Close Detail</button>
             </div>
             <p id="td-error" class="error-message"></p>
           </div>
@@ -269,7 +275,10 @@
                 <div id="td-pit-awards-list"></div>
               </div>
               <button id="btn-scout-team" class="btn btn-primary" style="margin-top:16px">Scout This Team (Pit)</button>
-              <button id="btn-close-team-detail-pit" class="btn btn-outline" style="margin-top:12px; width:100%; font-size:0.85rem;">Close Detail</button>
+              <button id="btn-export-team-pit" class="btn btn-outline" style="margin-top:12px; width:100%; font-size:0.85rem;">📊 Export to Sheets</button>
+              <p id="td-export-pit-error" class="error-message"></p>
+              <p id="td-export-pit-success" class="success-message"></p>
+              <button id="btn-close-team-detail-pit" class="btn btn-outline" style="margin-top:8px; width:100%; font-size:0.85rem;">Close Detail</button>
             </div>
             <p id="td-pit-error" class="error-message"></p>
           </div>
@@ -450,6 +459,8 @@
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+  <!-- Google Identity Services (for client-side Google Sheets export authorization) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
   <script src="js/firebase-config.js"></script>
   <script src="js/auth.js"></script>
   <script src="js/team.js"></script>
@@ -461,5 +472,6 @@
   <script src="js/match-scout.js"></script>
   <script src="js/form-builder.js"></script>
   <script src="js/app.js"></script>
+  <script src="js/sheets-export.js"></script>
 </body>
 </html>
