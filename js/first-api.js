@@ -316,20 +316,47 @@ async function selectEvent(eventData) {
       // Fetch from Worker (which calls FIRST API server-side)
       ftcTeams = await getEventTeams(eventData.code, getSelectedSeason());
       
-      // Batch fetch team names from FTCScout GraphQL API if missing
+      // Batch fetch team names from FTCScout GraphQL API using batched aliasing if missing
       if (ftcTeams && ftcTeams.length > 0) {
         const season = getSelectedSeason();
-        const chunkSize = 6;
-        for (let i = 0; i < ftcTeams.length; i += chunkSize) {
-          const chunk = ftcTeams.slice(i, i + chunkSize);
-          await Promise.all(chunk.map(async (t) => {
-            if (!t.name || t.name.trim() === '') {
-              try {
-                // Check local team detail cache first to avoid GQL calls if possible
-                const cachedDetail = typeof getCachedTeamDetail === 'function' ? await getCachedTeamDetail(t.teamNumber) : null;
-                if (cachedDetail && cachedDetail.name) {
-                  t.name = cachedDetail.name;
-                } else if (typeof fetchTeamDetail === 'function') {
+        const missingTeams = [];
+        
+        // First check local Firestore cache for team details
+        for (let t of ftcTeams) {
+          if (!t.name || t.name.trim() === '') {
+            const cachedDetail = typeof getCachedTeamDetail === 'function' ? await getCachedTeamDetail(t.teamNumber) : null;
+            if (cachedDetail && cachedDetail.name) {
+              t.name = cachedDetail.name;
+              t.nameShort = cachedDetail.name;
+            } else {
+              missingTeams.push(t);
+            }
+          }
+        }
+
+        // If there are still teams missing names, fetch in batches using GraphQL aliasing (e.g. chunks of 40)
+        if (missingTeams.length > 0 && typeof fetchTeamDetailsBatch === 'function') {
+          const batchSize = 40;
+          for (let i = 0; i < missingTeams.length; i += batchSize) {
+            const chunk = missingTeams.slice(i, i + batchSize);
+            const teamNumbers = chunk.map(t => t.teamNumber);
+            try {
+              const batchResults = await fetchTeamDetailsBatch(teamNumbers, season);
+              for (let t of chunk) {
+                const detail = batchResults[t.teamNumber];
+                if (detail && detail.name) {
+                  t.name = detail.name;
+                  t.nameShort = detail.name;
+                  if (typeof cacheTeamDetail === 'function') {
+                    await cacheTeamDetail(t.teamNumber, detail);
+                  }
+                }
+              }
+            } catch (batchErr) {
+              console.warn('Batch fetch failed, falling back to individual fetch or defaults:', batchErr);
+              // Fallback per team if batch failed
+              for (let t of chunk) {
+                try {
                   const detail = await fetchTeamDetail(t.teamNumber, season);
                   if (detail && detail.name) {
                     t.name = detail.name;
@@ -338,12 +365,12 @@ async function selectEvent(eventData) {
                       await cacheTeamDetail(t.teamNumber, detail);
                     }
                   }
+                } catch (singleErr) {
+                  console.warn(`Failed to fetch team ${t.teamNumber}:`, singleErr);
                 }
-              } catch (e) {
-                console.warn(`Failed to fetch team name for ${t.teamNumber}:`, e);
               }
             }
-          }));
+          }
         }
       }
 
@@ -410,17 +437,7 @@ function renderMatchTeamList(teams) {
     item.dataset.teamNumber = team.teamNumber;
 
     const leftGroup = document.createElement('div');
-    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0; cursor:pointer';
-    leftGroup.addEventListener('click', () => {
-      if (currentSelectedTeamNumber === team.teamNumber) {
-        // Toggle close / hide
-        currentSelectedTeamNumber = null;
-        const detailMatch = document.getElementById('team-detail-area-match');
-        if (detailMatch) detailMatch.classList.add('hidden');
-      } else {
-        wireTeamMatchDetailClick(team.teamNumber, selectedEvent?.code || '', team);
-      }
-    });
+    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0;';
 
     const numSpan = document.createElement('span');
     numSpan.className = 'team-number';
@@ -436,14 +453,21 @@ function renderMatchTeamList(teams) {
     const btnGroup = document.createElement('div');
     btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
 
-    // Dedicated View Detail button
+    // Dedicated View Detail button for Match with toggle behavior matching Pit
     const viewDetailBtn = document.createElement('button');
     viewDetailBtn.className = 'btn btn-small btn-secondary';
     viewDetailBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
     viewDetailBtn.textContent = 'View Detail';
     viewDetailBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      wireTeamMatchDetailClick(team.teamNumber, selectedEvent?.code || '', team);
+      const detailMatch = document.getElementById('team-detail-area-match');
+      if (currentSelectedTeamNumber === team.teamNumber && detailMatch && !detailMatch.classList.contains('hidden')) {
+        // Toggle close / hide
+        currentSelectedTeamNumber = null;
+        detailMatch.classList.add('hidden');
+      } else {
+        wireTeamMatchDetailClick(team.teamNumber, selectedEvent?.code || '', team);
+      }
     });
 
     // Match scout quick button (+ Match Scout)

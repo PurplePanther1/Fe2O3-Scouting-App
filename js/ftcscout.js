@@ -58,6 +58,53 @@ async function fetchTeamDetail(teamNumber, season) {
   return data.teamByNumber;
 }
 
+// ====== Fetch multiple team details in a single batched GraphQL query via aliasing ======
+async function fetchTeamDetailsBatch(teamNumbers, season) {
+  if (!teamNumbers || teamNumbers.length === 0) return {};
+  
+  // Construct aliased query string
+  // e.g. { t1234: teamByNumber(number: 1234) { number name location { city state country } } t5678: teamByNumber(...) }
+  const fields = teamNumbers.map(num => {
+    const alias = `t_${num}`;
+    return `
+      ${alias}: teamByNumber(number: ${num}) {
+        number
+        name
+        location { city state country }
+        rookieYear
+        website
+        quickStats(season: ${season}) {
+          season
+          tot { value rank }
+          auto { value rank }
+          dc { value rank }
+          eg { value rank }
+          count
+        }
+        awards {
+          season
+          eventCode
+          type
+          placement
+        }
+      }
+    `;
+  }).join('\n');
+
+  const query = `{ ${fields} }`;
+  const data = await graphQL(query);
+  
+  // Map back from aliases (t_1234 -> team object)
+  const results = {};
+  teamNumbers.forEach(num => {
+    const alias = `t_${num}`;
+    if (data && data[alias]) {
+      results[num] = data[alias];
+    }
+  });
+  return results;
+}
+
 // ====== Get or create cached team detail in Firestore ======
 async function getCachedTeamDetail(teamNumber) {
   try {
