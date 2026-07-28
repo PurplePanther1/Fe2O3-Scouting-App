@@ -18,26 +18,42 @@ service cloud.firestore {
       return teamData != null && teamData.roles != null && teamData.roles[request.auth.uid] == 'captain';
     }
 
+    // Rewritten to guard every get() with exists() first, same style as isTeamMember(),
+    // instead of binding a get()/null ternary to a variable — that eager `let` mixed a
+    // Resource type with a literal `null` (the source of the "Expected map" compiler
+    // warnings), and being a `let` it was evaluated unconditionally on every call, which
+    // is what made canEditOrDeleteEntry() throw (and deny) even on the entry.scoutedBy ==
+    // request.auth.uid branch that should have short-circuited past it.
     function canEditTemplates(teamId) {
-      let teamDoc = get(/databases/$(database)/documents/teams/$(teamId));
-      let teamData = teamDoc != null ? teamDoc.data : null;
-      return isAuth() && teamData != null && (
-        isCaptain(teamData) ||
-        (teamData.permissions != null &&
-         teamData.permissions[request.auth.uid] != null &&
-         teamData.permissions[request.auth.uid].canEditTemplates == true)
-      );
+      return isAuth()
+        && exists(/databases/$(database)/documents/teams/$(teamId))
+        && (
+          isCaptain(get(/databases/$(database)/documents/teams/$(teamId)).data) ||
+          (
+            get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null &&
+            get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid] != null &&
+            get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid].canEditTemplates == true
+          )
+        );
     }
 
     function canEditOrDeleteEntry(teamId, entry) {
-      let teamDoc = teamId != null ? get(/databases/$(database)/documents/teams/$(teamId)) : null;
-      let teamData = teamDoc != null ? teamDoc.data : null;
       return isAuth() && (
-        (teamData != null && isCaptain(teamData)) ||
-        entry.scoutedBy == request.auth.uid ||
-        (teamData != null && teamData.permissions != null &&
-         teamData.permissions[request.auth.uid] != null &&
-         teamData.permissions[request.auth.uid].canEditOtherEntries == true)
+        (
+          teamId != null
+          && exists(/databases/$(database)/documents/teams/$(teamId))
+          && isCaptain(get(/databases/$(database)/documents/teams/$(teamId)).data)
+        )
+        ||
+        entry.scoutedBy == request.auth.uid
+        ||
+        (
+          teamId != null
+          && exists(/databases/$(database)/documents/teams/$(teamId))
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid] != null
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid].canEditOtherEntries == true
+        )
       );
     }
 
@@ -154,7 +170,12 @@ service cloud.firestore {
     }
 
     match /pitScouting/{documentId} {
-      allow read: if isTeamMember(resource.data.teamId);
+      // resource is null for a brand-new (not-yet-created) document. Letting a
+      // null-resource read through is safe — there's no data to leak from a
+      // document that doesn't exist — and it's what allows the client's
+      // existence-check .get() (used to decide create vs. update) to succeed
+      // instead of being denied outright.
+      allow read: if resource == null || isTeamMember(resource.data.teamId);
       allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
       allow update: if isAuth()
         && canEditOrDeleteEntry(resource.data.teamId, resource.data)
@@ -163,7 +184,7 @@ service cloud.firestore {
     }
 
     match /matchScouting/{documentId} {
-      allow read: if isTeamMember(resource.data.teamId);
+      allow read: if resource == null || isTeamMember(resource.data.teamId);
       allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
       allow update: if isAuth()
         && canEditOrDeleteEntry(resource.data.teamId, resource.data)

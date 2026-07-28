@@ -60,6 +60,12 @@ async function loadExistingPitData(eventCode, teamNumber) {
     }
   } catch (err) {
     console.warn('Could not load existing pit data:', err);
+    // TEMPORARY DIAGNOSTIC — remove after tracking down the nonexistent-doc read issue
+    console.log('[DIAG pit-scout] loadExistingPitData FAILED for docId:', docId);
+    console.log('[DIAG pit-scout] full error object:', err);
+    console.log('[DIAG pit-scout] err.code:', err.code);
+    console.log('[DIAG pit-scout] err.message:', err.message);
+    console.log('[DIAG pit-scout] err.details:', err.details);
   }
   return null;
 }

@@ -123,7 +123,18 @@ async function saveMatchScoutForm() {
     try {
       // Check if doc exists (either currentMatchDocId or docId)
       let targetDocId = currentMatchDocId || docId;
-      const existingDoc = await db.collection('matchScouting').doc(targetDocId).get();
+      let existingDoc;
+      try {
+        existingDoc = await db.collection('matchScouting').doc(targetDocId).get();
+      } catch (existenceCheckErr) {
+        // TEMPORARY DIAGNOSTIC — remove after tracking down the nonexistent-doc read issue
+        console.log('[DIAG match-scout] existence-check .get() FAILED for targetDocId:', targetDocId);
+        console.log('[DIAG match-scout] full error object:', existenceCheckErr);
+        console.log('[DIAG match-scout] err.code:', existenceCheckErr.code);
+        console.log('[DIAG match-scout] err.message:', existenceCheckErr.message);
+        console.log('[DIAG match-scout] err.details:', existenceCheckErr.details);
+        throw existenceCheckErr;
+      }
       const isExisting = existingDoc.exists;
       const existingData = isExisting ? existingDoc.data() : null;
 
