@@ -216,6 +216,9 @@ function renderDynamicForm(container, fields, existingData) {
       case 'number':
         input = renderNumber(field, savedValue);
         break;
+      case 'counter':
+        input = renderCounter(field, savedValue);
+        break;
       case 'textarea':
         input = renderTextarea(field, savedValue);
         break;
@@ -240,14 +243,16 @@ function renderDynamicForm(container, fields, existingData) {
         if (!el) return;
         let val;
         if (field.type === 'dropdown' || field.type === 'text') {
-          val = el.value.trim();
+          val = el.value.trim() || null;
         } else if (field.type === 'number') {
-          val = el.value.trim();
-          val = val !== '' ? Number(val) : null;
+          const raw = el.value.trim();
+          val = raw !== '' ? Number(raw) : null;
+        } else if (field.type === 'counter') {
+          val = Number(el.value);
         } else if (field.type === 'textarea') {
-          val = el.value.trim();
+          val = el.value.trim() || null;
         }
-        values[field.id] = val || null;
+        values[field.id] = val;
       });
       return values;
     },
@@ -334,6 +339,102 @@ function renderText(field, savedValue) {
   if (field.required) input.required = true;
   if (savedValue) input.value = savedValue;
   return input;
+}
+
+function renderCounter(field, savedValue) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'counter-field';
+  wrapper.id = 'dyn-' + field.id;
+
+  const min = (field.min !== undefined && field.min !== null && field.min !== '') ? Number(field.min) : 0;
+  const max = (field.max !== undefined && field.max !== null && field.max !== '') ? Number(field.max) : null;
+  const step = (field.step !== undefined && field.step !== null && field.step !== '') ? Number(field.step) : 1;
+  const startValue = (field.defaultValue !== undefined && field.defaultValue !== null && field.defaultValue !== '') ? Number(field.defaultValue) : min;
+
+  let current = (savedValue !== undefined && savedValue !== null && savedValue !== '') ? Number(savedValue) : startValue;
+
+  const minusBtn = document.createElement('button');
+  minusBtn.type = 'button';
+  minusBtn.className = 'counter-btn counter-btn-minus';
+  minusBtn.textContent = '−';
+  minusBtn.setAttribute('aria-label', `Decrease ${field.label}`);
+
+  const display = document.createElement('span');
+  display.className = 'counter-display';
+
+  const plusBtn = document.createElement('button');
+  plusBtn.type = 'button';
+  plusBtn.className = 'counter-btn counter-btn-plus';
+  plusBtn.textContent = '+';
+  plusBtn.setAttribute('aria-label', `Increase ${field.label}`);
+
+  function render() {
+    display.textContent = current;
+    minusBtn.disabled = current <= min;
+    plusBtn.disabled = max !== null && current >= max;
+  }
+
+  minusBtn.addEventListener('click', () => {
+    if (current <= min) return;
+    current = Math.max(min, current - step);
+    render();
+    playCounterTone('down');
+  });
+
+  plusBtn.addEventListener('click', () => {
+    if (max !== null && current >= max) return;
+    current = max !== null ? Math.min(max, current + step) : current + step;
+    render();
+    playCounterTone('up');
+  });
+
+  render();
+
+  // Expose a `.value` property so this wrapper can be read/written by the
+  // generic getValues/validate/setValues code the same way a real <input> would be.
+  Object.defineProperty(wrapper, 'value', {
+    get() {
+      return String(current);
+    },
+    set(val) {
+      const num = Number(val);
+      current = Number.isFinite(num) ? num : min;
+      render();
+    }
+  });
+
+  wrapper.appendChild(minusBtn);
+  wrapper.appendChild(display);
+  wrapper.appendChild(plusBtn);
+
+  return wrapper;
+}
+
+// ====== Counter tap sound (Web Audio API — no external asset needed) ======
+let counterAudioCtx = null;
+function playCounterTone(direction) {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    if (!counterAudioCtx) {
+      counterAudioCtx = new AudioCtx();
+    }
+    if (counterAudioCtx.state === 'suspended') {
+      counterAudioCtx.resume();
+    }
+    const osc = counterAudioCtx.createOscillator();
+    const gain = counterAudioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = direction === 'up' ? 880 : 440;
+    gain.gain.setValueAtTime(0.15, counterAudioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.0001, counterAudioCtx.currentTime + 0.12);
+    osc.connect(gain);
+    gain.connect(counterAudioCtx.destination);
+    osc.start();
+    osc.stop(counterAudioCtx.currentTime + 0.12);
+  } catch (err) {
+    console.warn('Counter sound playback failed:', err);
+  }
 }
 
 function renderTextarea(field, savedValue) {

@@ -154,7 +154,10 @@ service cloud.firestore {
     }
 
     match /pitScouting/{documentId} {
-      allow read: if isTeamMember(resource.data.teamId);
+      // resource is null when the document doesn't exist yet (e.g. a team that
+      // hasn't been pit-scouted for this event) — allow that read through so it
+      // resolves to exists:false instead of a permission error; no data is exposed.
+      allow read: if resource == null || isTeamMember(resource.data.teamId);
       allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
       allow update: if isAuth()
         && canEditOrDeleteEntry(resource.data.teamId, resource.data)
@@ -163,7 +166,8 @@ service cloud.firestore {
     }
 
     match /matchScouting/{documentId} {
-      allow read: if isTeamMember(resource.data.teamId);
+      // Same as pitScouting above: allow reads of not-yet-created docs through.
+      allow read: if resource == null || isTeamMember(resource.data.teamId);
       allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
       allow update: if isAuth()
         && canEditOrDeleteEntry(resource.data.teamId, resource.data)

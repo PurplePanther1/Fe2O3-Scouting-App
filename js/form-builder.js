@@ -11,6 +11,7 @@ const FIELD_TYPES = [
   { value: 'dropdown', label: 'Dropdown (select one)' },
   { value: 'text', label: 'Short Text' },
   { value: 'number', label: 'Number' },
+  { value: 'counter', label: 'Counter (+/-)' },
   { value: 'textarea', label: 'Long Text / Notes' }
 ];
 
@@ -216,7 +217,12 @@ function openFieldEditor(index) {
   document.getElementById('bld-field-options').value = field?.options ? field.options.join('\n') : '';
   document.getElementById('bld-field-id-warning').textContent = '';
 
-  // Show/hide options textarea based on type
+  document.getElementById('bld-field-min').value = field?.min ?? 0;
+  document.getElementById('bld-field-max').value = field?.max ?? '';
+  document.getElementById('bld-field-step').value = field?.step ?? 1;
+  document.getElementById('bld-field-default').value = field?.defaultValue ?? '';
+
+  // Show/hide options/counter config based on type
   toggleOptionsField();
 
   document.getElementById('field-editor-modal').classList.remove('hidden');
@@ -230,7 +236,9 @@ function closeFieldEditor() {
 function toggleOptionsField() {
   const type = document.getElementById('bld-field-type').value;
   const optionsGroup = document.getElementById('bld-field-options-group');
+  const counterGroup = document.getElementById('bld-field-counter-group');
   optionsGroup.style.display = type === 'dropdown' ? 'block' : 'none';
+  counterGroup.style.display = type === 'counter' ? 'block' : 'none';
 }
 
 // ====== Save the field being edited ======
@@ -245,6 +253,10 @@ async function saveFieldEdit() {
   const type = document.getElementById('bld-field-type').value;
   const required = document.getElementById('bld-field-required').checked;
   const optionsRaw = document.getElementById('bld-field-options').value;
+  const minRaw = document.getElementById('bld-field-min').value.trim();
+  const maxRaw = document.getElementById('bld-field-max').value.trim();
+  const stepRaw = document.getElementById('bld-field-step').value.trim();
+  const defaultRaw = document.getElementById('bld-field-default').value.trim();
 
   if (!label) {
     errorEl.textContent = 'Field label is required.';
@@ -261,6 +273,10 @@ async function saveFieldEdit() {
   }
   if (type === 'dropdown' && !optionsRaw.trim()) {
     errorEl.textContent = 'Dropdown options are required. Enter one per line.';
+    return;
+  }
+  if (type === 'counter' && maxRaw !== '' && minRaw !== '' && Number(maxRaw) <= Number(minRaw)) {
+    errorEl.textContent = 'Counter maximum must be greater than the minimum.';
     return;
   }
 
@@ -282,6 +298,13 @@ async function saveFieldEdit() {
 
     if (type === 'dropdown') {
       fieldData.options = options;
+    }
+
+    if (type === 'counter') {
+      fieldData.min = minRaw !== '' ? Number(minRaw) : 0;
+      if (maxRaw !== '') fieldData.max = Number(maxRaw);
+      fieldData.step = stepRaw !== '' ? Number(stepRaw) : 1;
+      if (defaultRaw !== '') fieldData.defaultValue = Number(defaultRaw);
     }
 
     if (editingFieldIndex >= 0 && editingFieldIndex < fields.length) {
