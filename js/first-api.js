@@ -355,28 +355,47 @@ async function selectEvent(eventData) {
         
         await Promise.all(chunks.map(async ({ chunkTeamNums, chunkTeams, index }) => {
           const timerLabel = `[FTCScout Batch] Chunk #${index} (${chunkTeamNums.length} teams)`;
-          const cacheTimerLabel = `[Timing] Chunk #${index} team detail caching`;
+          const batchWriteTimerLabel = `[Timing] Chunk #${index} batched Firestore write`;
           console.time(timerLabel);
           try {
             const batchResults = await fetchTeamDetailsBatch(chunkTeamNums, season);
             console.timeEnd(timerLabel);
             
-            console.time(cacheTimerLabel);
-            const cachePromises = [];
-            for (let t of chunkTeams) {
-              const detail = batchResults[t.teamNumber];
-              if (detail && detail.name) {
+            console.time(batchWriteTimerLabel);
+            try {
+              const batch = db.batch();
+              let opCount = 0;
+              
+              for (let t of chunkTeams) {
+                const detail = batchResults[t.teamNumber];
+                if (!detail || detail.isError || !detail.name || detail.name.startsWith('Team #')) {
+                  continue;
+                }
                 t.name = detail.name;
                 t.nameShort = detail.name;
-                if (typeof cacheTeamDetail === 'function') {
-                  cachePromises.push(cacheTeamDetail(t.teamNumber, detail));
+                
+                const docRef = db.collection('teamDetails').doc(String(t.teamNumber));
+                batch.set(docRef, {
+                  ...detail,
+                  cachedAt: firebase.firestore.FieldValue.serverTimestamp()
+                }, { merge: true });
+                opCount++;
+                
+                // Firestore batch limit is 500 operations. Chunk size is 40, so this is well within limits.
+                if (opCount >= 450) {
+                  await batch.commit();
+                  batch = db.batch();
+                  opCount = 0;
                 }
               }
+              
+              if (opCount > 0) {
+                await batch.commit();
+              }
+            } catch (fsErr) {
+              console.warn('[FTCScout Batch] Batched Firestore cache write failed:', fsErr);
             }
-            if (cachePromises.length > 0) {
-              await Promise.all(cachePromises);
-            }
-            console.timeEnd(cacheTimerLabel);
+            console.timeEnd(batchWriteTimerLabel);
           } catch (batchErr) {
             console.timeEnd(timerLabel);
             console.error(`[FTCScout Batch] Batch fetch failed for chunk #${index}:`, batchErr);
