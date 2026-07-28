@@ -95,20 +95,22 @@ $('btn-create-team').addEventListener('click', async () => {
   try {
     const joinCode = generateJoinCode();
 
-    // Check if join code is unique
-    const existing = await db.collection('teams')
-      .where('joinCode', '==', joinCode)
-      .get();
-
-    if (!existing.empty) {
+    // Check if join code is unique via the public lookup collection (a plain
+    // query against `teams` can't be used for this anymore now that team reads
+    // are member-gated — a brand new team's creator isn't a member of anything yet)
+    const codeDoc = await db.collection('joinCodes').doc(joinCode).get();
+    if (codeDoc.exists) {
       // Extremely unlikely collision — just regenerate
       hideLoading();
       showError('create-error', 'Please try again (code collision).');
       return;
     }
 
-    // Create the team document with roles
-    const teamRef = await db.collection('teams').add({
+    // Pre-generate the ID so we can create the team doc, then the joinCodes
+    // lookup that validates against it, sequentially (avoids any ambiguity
+    // around rules reading same-batch pending writes).
+    const teamRef = db.collection('teams').doc();
+    await teamRef.set({
       name: teamName,
       joinCode: joinCode,
       members: [currentUser.uid],
@@ -116,6 +118,9 @@ $('btn-create-team').addEventListener('click', async () => {
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       createdBy: currentUser.uid
     });
+
+    await db.collection('joinCodes').doc(joinCode).set({ teamId: teamRef.id });
+    await db.collection('userTeams').doc(currentUser.uid).set({ teamId: teamRef.id, role: 'captain' });
 
     // Store team data for dashboard
     currentTeamData = {
@@ -159,42 +164,47 @@ $('btn-join-team').addEventListener('click', async () => {
 
   showLoading('Joining team...');
   try {
-    // Find team by join code
-    const snapshot = await db.collection('teams')
-      .where('joinCode', '==', joinCode)
-      .limit(1)
-      .get();
-
-    if (snapshot.empty) {
+    // Resolve the join code to a team ID via the public lookup collection —
+    // a direct query against `teams` won't work for a non-member anymore.
+    const codeDoc = await db.collection('joinCodes').doc(joinCode).get();
+    if (!codeDoc.exists) {
       hideLoading();
       showError('join-error', 'No team found with that join code. Check with your team lead.');
       return;
     }
 
-    const teamDoc = snapshot.docs[0];
-    const teamData = teamDoc.data();
+    const teamId = codeDoc.data().teamId;
+    const teamRef = db.collection('teams').doc(teamId);
 
-    // Store team data for dashboard
-    currentTeamData = {
-      id: teamDoc.id,
-      name: teamData.name,
-      joinCode: teamData.joinCode
-    };
-
-    // Check if user is already a member
-    if (teamData.members && teamData.members.includes(currentUser.uid)) {
-      hideLoading();
-      // Already a member — just go to main
-      $('main-team-name').textContent = teamData.name;
-      showJoinCodeOnDashboard(teamData.joinCode);
-      showScreen('screen-main');
-      return;
+    // If we're already a member, we can read the doc directly and just go to the dashboard.
+    try {
+      const existingSnap = await teamRef.get();
+      const existingData = existingSnap.data();
+      if (existingData.members && existingData.members.includes(currentUser.uid)) {
+        hideLoading();
+        currentTeamData = { id: teamId, name: existingData.name, joinCode: existingData.joinCode };
+        $('main-team-name').textContent = existingData.name;
+        showJoinCodeOnDashboard(existingData.joinCode);
+        showScreen('screen-main');
+        return;
+      }
+    } catch (notYetMemberErr) {
+      // Expected: reading the full team doc is denied until we're actually a member — fall through to join.
     }
 
-    // Add user to team members
-    await teamDoc.ref.update({
+    // Scoped self-join: rules only allow this specific update (appending our own uid
+    // and nothing else) for a non-member, which is exactly what's happening here.
+    await teamRef.update({
       members: firebase.firestore.FieldValue.arrayUnion(currentUser.uid)
     });
+
+    // Now that we're a member, we can read the full doc.
+    const joinedSnap = await teamRef.get();
+    const teamData = joinedSnap.data();
+
+    await db.collection('userTeams').doc(currentUser.uid).set({ teamId, role: 'member' });
+
+    currentTeamData = { id: teamId, name: teamData.name, joinCode: teamData.joinCode };
 
     hideLoading();
     $('main-team-name').textContent = teamData.name;

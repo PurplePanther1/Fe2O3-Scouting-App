@@ -6,6 +6,8 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // Direct membership check against the real team document. Safe to use anywhere
+    // EXCEPT the teams/{teamId} document's own read rule (see that rule for why).
     function isTeamMember(teamId) {
       return isAuth()
         && exists(/databases/$(database)/documents/teams/$(teamId))
@@ -21,8 +23,8 @@ service cloud.firestore {
       let teamData = teamDoc != null ? teamDoc.data : null;
       return isAuth() && teamData != null && (
         isCaptain(teamData) ||
-        (teamData.permissions != null && 
-         teamData.permissions[request.auth.uid] != null && 
+        (teamData.permissions != null &&
+         teamData.permissions[request.auth.uid] != null &&
          teamData.permissions[request.auth.uid].canEditTemplates == true)
       );
     }
@@ -40,59 +42,132 @@ service cloud.firestore {
     }
 
     match /teams/{teamId} {
-      allow read: if isAuth();
-      allow create: if isAuth();
-      allow update: if isTeamMember(teamId)
-        && (!request.resource.data.keys().hasAny(['roles', 'permissions'])
-            || resource.data.roles[request.auth.uid] == 'captain');
+      // Only real members can read the full document. resource.data is already the
+      // document being evaluated, so no get()/isTeamMember() (and no dependency on
+      // userTeams) is needed here at all.
+      allow read: if isAuth() && resource.data.members.hasAny([request.auth.uid]);
+
+      allow create: if isAuth()
+        && request.resource.data.members == [request.auth.uid]
+        && request.resource.data.roles.size() == 1
+        && request.resource.data.roles[request.auth.uid] == 'captain';
+
+      allow update: if isAuth() && (
+        // An existing member updating the team (captain required to touch
+        // roles/permissions/name/joinCode)
+        (
+          resource.data.members.hasAny([request.auth.uid])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode'])
+              || resource.data.roles[request.auth.uid] == 'captain')
+        )
+        ||
+        // A brand-new user joining: the ONLY change allowed is appending their own
+        // uid to `members` — this is what lets someone join without needing read
+        // access to the team doc first (they resolve the join code via the
+        // joinCodes lookup below, then blind-update by ID).
+        (
+          !resource.data.members.hasAny([request.auth.uid])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
+          && request.resource.data.members == resource.data.members.concat([request.auth.uid])
+        )
+      );
+
       allow delete: if false;
 
-      match /{document=**} {
-        allow read, update: if isTeamMember(teamId);
-        allow create: if isAuth() && request.resource.data.members.hasAny([request.auth.uid]);
+      match /formConfig/{configDoc} {
+        allow read: if isTeamMember(teamId);
+        allow create, update: if isAuth()
+          && exists(/databases/$(database)/documents/teams/$(teamId))
+          && canEditTemplates(teamId);
+        allow delete: if false;
+      }
+    }
+
+    // Denormalized per-user pointer to their current {teamId, role}. Used only so
+    // the private/contact rule below can check "is the requester the captain of the
+    // SAME team as the profile they're reading" without needing read access to the
+    // (member-gated) teams/{teamId} document itself. Self-write only, and the write
+    // is cross-validated against the real team doc, so it can't be forged to claim
+    // a membership/captaincy that isn't real.
+    match /userTeams/{uid} {
+      allow read: if isAuth() && request.auth.uid == uid;
+      allow create, update: if isAuth() && request.auth.uid == uid
+        && exists(/databases/$(database)/documents/teams/$(request.resource.data.teamId))
+        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.members.hasAny([uid])
+        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[uid] == request.resource.data.role;
+      allow delete: if false;
+    }
+
+    // Public lookup so a join code can be resolved to a team ID without needing
+    // read access to the (member-gated) team document itself. Exposing "this code
+    // maps to this team" isn't a new leak — that's exactly what a join code is for.
+    match /joinCodes/{code} {
+      allow read: if isAuth();
+      allow create: if isAuth()
+        && !exists(/databases/$(database)/documents/joinCodes/$(code))
+        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.joinCode == code
+        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[request.auth.uid] == 'captain';
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /users/{userId} {
+      // Public profile: display name + avatar only — not sensitive.
+      allow read: if isAuth();
+      allow create, update: if isAuth() && request.auth.uid == userId;
+      allow delete: if false;
+
+      // Private contact info (email): visible only to the user themself, or the
+      // captain of the same team (via the userTeams pointers above).
+      match /private/contact {
+        allow read: if isAuth() && (
+          request.auth.uid == userId
+          || (
+            exists(/databases/$(database)/documents/userTeams/$(request.auth.uid))
+            && exists(/databases/$(database)/documents/userTeams/$(userId))
+            && get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId
+               == get(/databases/$(database)/documents/userTeams/$(userId)).data.teamId
+            && get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.role == 'captain'
+          )
+        );
+        allow write: if isAuth() && request.auth.uid == userId;
         allow delete: if false;
       }
     }
 
     match /events/{eventCode} {
       allow read: if isAuth();
-      allow create, update: if isAuth();
+      allow create, update: if isAuth()
+        && request.resource.data.name is string
+        && request.resource.data.ftcTeams is list;
       allow delete: if false;
     }
 
     match /eventCache/{documentId} {
-      allow read, write: if isAuth();
+      allow read: if isAuth();
+      allow write: if isAuth() && request.resource.data.events is list;
     }
 
     match /teamDetails/{documentId} {
-      allow read, write: if isAuth();
-    }
-
-    match /teams/{teamId}/formConfig/{configDoc} {
       allow read: if isAuth();
-      allow create, update: if isAuth()
-        && exists(/databases/$(database)/documents/teams/$(teamId))
-        && canEditTemplates(teamId);
-      allow delete: if false;
+      allow write: if isAuth() && request.resource.data.name is string;
     }
 
     match /pitScouting/{documentId} {
-      allow read: if isAuth();
-      allow create: if isAuth();
-      allow update: if isAuth() 
+      allow read: if isTeamMember(resource.data.teamId);
+      allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
+      allow update: if isAuth()
         && canEditOrDeleteEntry(resource.data.teamId, resource.data)
-        && request.resource.data.scoutedBy == resource.data.scoutedBy
-        && request.resource.data.scoutedByEmail == resource.data.scoutedByEmail;
+        && request.resource.data.scoutedBy == resource.data.scoutedBy;
       allow delete: if isAuth() && canEditOrDeleteEntry(resource.data.teamId, resource.data);
     }
 
     match /matchScouting/{documentId} {
-      allow read: if isAuth();
-      allow create: if isAuth();
-      allow update: if isAuth() 
+      allow read: if isTeamMember(resource.data.teamId);
+      allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
+      allow update: if isAuth()
         && canEditOrDeleteEntry(resource.data.teamId, resource.data)
-        && request.resource.data.scoutedBy == resource.data.scoutedBy
-        && request.resource.data.scoutedByEmail == resource.data.scoutedByEmail;
+        && request.resource.data.scoutedBy == resource.data.scoutedBy;
       allow delete: if isAuth() && canEditOrDeleteEntry(resource.data.teamId, resource.data);
     }
   }

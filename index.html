@@ -146,7 +146,7 @@
 
   <!-- ====== SCREEN: Main App / Dashboard ====== -->
   <section id="screen-main" class="screen">
-    <div class="card" style="max-width:560px">
+    <div class="card dashboard-card">
       <!-- Dashboard header with team name + sign out -->
       <div id="dashboard-header">
         <div id="dashboard-team-info">
@@ -225,7 +225,10 @@
                 <span id="td-opr-badge" class="member-role-badge" style="font-size:0.8rem; padding:4px 10px">OPR: --</span>
               </div>
               <div id="td-awards" style="margin-top:12px">
-                <p class="help-text" style="font-size:0.8rem; margin-bottom:6px; font-weight:600">AWARDS</p>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; flex-wrap:wrap">
+                  <p class="help-text" style="font-size:0.8rem; margin-bottom:0; font-weight:600">AWARDS</p>
+                  <select id="td-awards-season-select" class="awards-season-select"></select>
+                </div>
                 <div id="td-awards-list"></div>
               </div>
               <!-- ====== Match Scouting Section in Team Detail ====== -->
@@ -271,7 +274,10 @@
                 <span id="td-pit-opr-badge" class="member-role-badge" style="font-size:0.8rem; padding:4px 10px">OPR: --</span>
               </div>
               <div id="td-pit-awards" style="margin-top:12px">
-                <p class="help-text" style="font-size:0.8rem; margin-bottom:6px; font-weight:600">AWARDS</p>
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; flex-wrap:wrap">
+                  <p class="help-text" style="font-size:0.8rem; margin-bottom:0; font-weight:600">AWARDS</p>
+                  <select id="td-pit-awards-season-select" class="awards-season-select"></select>
+                </div>
                 <div id="td-pit-awards-list"></div>
               </div>
               <button id="btn-scout-team" class="btn btn-primary" style="margin-top:16px">Scout This Team (Pit)</button>
@@ -296,6 +302,17 @@
             <code id="myteam-join-code-value"></code>
             <button id="btn-copy-myteam-code" class="btn btn-small btn-outline">Copy</button>
           </div>
+        </div>
+
+        <!-- Display name section -->
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">YOUR DISPLAY NAME</h3>
+          <p class="help-text">Shown to teammates in the member list and on scouting entries, instead of your account ID.</p>
+          <div style="display:flex; gap:8px; align-items:flex-start">
+            <input type="text" id="input-display-name" placeholder="e.g. Alex P." maxlength="40" style="margin-bottom:0" />
+            <button id="btn-save-display-name" class="btn btn-primary" style="width:auto; white-space:nowrap">Save</button>
+          </div>
+          <p id="display-name-status" class="help-text" style="font-size:0.8rem; margin-top:8px; margin-bottom:0"></p>
         </div>
 
         <!-- Member list -->

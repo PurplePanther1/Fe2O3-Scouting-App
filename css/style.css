@@ -405,6 +405,37 @@ input[type="password"]::placeholder {
   color: var(--text);
 }
 
+/* ====== Awards season filter (team detail pane) ====== */
+.awards-season-select {
+  padding: 4px 24px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.75rem;
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath fill='%23a0a0b8' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+
+.awards-season-select:focus {
+  border-color: var(--primary);
+}
+
+.awards-season-select option {
+  background: var(--card-bg);
+  color: var(--text);
+}
+
+.awards-season-select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ====== Event Search ====== */
 .event-search {
   display: flex;
@@ -930,6 +961,11 @@ input[type="password"]::placeholder {
   display: none !important;
 }
 
+/* ====== Dashboard Card (main app screen) ====== */
+.dashboard-card {
+  max-width: 560px;
+}
+
 /* ====== Responsive ====== */
 @media (max-width: 480px) {
   .screen {
@@ -939,5 +975,36 @@ input[type="password"]::placeholder {
   .card {
     padding: 24px 20px;
     border-radius: 16px;
+  }
+}
+
+/* Wider viewports (tablet/desktop): the app is still a single centered column,
+   but a 560px cap reads as a skinny banner on a full browser window — let the
+   main dashboard (and the forms/modals opened from it) breathe more. */
+@media (min-width: 700px) {
+  .dashboard-card {
+    max-width: 760px;
+  }
+
+  .modal-card {
+    max-width: 620px;
+  }
+
+  .team-list {
+    max-height: 520px;
+  }
+
+  .event-list {
+    max-height: 320px;
+  }
+}
+
+@media (min-width: 1100px) {
+  .dashboard-card {
+    max-width: 960px;
+  }
+
+  .modal-card {
+    max-width: 680px;
   }
 }

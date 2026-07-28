@@ -105,6 +105,130 @@ async function fetchTeamDetailsBatch(teamNumbers, season) {
   return results;
 }
 
+// ====== Fetch event names for (season, eventCode) pairs in a single batched GraphQL query ======
+async function fetchEventNamesBatch(pairs) {
+  if (!pairs || pairs.length === 0) return {};
+
+  const fields = pairs.map((p, i) => `
+    e${i}: eventByCode(season: ${p.season}, code: ${JSON.stringify(p.code)}) {
+      name
+    }
+  `).join('\n');
+
+  const data = await graphQL(`{ ${fields} }`);
+
+  const results = {};
+  pairs.forEach((p, i) => {
+    const alias = `e${i}`;
+    results[`${p.season}_${p.code}`] = (data && data[alias] && data[alias].name) || null;
+  });
+  return results;
+}
+
+// In-memory cache of resolved event names, keyed `${season}_${eventCode}`
+const eventNameCache = {};
+
+// Last-loaded raw team detail per detail-pane prefix, so the awards season filter can re-render without refetching
+const lastLoadedTeamDetail = {};
+
+// ====== Populate the awards season filter from a team's actual award history ======
+function populateAwardsSeasonSelect(prefix, awards) {
+  const select = document.getElementById(`${prefix}awards-season-select`);
+  if (!select) return;
+  select.innerHTML = '';
+
+  const seasons = Array.from(new Set((awards || []).map(a => a.season))).sort((a, b) => b - a);
+
+  if (seasons.length === 0) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No awards';
+    select.appendChild(opt);
+    select.disabled = true;
+    return;
+  }
+
+  select.disabled = false;
+  seasons.forEach(season => {
+    const opt = document.createElement('option');
+    opt.value = season;
+    opt.textContent = formatFtcSeasonLabel(season);
+    select.appendChild(opt);
+  });
+
+  // Default to the globally selected season if the team won something that season, else its most recent award season
+  const globalSeason = Number(getSelectedSeason());
+  select.value = seasons.includes(globalSeason) ? String(globalSeason) : String(seasons[0]);
+}
+
+// ====== Render the awards list for whichever season is picked in the filter ======
+async function renderAwardsList(prefix) {
+  const awardsList = document.getElementById(`${prefix}awards-list`);
+  const select = document.getElementById(`${prefix}awards-season-select`);
+  const stored = lastLoadedTeamDetail[prefix];
+  if (!awardsList || !stored) return;
+
+  if (!select || !select.value) {
+    awardsList.innerHTML = '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No awards found.</p>';
+    return;
+  }
+
+  const season = Number(select.value);
+  const seasonLabel = formatFtcSeasonLabel(season);
+  const filtered = (stored.detail.awards || []).filter(a => a.season === season);
+
+  if (filtered.length === 0) {
+    awardsList.innerHTML = `<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No awards for ${seasonLabel}.</p>`;
+    return;
+  }
+
+  awardsList.innerHTML = '<p class="help-text" style="font-size:0.8rem">Loading event names...</p>';
+
+  const uniquePairs = Array.from(new Set(filtered.map(a => a.eventCode)))
+    .map(code => ({ season, code }))
+    .filter(p => !(`${p.season}_${p.code}` in eventNameCache));
+
+  if (uniquePairs.length > 0) {
+    try {
+      const fetched = await fetchEventNamesBatch(uniquePairs);
+      Object.assign(eventNameCache, fetched);
+    } catch (err) {
+      console.warn('Failed to fetch event names for awards:', err);
+    }
+  }
+
+  // The user may have switched seasons while the fetch above was in flight
+  if (!select || Number(select.value) !== season) return;
+
+  awardsList.innerHTML = '';
+  filtered.forEach(award => {
+    const item = document.createElement('div');
+    item.style.cssText = 'padding:4px 0; font-size:0.85rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; gap:8px';
+    const nameSpan = document.createElement('span');
+    const placement = award.placement ? ` #${award.placement}` : '';
+    nameSpan.textContent = `${award.type}${placement}`;
+    const eventSpan = document.createElement('span');
+    eventSpan.style.cssText = 'color:var(--text-muted); font-size:0.75rem; text-align:right';
+    eventSpan.textContent = eventNameCache[`${season}_${award.eventCode}`] || award.eventCode;
+    item.appendChild(nameSpan);
+    item.appendChild(eventSpan);
+    awardsList.appendChild(item);
+  });
+}
+
+// Wire up the awards season filters (Match & Pit) once
+document.addEventListener('DOMContentLoaded', () => {
+  ['td-awards-season-select', 'td-pit-awards-season-select'].forEach(id => {
+    const select = document.getElementById(id);
+    if (select) {
+      select.addEventListener('change', () => {
+        const prefix = id.replace('awards-season-select', '');
+        renderAwardsList(prefix);
+      });
+    }
+  });
+});
+
 // ====== Get or create cached team detail in Firestore ======
 async function getCachedTeamDetail(teamNumber) {
   try {
@@ -266,36 +390,10 @@ function renderTeamDetail(detail, teamNumber, prefix = 'td-') {
     }
   }
 
-  // Awards
-  const awardsList = document.getElementById(`${prefix}awards-list`);
-  if (awardsList) {
-    awardsList.innerHTML = '';
-    
-    // Filter awards to only the current season for relevance, or show all if none for this season
-    const season = getSelectedSeason();
-    let filteredAwards = (detail.awards || []).filter(a => a.season === Number(season));
-    if (filteredAwards.length === 0) {
-      filteredAwards = detail.awards || [];
-    }
-    
-    if (filteredAwards.length > 0) {
-      filteredAwards.forEach(award => {
-        const item = document.createElement('div');
-        item.style.cssText = 'padding:4px 0; font-size:0.85rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between';
-        const nameSpan = document.createElement('span');
-        const placement = award.placement ? ` #${award.placement}` : '';
-        nameSpan.textContent = `${award.type}${placement}`;
-        const seasonSpan = document.createElement('span');
-        seasonSpan.style.cssText = 'color:var(--text-muted); font-size:0.75rem';
-        seasonSpan.textContent = `${award.season}`;
-        item.appendChild(nameSpan);
-        item.appendChild(seasonSpan);
-        awardsList.appendChild(item);
-      });
-    } else {
-      awardsList.innerHTML = '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No awards found.</p>';
-    }
-  }
+  // Awards — populate the season filter from this team's award history, then render that season's awards
+  lastLoadedTeamDetail[prefix] = { detail, teamNumber };
+  populateAwardsSeasonSelect(prefix, detail.awards || []);
+  renderAwardsList(prefix);
 }
 
 // ====== Wire up team list items to show detail on click ======

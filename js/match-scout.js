@@ -117,7 +117,7 @@ async function saveMatchScoutForm() {
 
     const docId = `${currentMatchEventCode}_${matchNumber}_${currentMatchTeamNumber}`;
     const teamId = currentTeamData?.id;
-    const userEmail = currentUser.email || currentUser.displayName || 'Unknown';
+    const userDisplayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
 
     showLoading('Saving match scouting data...');
     try {
@@ -127,15 +127,20 @@ async function saveMatchScoutForm() {
       const isExisting = existingDoc.exists;
       const existingData = isExisting ? existingDoc.data() : null;
 
+      const scoutedByUid = isExisting ? (existingData.scoutedBy || currentUser.uid) : currentUser.uid;
+
       const payload = {
         eventCode: currentMatchEventCode,
         teamNumber: Number(currentMatchTeamNumber),
         teamId: teamId || null,
         matchNumber: Number(matchNumber),
         ...fieldValues,
-        scoutedBy: isExisting ? (existingData.scoutedBy || currentUser.uid) : currentUser.uid,
-        scoutedByEmail: isExisting ? (existingData.scoutedByEmail || existingData.scoutedByName || userEmail) : userEmail,
-        scoutedByName: isExisting ? (existingData.scoutedByName || userEmail) : userEmail,
+        scoutedBy: scoutedByUid,
+        // Raw email is never stored on entries — attribution is uid + display name only.
+        scoutedByEmail: firebase.firestore.FieldValue.delete(),
+        // Refresh the label whenever the original scouter is the one saving (self-heals stale/pre-feature names);
+        // otherwise leave the original scouter's name alone when someone else edits their entry.
+        scoutedByName: (!isExisting || scoutedByUid === currentUser.uid) ? userDisplayName : (existingData.scoutedByName || existingData.scoutedByEmail || 'Unknown'),
         updatedAt: firebase.firestore.FieldValue.serverTimestamp()
       };
 
@@ -144,7 +149,8 @@ async function saveMatchScoutForm() {
       } else {
         payload.scoutedAt = existingData.scoutedAt || firebase.firestore.FieldValue.serverTimestamp();
         payload.lastEditedBy = currentUser.uid;
-        payload.lastEditedByEmail = userEmail;
+        payload.lastEditedByEmail = firebase.firestore.FieldValue.delete();
+        payload.lastEditedByName = userDisplayName;
         payload.lastEditedByTimestamp = Date.now();
         if (currentMatchDocId && currentMatchDocId !== docId) {
           await db.collection('matchScouting').doc(currentMatchDocId).delete();
@@ -243,9 +249,10 @@ function watchMatchScoutStatus(eventCode) {
     return;
   }
 
-  // Listen for all match scouting docs that match this event code
+  // Listen for our own team's match scouting docs at this event code
   matchScoutUnsubscribe = db.collection('matchScouting')
     .where('eventCode', '==', eventCode)
+    .where('teamId', '==', currentTeamData?.id || null)
     .onSnapshot((snapshot) => {
       matchEntriesCache = {};
       snapshot.forEach((doc) => {
@@ -330,8 +337,8 @@ function renderMatchListForTeam(eventCode, teamNumber) {
     // Metadata line
     const meta = document.createElement('div');
     meta.style.cssText = 'font-size:0.8rem; color:var(--text-muted); margin-bottom:8px;';
-    const scoutedBy = entry.scoutedByEmail || entry.scoutedByName || 'Unknown';
-    const lastEditedBy = entry.lastEditedByEmail || entry.lastEditedByName || 'N/A';
+    const scoutedBy = entry.scoutedByName || entry.scoutedByEmail || 'Unknown';
+    const lastEditedBy = entry.lastEditedByName || entry.lastEditedByEmail || 'N/A';
     meta.textContent = `Scouted by: ${scoutedBy} | Last edited by: ${lastEditedBy}`;
     item.appendChild(meta);
 

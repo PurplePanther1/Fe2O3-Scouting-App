@@ -41,6 +41,12 @@ async function loadTeamMembers(teamId, teamData) {
 
   status.textContent = `${teamData.members.length} member(s)`;
 
+  // Populate the display-name input with whatever this user has already chosen
+  const nameInput = document.getElementById('input-display-name');
+  if (nameInput) {
+    nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
+  }
+
   // Fetch user display info for each member
   const isCaptain = currentUser && currentTeamRoles[currentUser.uid] === 'captain';
 
@@ -149,8 +155,14 @@ async function loadTeamMembers(teamId, teamData) {
 
     memberList.appendChild(item);
 
-    // Fetch user display name in background
-    fetchUserDisplayName(uid, nameEl, emailEl, avatar);
+    if (uid === currentUser.uid) {
+      // It's our own row — we already know our name/email/photo, no fetch needed
+      emailEl.textContent = currentUser.email || '';
+      if (currentUser.photoURL) avatar.src = currentUser.photoURL;
+    } else {
+      // Fetch user display name in background
+      fetchUserDisplayName(uid, nameEl, emailEl, avatar);
+    }
   }
 }
 
@@ -177,26 +189,72 @@ async function updateMemberPermission(uid, permissionKey, value) {
   }
 }
 
-// ====== Fetch user display name from Firebase Auth (via Firestore user profiles) ======
+document.getElementById('input-display-name').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('btn-save-display-name').click();
+});
+
+// ====== Save the current user's chosen display name ======
+document.getElementById('btn-save-display-name').addEventListener('click', async () => {
+  const input = document.getElementById('input-display-name');
+  const status = document.getElementById('display-name-status');
+  const name = input.value.trim();
+
+  if (!name) {
+    status.textContent = 'Please enter a name.';
+    status.className = 'error-message';
+    return;
+  }
+  if (!currentUser) return;
+
+  try {
+    await db.collection('users').doc(currentUser.uid).set({
+      displayName: name,
+      photoURL: currentUser.photoURL || null,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+
+    currentUserProfile = { ...(currentUserProfile || {}), displayName: name };
+
+    status.textContent = 'Saved!';
+    status.className = 'success-message';
+    setTimeout(() => { status.textContent = ''; }, 2000);
+
+    // Refresh our own row in the member list to reflect the change immediately
+    if (currentTeamId && currentTeamData) {
+      loadTeamMembers(currentTeamId, currentTeamData);
+    }
+  } catch (err) {
+    console.error('Failed to save display name:', err);
+    status.textContent = 'Failed to save. Please try again.';
+    status.className = 'error-message';
+  }
+});
+
+// ====== Fetch user display name from Firestore user profiles ======
 async function fetchUserDisplayName(uid, nameEl, emailEl, avatarEl) {
   try {
-    // Try to get user profile from a users collection (if we stored one)
     const userDoc = await db.collection('users').doc(uid).get();
     if (userDoc.exists) {
       const data = userDoc.data();
-      nameEl.textContent = data.displayName || data.email || uid;
-      emailEl.textContent = data.email || uid;
+      nameEl.textContent = data.displayName || uid;
       if (data.photoURL) {
         avatarEl.src = data.photoURL;
       }
-      return;
+    } else {
+      nameEl.textContent = uid;
     }
   } catch (_) {
-    // Fall through to showing uid
+    nameEl.textContent = uid;
   }
-  // Fallback: just show the uid
-  nameEl.textContent = uid;
-  emailEl.textContent = '';
+
+  // Email is private — this resolves for the captain viewing a teammate, or the
+  // user viewing themself; a permission-denied here just means "don't show it."
+  try {
+    const contactDoc = await db.collection('users').doc(uid).collection('private').doc('contact').get();
+    emailEl.textContent = contactDoc.exists ? (contactDoc.data().email || '') : '';
+  } catch (_) {
+    emailEl.textContent = '';
+  }
 }
 
 // ====== Transfer captaincy to another member ======
@@ -213,6 +271,11 @@ async function transferCaptaincy(newCaptainUid) {
     updates[`roles.${newCaptainUid}`] = 'captain';
 
     await db.collection('teams').doc(currentTeamId).update(updates);
+
+    // Keep the userTeams pointers in sync with the new roles (must happen after
+    // the roles update above, since the write rule validates against the real team doc)
+    await db.collection('userTeams').doc(currentUser.uid).set({ teamId: currentTeamId, role: 'member' });
+    await db.collection('userTeams').doc(newCaptainUid).set({ teamId: currentTeamId, role: 'captain' });
 
     hideLoading();
     // Reload the team data to refresh the UI
