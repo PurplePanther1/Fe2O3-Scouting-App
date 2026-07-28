@@ -316,60 +316,32 @@ async function selectEvent(eventData) {
       // Fetch from Worker (which calls FIRST API server-side)
       ftcTeams = await getEventTeams(eventData.code, getSelectedSeason());
       
-      // Batch fetch team names from FTCScout GraphQL API using batched aliasing if missing
-      if (ftcTeams && ftcTeams.length > 0) {
+      // Batch fetch team details from FTCScout GraphQL API using batched aliasing for ALL teams in the event
+      if (ftcTeams && ftcTeams.length > 0 && typeof fetchTeamDetailsBatch === 'function') {
         const season = getSelectedSeason();
-        const missingTeams = [];
+        const batchSize = 40;
+        const allTeamNumbers = ftcTeams.map(t => t.teamNumber);
         
-        // First check local Firestore cache for team details
-        for (let t of ftcTeams) {
-          if (!t.name || t.name.trim() === '') {
-            const cachedDetail = typeof getCachedTeamDetail === 'function' ? await getCachedTeamDetail(t.teamNumber) : null;
-            if (cachedDetail && cachedDetail.name) {
-              t.name = cachedDetail.name;
-              t.nameShort = cachedDetail.name;
-            } else {
-              missingTeams.push(t);
-            }
-          }
-        }
-
-        // If there are still teams missing names, fetch in batches using GraphQL aliasing (e.g. chunks of 40)
-        if (missingTeams.length > 0 && typeof fetchTeamDetailsBatch === 'function') {
-          const batchSize = 40;
-          for (let i = 0; i < missingTeams.length; i += batchSize) {
-            const chunk = missingTeams.slice(i, i + batchSize);
-            const teamNumbers = chunk.map(t => t.teamNumber);
-            try {
-              const batchResults = await fetchTeamDetailsBatch(teamNumbers, season);
-              for (let t of chunk) {
-                const detail = batchResults[t.teamNumber];
-                if (detail && detail.name) {
-                  t.name = detail.name;
-                  t.nameShort = detail.name;
-                  if (typeof cacheTeamDetail === 'function') {
-                    await cacheTeamDetail(t.teamNumber, detail);
-                  }
-                }
-              }
-            } catch (batchErr) {
-              console.warn('Batch fetch failed, falling back to individual fetch or defaults:', batchErr);
-              // Fallback per team if batch failed
-              for (let t of chunk) {
-                try {
-                  const detail = await fetchTeamDetail(t.teamNumber, season);
-                  if (detail && detail.name) {
-                    t.name = detail.name;
-                    t.nameShort = detail.name;
-                    if (typeof cacheTeamDetail === 'function') {
-                      await cacheTeamDetail(t.teamNumber, detail);
-                    }
-                  }
-                } catch (singleErr) {
-                  console.warn(`Failed to fetch team ${t.teamNumber}:`, singleErr);
+        console.log(`[FTCScout Batch] Starting batched fetch for ${allTeamNumbers.length} teams in chunks of ${batchSize}`);
+        
+        for (let i = 0; i < allTeamNumbers.length; i += batchSize) {
+          const chunkTeamNums = allTeamNumbers.slice(i, i + batchSize);
+          const chunkTeams = ftcTeams.slice(i, i + batchSize);
+          
+          try {
+            const batchResults = await fetchTeamDetailsBatch(chunkTeamNums, season);
+            for (let t of chunkTeams) {
+              const detail = batchResults[t.teamNumber];
+              if (detail && detail.name) {
+                t.name = detail.name;
+                t.nameShort = detail.name;
+                if (typeof cacheTeamDetail === 'function') {
+                  await cacheTeamDetail(t.teamNumber, detail);
                 }
               }
             }
+          } catch (batchErr) {
+            console.error('[FTCScout Batch] Batch fetch failed for chunk:', batchErr);
           }
         }
       }
