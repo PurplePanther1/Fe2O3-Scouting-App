@@ -133,7 +133,13 @@ async function cacheEventToFirestore(eventData, ftcTeams) {
     date: eventData.startDate ? new Date(eventData.startDate) : null,
     ftcTeams: ftcTeams.map(t => ({
       teamNumber: t.teamNumber,
-      name: t.name || t.nameFull || t.nameShort || t.teamNameCalc || ''
+      name: t.name || t.nameFull || t.nameShort || t.schoolName || t.teamNameCalc || '',
+      nameShort: t.nameShort || '',
+      nameFull: t.nameFull || '',
+      schoolName: t.schoolName || '',
+      city: t.city || '',
+      stateProv: t.stateProv || '',
+      country: t.country || ''
     })),
     cachedAt: firebase.firestore.FieldValue.serverTimestamp()
   }, { merge: true });
@@ -149,8 +155,11 @@ async function getCachedEvent(eventCode) {
     // Normalize ftcTeams if stored as numbers or objects
     if (data.ftcTeams) {
       data.ftcTeams = data.ftcTeams.map(t => {
-        if (typeof t === 'number') return { teamNumber: t, name: '' };
-        return t;
+        if (typeof t === 'number') return { teamNumber: t, name: '', nameShort: '', nameFull: '', schoolName: '' };
+        return {
+          ...t,
+          name: t.name || t.nameShort || t.nameFull || t.schoolName || ''
+        };
       });
     }
     return { id: doc.id, ...data };
@@ -301,12 +310,44 @@ async function selectEvent(eventData) {
     // Try cache first
     let ftcTeams = null;
     const cached = await getCachedEvent(eventData.code);
-    if (cached && cached.ftcTeams && cached.ftcTeams.length > 0) {
+    if (cached && cached.ftcTeams && cached.ftcTeams.length > 0 && cached.ftcTeams.some(t => t.name && t.name.trim() !== '')) {
       ftcTeams = cached.ftcTeams.map(t => typeof t === 'number' ? { teamNumber: t, name: '' } : t);
     } else {
       // Fetch from Worker (which calls FIRST API server-side)
       ftcTeams = await getEventTeams(eventData.code, getSelectedSeason());
-      // Cache result
+      
+      // Batch fetch team names from FTCScout GraphQL API if missing
+      if (ftcTeams && ftcTeams.length > 0) {
+        const season = getSelectedSeason();
+        const chunkSize = 6;
+        for (let i = 0; i < ftcTeams.length; i += chunkSize) {
+          const chunk = ftcTeams.slice(i, i + chunkSize);
+          await Promise.all(chunk.map(async (t) => {
+            if (!t.name || t.name.trim() === '') {
+              try {
+                // Check local team detail cache first to avoid GQL calls if possible
+                const cachedDetail = typeof getCachedTeamDetail === 'function' ? await getCachedTeamDetail(t.teamNumber) : null;
+                if (cachedDetail && cachedDetail.name) {
+                  t.name = cachedDetail.name;
+                } else if (typeof fetchTeamDetail === 'function') {
+                  const detail = await fetchTeamDetail(t.teamNumber, season);
+                  if (detail && detail.name) {
+                    t.name = detail.name;
+                    t.nameShort = detail.name;
+                    if (typeof cacheTeamDetail === 'function') {
+                      await cacheTeamDetail(t.teamNumber, detail);
+                    }
+                  }
+                }
+              } catch (e) {
+                console.warn(`Failed to fetch team name for ${t.teamNumber}:`, e);
+              }
+            }
+          }));
+        }
+      }
+
+      // Cache result with populated names
       await cacheEventToFirestore(eventData, ftcTeams);
     }
 
@@ -371,7 +412,14 @@ function renderMatchTeamList(teams) {
     const leftGroup = document.createElement('div');
     leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0; cursor:pointer';
     leftGroup.addEventListener('click', () => {
-      wireTeamMatchDetailClick(team.teamNumber, selectedEvent?.code || '', team);
+      if (currentSelectedTeamNumber === team.teamNumber) {
+        // Toggle close / hide
+        currentSelectedTeamNumber = null;
+        const detailMatch = document.getElementById('team-detail-area-match');
+        if (detailMatch) detailMatch.classList.add('hidden');
+      } else {
+        wireTeamMatchDetailClick(team.teamNumber, selectedEvent?.code || '', team);
+      }
     });
 
     const numSpan = document.createElement('span');
@@ -385,10 +433,23 @@ function renderMatchTeamList(teams) {
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
 
+    const btnGroup = document.createElement('div');
+    btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
+
+    // Dedicated View Detail button
+    const viewDetailBtn = document.createElement('button');
+    viewDetailBtn.className = 'btn btn-small btn-secondary';
+    viewDetailBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
+    viewDetailBtn.textContent = 'View Detail';
+    viewDetailBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      wireTeamMatchDetailClick(team.teamNumber, selectedEvent?.code || '', team);
+    });
+
     // Match scout quick button (+ Match Scout)
     const scoutBtn = document.createElement('button');
     scoutBtn.className = 'btn btn-small btn-primary';
-    scoutBtn.style.cssText = 'width: auto; padding: 4px 10px; font-size: 0.8rem; flex-shrink: 0;';
+    scoutBtn.style.cssText = 'width: auto; padding: 4px 10px; font-size: 0.8rem;';
     scoutBtn.textContent = '+ Match Scout';
     scoutBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -397,8 +458,11 @@ function renderMatchTeamList(teams) {
       }
     });
 
+    btnGroup.appendChild(viewDetailBtn);
+    btnGroup.appendChild(scoutBtn);
+
     item.appendChild(leftGroup);
-    item.appendChild(scoutBtn);
+    item.appendChild(btnGroup);
     container.appendChild(item);
   });
 }
@@ -423,10 +487,7 @@ function renderPitTeamList(teams) {
     item.dataset.teamNumber = team.teamNumber;
 
     const leftGroup = document.createElement('div');
-    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0; cursor:pointer';
-    leftGroup.addEventListener('click', () => {
-      wireTeamPitDetailClick(team.teamNumber, selectedEvent?.code || '', team);
-    });
+    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0;';
 
     const numSpan = document.createElement('span');
     numSpan.className = 'team-number';
@@ -434,14 +495,34 @@ function renderPitTeamList(teams) {
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'team-name';
-    nameSpan.textContent = team.name || team.nameFull || team.nameShort || team.teamNameCalc || '';
+    nameSpan.textContent = team.name || team.nameFull || team.nameShort || team.schoolName || team.teamNameCalc || '';
 
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
 
+    const btnGroup = document.createElement('div');
+    btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
+
+    // Dedicated View Detail button for Pit with toggle behavior
+    const viewDetailBtn = document.createElement('button');
+    viewDetailBtn.className = 'btn btn-small btn-secondary';
+    viewDetailBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
+    viewDetailBtn.textContent = 'View Detail';
+    viewDetailBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const detailPit = document.getElementById('team-detail-area-pit');
+      if (currentSelectedTeamNumber === team.teamNumber && detailPit && !detailPit.classList.contains('hidden')) {
+        // Toggle close / hide
+        currentSelectedTeamNumber = null;
+        detailPit.classList.add('hidden');
+      } else {
+        wireTeamPitDetailClick(team.teamNumber, selectedEvent?.code || '', team);
+      }
+    });
+
     const scoutBtn = document.createElement('button');
     scoutBtn.className = 'btn-scout-quick btn-scout-quick-pit';
-    scoutBtn.style.cssText = 'width: auto; padding: 4px 10px; font-size: 0.8rem; flex-shrink: 0; display: inline-flex; align-items: center; gap: 4px;';
+    scoutBtn.style.cssText = 'width: auto; padding: 4px 10px; font-size: 0.8rem; display: inline-flex; align-items: center; gap: 4px;';
     
     const isScouted = typeof isTeamScouted === 'function' ? isTeamScouted(team.teamNumber, selectedEvent?.code) : false;
     if (isScouted) {
@@ -463,8 +544,11 @@ function renderPitTeamList(teams) {
       }
     });
 
+    btnGroup.appendChild(viewDetailBtn);
+    btnGroup.appendChild(scoutBtn);
+
     item.appendChild(leftGroup);
-    item.appendChild(scoutBtn);
+    item.appendChild(btnGroup);
     container.appendChild(item);
   });
 
@@ -477,6 +561,9 @@ function renderPitTeamList(teams) {
 function wireTeamMatchDetailClick(teamNumber, eventCode, teamObj) {
   currentSelectedTeamNumber = teamNumber;
   console.log('Team detail handler fired for team:', teamNumber, 'teamObj:', teamObj);
+  const detailMatch = document.getElementById('team-detail-area-match');
+  if (detailMatch) detailMatch.classList.remove('hidden');
+
   if (typeof loadTeamDetail === 'function') {
     loadTeamDetail(teamNumber, eventCode);
   } else {
