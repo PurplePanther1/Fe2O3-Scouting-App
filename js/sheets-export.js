@@ -168,6 +168,37 @@ function buildMatchSheetRows(fields, docs) {
   ]);
 }
 
+// ====== Read-only form config loaders ======
+// loadFormConfig()/loadMatchFormConfig() (dynamic-form.js) seed a default config
+// back into Firestore via .set() when a team has none yet — a create/update that
+// firestore.rules restricts to captains / canEditTemplates. Export must work for
+// any team member, and never needs to write anything, so it reads the doc itself
+// and falls back to the same DEFAULT_*_FIELDS locally instead of seeding.
+async function loadFormConfigReadOnly(teamId, configDocId, defaults) {
+  try {
+    const doc = await db.collection('teams').doc(teamId)
+      .collection('formConfig').doc(configDocId).get();
+    if (doc.exists) {
+      const data = doc.data();
+      return (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+    }
+  } catch (err) {
+    console.warn(`Failed to read ${configDocId} form config for export, using defaults:`, err);
+  }
+  return defaults.map(f => ({ ...f }));
+}
+
+// ====== Label errors with which step produced them, so failures are diagnosable ======
+async function withStep(stepLabel, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    const labeled = new Error(`${stepLabel}: ${err.message}`);
+    labeled.code = err.code;
+    throw labeled;
+  }
+}
+
 // ====== Fetch all matchScouting docs for an event (same query shape as watchMatchScoutStatus) ======
 async function fetchMatchDocsForEvent(eventCode) {
   const snap = await db.collection('matchScouting').where('eventCode', '==', eventCode).get();
@@ -222,21 +253,23 @@ async function handleExportTeamClick(statusPrefix) {
 
     showLoading('Gathering scouting data...');
     const [pitFields, matchFields] = await Promise.all([
-      loadFormConfig(teamId),
-      loadMatchFormConfig(teamId)
+      loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
+      loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
     ]);
 
-    const pitDoc = await db.collection('pitScouting').doc(`${eventCode}_${teamNumber}`).get();
+    const pitDoc = await withStep('Reading pit scouting data', () =>
+      db.collection('pitScouting').doc(`${eventCode}_${teamNumber}`).get());
     const pitDocs = pitDoc.exists ? [{ id: pitDoc.id, ...pitDoc.data() }] : [];
 
-    const allMatchDocs = await fetchMatchDocsForEvent(eventCode);
+    const allMatchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode));
     const matchDocs = allMatchDocs
       .filter(d => Number(d.teamNumber) === Number(teamNumber))
       .sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
 
     showLoading('Creating Google Sheet...');
     const title = `Team ${teamNumber} Scouting — ${selectedEvent?.name || eventCode}`;
-    const url = await exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs);
+    const url = await withStep('Creating/writing Google Sheet', () =>
+      exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs));
 
     hideLoading();
     if (pitDocs.length === 0 && matchDocs.length === 0) {
@@ -275,21 +308,23 @@ async function handleExportEventClick(statusPrefix) {
 
     showLoading('Gathering scouting data...');
     const [pitFields, matchFields] = await Promise.all([
-      loadFormConfig(teamId),
-      loadMatchFormConfig(teamId)
+      loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
+      loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
     ]);
 
-    const pitSnap = await db.collection('pitScouting').where('eventCode', '==', eventCode).get();
+    const pitSnap = await withStep('Reading pit scouting data',
+      () => db.collection('pitScouting').where('eventCode', '==', eventCode).get());
     const pitDocs = [];
     pitSnap.forEach(doc => pitDocs.push({ id: doc.id, ...doc.data() }));
     pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
 
-    const matchDocs = await fetchMatchDocsForEvent(eventCode);
+    const matchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode));
     matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
 
     showLoading('Creating Google Sheet...');
     const title = `${selectedEvent?.name || eventCode} — All Teams Scouting Export`;
-    const url = await exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs);
+    const url = await withStep('Creating/writing Google Sheet', () =>
+      exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs));
 
     hideLoading();
     if (pitDocs.length === 0 && matchDocs.length === 0) {
