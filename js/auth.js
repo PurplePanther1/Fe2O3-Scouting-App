@@ -12,6 +12,107 @@ const loadingText = $('loading-text');
 // Currently authenticated user
 let currentUser = null;
 
+// Firestore-backed profile for the current user (displayName the user chose, email, photoURL)
+let currentUserProfile = null;
+
+/**
+ * Load (or create) this user's Firestore profile, without ever clobbering a
+ * display name the user has already chosen for themselves.
+ *
+ * Split across two documents so email can stay private while displayName/photo
+ * stay broadly visible to teammates:
+ *   users/{uid}                 — displayName, photoURL (not sensitive)
+ *   users/{uid}/private/contact — email (captain + self only, see firestore.rules)
+ */
+async function ensureUserProfile(user) {
+  const ref = db.collection('users').doc(user.uid);
+  const contactRef = ref.collection('private').doc('contact');
+  let profile;
+
+  try {
+    const doc = await ref.get();
+    if (doc.exists) {
+      profile = doc.data();
+      const updates = {};
+      if (user.photoURL && profile.photoURL !== user.photoURL) updates.photoURL = user.photoURL;
+      if (!profile.displayName && user.displayName) updates.displayName = user.displayName;
+      // Self-heal: this doc predates the public/private split and still has a raw email on it — move it off.
+      if (profile.email) updates.email = firebase.firestore.FieldValue.delete();
+      if (Object.keys(updates).length > 0) {
+        await ref.set(updates, { merge: true });
+        profile = { ...profile, ...updates, email: undefined };
+      }
+    } else {
+      profile = { displayName: user.displayName || '', photoURL: user.photoURL || null };
+      await ref.set({ ...profile, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    }
+  } catch (err) {
+    console.warn('Failed to load/create user profile:', err);
+    profile = { displayName: user.displayName || '', photoURL: user.photoURL || null };
+  }
+
+  try {
+    await contactRef.set({
+      email: user.email || '',
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    }, { merge: true });
+  } catch (err) {
+    console.warn('Failed to sync private contact doc:', err);
+  }
+
+  currentUserProfile = { displayName: profile.displayName || '', photoURL: profile.photoURL || null, email: user.email || '' };
+  return currentUserProfile;
+}
+
+/**
+ * Keep userTeams/{uid} (a denormalized {teamId, role} pointer) in sync with the
+ * real teams/{teamId} document. This is what lets a captain's rules-check "is this
+ * requester the captain of the SAME team as the profile they're reading" happen
+ * without ever needing read access to the (member-gated) team document itself.
+ * Self-write only, and the write rule cross-validates against the real team doc,
+ * so this can't be forged to claim a membership/captaincy that isn't real.
+ */
+async function ensureUserTeamPointer(uid, teamId, role) {
+  try {
+    const ref = db.collection('userTeams').doc(uid);
+    const doc = await ref.get();
+    if (!doc.exists || doc.data().teamId !== teamId || doc.data().role !== role) {
+      await ref.set({ teamId, role });
+    }
+  } catch (err) {
+    console.warn('Failed to sync userTeams pointer:', err);
+  }
+}
+
+/**
+ * Backfill joinCodes/{code} for a team created before that lookup collection
+ * existed, so new members can still join it by code. Only the captain can do
+ * this (matches the joinCodes create rule), and it's a no-op once it exists.
+ */
+async function ensureJoinCodeDoc(teamId, joinCode) {
+  if (!joinCode) return;
+  try {
+    const ref = db.collection('joinCodes').doc(joinCode);
+    const doc = await ref.get();
+    if (!doc.exists) {
+      await ref.set({ teamId });
+    }
+  } catch (err) {
+    console.warn('Failed to sync joinCodes entry:', err);
+  }
+}
+
+/**
+ * The name to show for the current user: their chosen display name first,
+ * falling back to whatever Firebase Auth knows (Google name, then email).
+ */
+function getCurrentUserDisplayName() {
+  if (currentUserProfile && currentUserProfile.displayName) return currentUserProfile.displayName;
+  if (currentUser && currentUser.displayName) return currentUser.displayName;
+  if (currentUser && currentUser.email) return currentUser.email;
+  return 'Unknown';
+}
+
 /**
  * Show a loading spinner with a message.
  */
@@ -353,11 +454,13 @@ $('btn-main-sign-out').addEventListener('click', signOut);
 // ====== Handle authenticated user (team lookup + navigation) ======
 async function handleAuthenticatedUser(user) {
   currentUser = user;
+  await ensureUserProfile(user);
+  const displayName = getCurrentUserDisplayName();
 
   // Update user info in team screen
-  $('user-avatar').src = user.photoURL || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(user.displayName || user.email || 'User');
-  $('user-avatar').alt = user.displayName || 'User';
-  $('user-name').textContent = user.displayName || user.email;
+  $('user-avatar').src = user.photoURL || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(displayName);
+  $('user-avatar').alt = displayName;
+  $('user-name').textContent = displayName;
 
   // Check if user belongs to a team
   showLoading('Looking up your team...');
@@ -365,6 +468,12 @@ async function handleAuthenticatedUser(user) {
     const team = await getUserTeam(user.uid);
     hideLoading();
     if (team) {
+      const myRole = (team.roles && team.roles[user.uid]) || 'member';
+      await ensureUserTeamPointer(user.uid, team.id, myRole);
+      if (myRole === 'captain') {
+        await ensureJoinCodeDoc(team.id, team.joinCode);
+      }
+
       $('main-team-name').textContent = team.name || 'Your Team';
       // Show join code on dashboard if available
       if (team.joinCode) {

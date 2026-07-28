@@ -99,21 +99,26 @@ async function savePitScoutForm() {
   try {
     const fieldValues = currentFormController.getValues();
     const teamId = currentTeamData?.id;
-    const userEmail = currentUser.email || currentUser.displayName || 'Unknown';
+    const userDisplayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
 
     // Check if this is a new document or update
     const existingDoc = await db.collection('pitScouting').doc(docId).get();
     const isExisting = existingDoc.exists;
     const existingData = isExisting ? existingDoc.data() : null;
 
+    const scoutedByUid = isExisting ? (existingData.scoutedBy || currentUser.uid) : currentUser.uid;
+
     const payload = {
       eventCode: currentPitEventCode,
       teamNumber: Number(currentPitTeamNumber),
       teamId: teamId || null,
       ...fieldValues,
-      scoutedBy: isExisting ? (existingData.scoutedBy || currentUser.uid) : currentUser.uid,
-      scoutedByEmail: isExisting ? (existingData.scoutedByEmail || existingData.scoutedByName || userEmail) : userEmail,
-      scoutedByName: isExisting ? (existingData.scoutedByName || userEmail) : userEmail,
+      scoutedBy: scoutedByUid,
+      // Raw email is never stored on entries — attribution is uid + display name only.
+      scoutedByEmail: firebase.firestore.FieldValue.delete(),
+      // Refresh the label whenever the original scouter is the one saving (self-heals stale/pre-feature names);
+      // otherwise leave the original scouter's name alone when someone else edits their entry.
+      scoutedByName: (!isExisting || scoutedByUid === currentUser.uid) ? userDisplayName : (existingData.scoutedByName || existingData.scoutedByEmail || 'Unknown'),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     };
 
@@ -122,7 +127,8 @@ async function savePitScoutForm() {
     } else {
       payload.scoutedAt = existingData.scoutedAt || firebase.firestore.FieldValue.serverTimestamp();
       payload.lastEditedBy = currentUser.uid;
-      payload.lastEditedByEmail = userEmail;
+      payload.lastEditedByEmail = firebase.firestore.FieldValue.delete();
+      payload.lastEditedByName = userDisplayName;
       payload.lastEditedByTimestamp = Date.now();
     }
 
@@ -214,9 +220,12 @@ function watchPitScoutStatus(eventCode) {
     return;
   }
 
-  // Listen for all pit scouting docs that match this event code
+  // Listen for our own team's pit scouting docs at this event code (explicitly scoped
+  // to our team — other teams' entries for the same real-world event are a separate,
+  // rules-enforced dataset now, this filter is just the matching client-side intent)
   pitScoutUnsubscribe = db.collection('pitScouting')
     .where('eventCode', '==', eventCode)
+    .where('teamId', '==', currentTeamData?.id || null)
     .onSnapshot((snapshot) => {
       scoutedTeamsCache.clear();
       snapshot.forEach((doc) => {

@@ -19,6 +19,12 @@ function getCurrentFtcSeason() {
   return month >= 9 ? now.getFullYear() : now.getFullYear() - 1;
 }
 
+// ====== Format an FTC season number as its "YYYY-YYYY" label (e.g. 2025 -> "2025-2026") ======
+function formatFtcSeasonLabel(season) {
+  const s = Number(season);
+  return `${s}-${s + 1}`;
+}
+
 // ====== Populate season dropdown ======
 function populateSeasonDropdown() {
   const select = document.getElementById('select-season');
@@ -28,8 +34,7 @@ function populateSeasonDropdown() {
   for (let y = current; y >= startYear; y--) {
     const option = document.createElement('option');
     option.value = y;
-    const nextYear = y + 1;
-    const label = current === y ? `${y}-${nextYear} (current)` : `${y}-${nextYear}`;
+    const label = current === y ? `${formatFtcSeasonLabel(y)} (current)` : formatFtcSeasonLabel(y);
     option.textContent = label;
     if (y === current) {
       option.selected = true;
