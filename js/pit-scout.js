@@ -8,6 +8,7 @@ let currentPitTeamNumber = null;
 let currentPitEventCode = null;
 let pitScoutUnsubscribe = null; // Firestore snapshot listener
 let scoutedTeamsCache = new Set(); // Set of "eventCode_teamNumber" keys
+let pitScoutedEntriesCache = new Map(); // docId -> full entry data (incl. scoutedBy), for permission checks
 let currentFormController = null; // returned by renderDynamicForm
 
 // ====== Open the pit scouting form (modal) ======
@@ -198,6 +199,28 @@ async function deletePitScoutData() {
   }
 }
 
+// ====== Bulk-delete pit scouting entries by docId ======
+// Each delete goes through the same db.collection('pitScouting').doc(id).delete() call
+// as the single-entry path above, so Firestore rules (canEditOrDeleteEntry) enforce
+// permission per-document exactly as they already do — this is a UI convenience for
+// issuing several deletes at once, not a separate/bypassed code path.
+async function bulkDeletePitScoutData(docIds) {
+  const results = { succeeded: [], failed: [] };
+  for (const docId of docIds) {
+    try {
+      await db.collection('pitScouting').doc(docId).delete();
+      scoutedTeamsCache.delete(docId);
+      pitScoutedEntriesCache.delete(docId);
+      results.succeeded.push(docId);
+    } catch (err) {
+      console.error(`Failed to delete pit scouting data for ${docId}:`, err);
+      results.failed.push(docId);
+    }
+  }
+  refreshTeamListScoutedState();
+  return results;
+}
+
 // ====== Close the pit scouting form ======
 function closePitScoutForm() {
   document.getElementById('pit-modal').classList.add('hidden');
@@ -217,6 +240,7 @@ function watchPitScoutStatus(eventCode) {
   }
 
   scoutedTeamsCache.clear();
+  pitScoutedEntriesCache.clear();
 
   if (!eventCode) {
     // No event selected — clear and notify
@@ -234,8 +258,10 @@ function watchPitScoutStatus(eventCode) {
     .where('teamId', '==', currentTeamData?.id || null)
     .onSnapshot((snapshot) => {
       scoutedTeamsCache.clear();
+      pitScoutedEntriesCache.clear();
       snapshot.forEach((doc) => {
         scoutedTeamsCache.add(doc.id);
+        pitScoutedEntriesCache.set(doc.id, { id: doc.id, ...doc.data() });
       });
 
       // Notify any listeners (e.g., team list renderer)
@@ -253,35 +279,46 @@ function isTeamScouted(teamNumber, eventCode) {
   return scoutedTeamsCache.has(docId);
 }
 
+// ====== Get the full cached pit scouting entry for a team (or null) ======
+// Used for permission checks (e.g. bulk delete) that need entry.scoutedBy.
+function getPitScoutedEntry(teamNumber, eventCode) {
+  const docId = `${eventCode}_${teamNumber}`;
+  return pitScoutedEntriesCache.get(docId) || null;
+}
+
 // ====== Refresh scouted state on existing team list items ======
 // This is called after a save/delete to update the UI without a full re-render
 function refreshTeamListScoutedState() {
   const eventCode = selectedEvent?.code;
   if (!eventCode) return;
 
-  // Update each team-item's visual state based on current scoutedTeamsCache
-  document.querySelectorAll('.team-item').forEach(item => {
+  // Update each team-item's visual state based on current scoutedTeamsCache.
+  // Scoped to the Pit tab's list only — pit-scouted status has no bearing on
+  // match scouting, which has its own (or no) completion state.
+  document.querySelectorAll('#team-list-pit .team-item').forEach(item => {
     const teamNum = item.dataset.teamNumber;
     if (!teamNum) return;
     const isScouted = isTeamScouted(teamNum, eventCode);
     item.classList.toggle('scouted', isScouted);
     
-    // Update the scout button text / structure
-    const scoutBtn = item.querySelector('.btn-scout-quick');
+    // Update the quick-scout button's label/highlight to match renderPitTeamList()'s
+    // markup exactly, in both directions (scouted <-> unscouted) — this is the button
+    // in the team list row, not the detail-view button handled below.
+    const scoutBtn = item.querySelector('.btn-pit-quick-scout');
     if (scoutBtn) {
-      scoutBtn.classList.toggle('btn-scouted', isScouted);
       if (isScouted) {
+        scoutBtn.style.background = 'var(--success)';
         scoutBtn.innerHTML = '';
         const checkSpan = document.createElement('span');
         checkSpan.textContent = '✓';
         const textSpan = document.createElement('span');
-        textSpan.textContent = 'Pit Scout';
+        textSpan.textContent = 'Edit Pit Scout';
         scoutBtn.appendChild(checkSpan);
         scoutBtn.appendChild(textSpan);
       } else {
-        if (scoutBtn.textContent !== '+ Pit Scout') {
-          scoutBtn.textContent = '+ Pit Scout';
-        }
+        scoutBtn.style.background = '';
+        scoutBtn.innerHTML = '';
+        scoutBtn.textContent = '+ Pit Scout';
       }
     }
   });

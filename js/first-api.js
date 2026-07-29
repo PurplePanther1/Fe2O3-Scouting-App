@@ -153,7 +153,8 @@ async function cacheEventToFirestore(eventData, ftcTeams) {
         schoolName: t.schoolName || '',
         city: t.city || '',
         stateProv: t.stateProv || '',
-        country: t.country || ''
+        country: t.country || '',
+        opr: typeof t.opr === 'number' ? t.opr : null
       })),
       cachedAt: firebase.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
@@ -273,6 +274,10 @@ function hideSuggestions() {
 // ====== Clear any previously selected event's info, team list, search results, and team detail ======
 function clearSelectedEvent() {
   selectedEvent = null;
+  // Reset detail selection too — otherwise a team number that also exists in the
+  // next event's roster would still read as "selected" and show "Close Detail"
+  // even though the detail panel was just hidden below.
+  currentSelectedTeamNumber = null;
   const area = document.getElementById('selected-event-area');
   if (area) area.classList.add('hidden');
   const nameEl = document.getElementById('selected-event-name');
@@ -378,7 +383,8 @@ async function selectEvent(eventData) {
             }
             t.name = detail.name;
             t.nameShort = detail.name;
-            
+            t.opr = detail.quickStats?.tot?.value ?? null;
+
             // Normalize raw GraphQL team detail into flat structure expected by renderTeamDetail & getCachedTeamDetail
             const loc = detail.location || {};
             const normalizedDetail = {
@@ -468,6 +474,140 @@ function renderTeamList(teams) {
 let currentSelectedTeamNumber = null;
 let currentEventTeams = [];
 let currentTeamSearchQuery = '';
+let currentTeamSortMode = 'number'; // 'number' | 'name' | 'opr' — shared across Match & Pit tabs
+
+// Bulk-select state for the Pit tab (captain / canEditOtherEntries only — see updatePitBulkSelectUI)
+let pitBulkSelectMode = false;
+let pitBulkSelectedDocIds = new Set();
+
+// ====== Show/hide & label the pit bulk-select toolbar based on permission and selection ======
+function updatePitBulkSelectUI() {
+  const toggleBtn = document.getElementById('btn-pit-bulk-select-toggle');
+  const deleteBtn = document.getElementById('btn-pit-bulk-delete');
+  if (!toggleBtn || !deleteBtn) return;
+
+  const canBulkManage = typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false;
+  if (!canBulkManage) {
+    toggleBtn.classList.add('hidden');
+    deleteBtn.classList.add('hidden');
+    pitBulkSelectMode = false;
+    pitBulkSelectedDocIds.clear();
+    return;
+  }
+
+  toggleBtn.classList.remove('hidden');
+  toggleBtn.textContent = pitBulkSelectMode ? 'Cancel Select' : 'Select';
+
+  if (pitBulkSelectMode && pitBulkSelectedDocIds.size > 0) {
+    deleteBtn.classList.remove('hidden');
+    deleteBtn.textContent = `Delete Selected (${pitBulkSelectedDocIds.size})`;
+  } else {
+    deleteBtn.classList.add('hidden');
+  }
+}
+
+// ====== Sort a team list per the shared sort mode (number is the default, matching prior behavior) ======
+function sortTeams(teams) {
+  const sorted = [...teams];
+  if (currentTeamSortMode === 'name') {
+    sorted.sort((a, b) => {
+      const nameA = a.name || a.nameFull || a.nameShort || a.schoolName || a.teamNameCalc || '';
+      const nameB = b.name || b.nameFull || b.nameShort || b.schoolName || b.teamNameCalc || '';
+      return nameA.localeCompare(nameB) || (a.teamNumber || 0) - (b.teamNumber || 0);
+    });
+  } else if (currentTeamSortMode === 'opr') {
+    sorted.sort((a, b) => {
+      const oprA = typeof a.opr === 'number' ? a.opr : -Infinity;
+      const oprB = typeof b.opr === 'number' ? b.opr : -Infinity;
+      return oprB - oprA || (a.teamNumber || 0) - (b.teamNumber || 0);
+    });
+  } else {
+    sorted.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+  }
+  return sorted;
+}
+
+// ====== Sync both sort selects & re-render both team lists when sort mode changes ======
+function applyTeamSortMode(mode) {
+  currentTeamSortMode = mode || 'number';
+
+  const matchSelect = document.getElementById('select-team-sort-match');
+  const pitSelect = document.getElementById('select-team-sort-pit');
+  if (matchSelect && matchSelect.value !== currentTeamSortMode) matchSelect.value = currentTeamSortMode;
+  if (pitSelect && pitSelect.value !== currentTeamSortMode) pitSelect.value = currentTeamSortMode;
+
+  if (currentEventTeams && currentEventTeams.length > 0) {
+    renderMatchTeamList(currentEventTeams);
+    renderPitTeamList(currentEventTeams);
+    applyTeamSearchFilter(currentTeamSearchQuery);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const matchSortSelect = document.getElementById('select-team-sort-match');
+  if (matchSortSelect) {
+    matchSortSelect.addEventListener('change', (e) => applyTeamSortMode(e.target.value));
+  }
+  const pitSortSelect = document.getElementById('select-team-sort-pit');
+  if (pitSortSelect) {
+    pitSortSelect.addEventListener('change', (e) => applyTeamSortMode(e.target.value));
+  }
+
+  // Pit bulk-select toggle
+  const pitBulkToggleBtn = document.getElementById('btn-pit-bulk-select-toggle');
+  if (pitBulkToggleBtn) {
+    pitBulkToggleBtn.addEventListener('click', () => {
+      pitBulkSelectMode = !pitBulkSelectMode;
+      pitBulkSelectedDocIds.clear();
+      if (currentEventTeams && currentEventTeams.length > 0) {
+        renderPitTeamList(currentEventTeams);
+        applyTeamSearchFilter(currentTeamSearchQuery);
+      } else {
+        updatePitBulkSelectUI();
+      }
+    });
+  }
+
+  // Pit bulk delete
+  const pitBulkDeleteBtn = document.getElementById('btn-pit-bulk-delete');
+  if (pitBulkDeleteBtn) {
+    pitBulkDeleteBtn.addEventListener('click', async () => {
+      const docIds = [...pitBulkSelectedDocIds];
+      if (docIds.length === 0) return;
+      if (!confirm(`Delete pit scouting data for ${docIds.length} team(s)? This cannot be undone.`)) return;
+
+      showLoading('Deleting selected entries...');
+      let results = { succeeded: [], failed: [] };
+      try {
+        if (typeof bulkDeletePitScoutData === 'function') {
+          results = await bulkDeletePitScoutData(docIds);
+        }
+      } finally {
+        hideLoading();
+      }
+
+      const statusEl = document.getElementById('pit-bulk-delete-status');
+      if (statusEl) {
+        if (results.failed.length > 0) {
+          console.error('Bulk pit delete: failed doc IDs:', results.failed);
+          statusEl.textContent = `Deleted ${results.succeeded.length} of ${docIds.length} entries — ${results.failed.length} failed`;
+          statusEl.className = 'error-message';
+        } else {
+          statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
+          statusEl.className = 'success-message';
+        }
+        setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
+      }
+
+      pitBulkSelectMode = false;
+      pitBulkSelectedDocIds.clear();
+      if (currentEventTeams && currentEventTeams.length > 0) {
+        renderPitTeamList(currentEventTeams);
+        applyTeamSearchFilter(currentTeamSearchQuery);
+      }
+    });
+  }
+});
 
 // ====== In-list team filtering & sync (Match & Pit) ======
 function applyTeamSearchFilter(query) {
@@ -625,7 +765,7 @@ function renderMatchTeamList(teams) {
 
   currentEventTeams = teams;
   status.textContent = `${teams.length} team(s)`;
-  const sorted = [...teams].sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+  const sorted = sortTeams(teams);
 
   sorted.forEach(team => {
     const item = document.createElement('div');
@@ -700,7 +840,7 @@ function renderPitTeamList(teams) {
   }
 
   status.textContent = `${teams.length} team(s)`;
-  const sorted = [...teams].sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+  const sorted = sortTeams(teams);
 
   sorted.forEach(team => {
     const item = document.createElement('div');
@@ -737,16 +877,19 @@ function renderPitTeamList(teams) {
     });
 
     const scoutBtn = document.createElement('button');
-    scoutBtn.className = 'btn btn-small btn-primary';
+    // btn-pit-quick-scout is a style-neutral hook (no CSS rule targets it) — it just
+    // gives refreshTeamListScoutedState() a stable selector to find this exact button,
+    // since its actual style classes never change and can't be used to identify it.
+    scoutBtn.className = 'btn btn-small btn-primary btn-pit-quick-scout';
     scoutBtn.style.cssText = 'width: auto; padding: 4px 10px; font-size: 0.8rem; display: inline-flex; align-items: center; gap: 4px;';
-    
+
     const isScouted = typeof isTeamScouted === 'function' ? isTeamScouted(team.teamNumber, selectedEvent?.code) : false;
     if (isScouted) {
       scoutBtn.style.background = 'var(--success)';
       const checkSpan = document.createElement('span');
       checkSpan.textContent = '✓';
       const textSpan = document.createElement('span');
-      textSpan.textContent = 'Pit Scout';
+      textSpan.textContent = 'Edit Pit Scout';
       scoutBtn.appendChild(checkSpan);
       scoutBtn.appendChild(textSpan);
     } else {
@@ -760,6 +903,28 @@ function renderPitTeamList(teams) {
       }
     });
 
+    // Bulk-select checkbox — only in select mode, and only for teams that have
+    // been pit scouted (nothing to delete otherwise). Toggle visibility is already
+    // permission-gated (see updatePitBulkSelectUI), so anyone who can see the mode
+    // at all is allowed to bulk-delete any scouted entry.
+    if (pitBulkSelectMode && isScouted && selectedEvent?.code) {
+      const docId = `${selectedEvent.code}_${team.teamNumber}`;
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.style.cssText = 'width:18px; height:18px; flex-shrink:0; cursor:pointer;';
+      checkbox.checked = pitBulkSelectedDocIds.has(docId);
+      checkbox.addEventListener('change', (e) => {
+        e.stopPropagation();
+        if (checkbox.checked) {
+          pitBulkSelectedDocIds.add(docId);
+        } else {
+          pitBulkSelectedDocIds.delete(docId);
+        }
+        updatePitBulkSelectUI();
+      });
+      leftGroup.insertBefore(checkbox, leftGroup.firstChild);
+    }
+
     btnGroup.appendChild(viewDetailBtn);
     btnGroup.appendChild(scoutBtn);
 
@@ -771,6 +936,7 @@ function renderPitTeamList(teams) {
   if (typeof refreshTeamListScoutedState === 'function') {
     refreshTeamListScoutedState();
   }
+  updatePitBulkSelectUI();
   console.timeEnd('[Timing] renderPitTeamList');
 }
 

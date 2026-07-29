@@ -12,6 +12,54 @@ let matchScoutUnsubscribe = null; // Firestore snapshot listener
 let matchEntriesCache = {}; // keyed by "eventCode_teamNumber" -> array of entries
 let currentMatchFormController = null; // returned by renderDynamicForm
 
+// Bulk-select state for the match entries list (captain / canEditOtherEntries only)
+let matchBulkSelectMode = false;
+let matchBulkSelectedEntryIds = new Set();
+
+// ====== Show/hide & label the match bulk-select toolbar based on permission and selection ======
+function updateMatchBulkSelectUI() {
+  const toggleBtn = document.getElementById('btn-match-bulk-select-toggle');
+  const deleteBtn = document.getElementById('btn-match-bulk-delete');
+  if (!toggleBtn || !deleteBtn) return;
+
+  const canBulkManage = typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false;
+  if (!canBulkManage) {
+    toggleBtn.classList.add('hidden');
+    deleteBtn.classList.add('hidden');
+    matchBulkSelectMode = false;
+    matchBulkSelectedEntryIds.clear();
+    return;
+  }
+
+  toggleBtn.classList.remove('hidden');
+  toggleBtn.textContent = matchBulkSelectMode ? 'Cancel Select' : 'Select';
+
+  if (matchBulkSelectMode && matchBulkSelectedEntryIds.size > 0) {
+    deleteBtn.classList.remove('hidden');
+    deleteBtn.textContent = `Delete Selected (${matchBulkSelectedEntryIds.size})`;
+  } else {
+    deleteBtn.classList.add('hidden');
+  }
+}
+
+// ====== Bulk-delete match scouting entries by doc id ======
+// Each delete goes through the same db.collection('matchScouting').doc(id).delete() call
+// as the single-entry path, so Firestore rules (canEditOrDeleteEntry) enforce permission
+// per-document exactly as they already do — this is a UI convenience, not a bypass.
+async function bulkDeleteMatchScoutData(entryIds) {
+  const results = { succeeded: [], failed: [] };
+  for (const entryId of entryIds) {
+    try {
+      await db.collection('matchScouting').doc(entryId).delete();
+      results.succeeded.push(entryId);
+    } catch (err) {
+      console.error(`Failed to delete match scouting data for ${entryId}:`, err);
+      results.failed.push(entryId);
+    }
+  }
+  return results;
+}
+
 // ====== Open the match scouting form (modal) for a new entry ======
 async function openMatchScoutForm(teamNumber, eventCode) {
   currentMatchTeamNumber = teamNumber;
@@ -297,6 +345,9 @@ function refreshMatchEntriesCache() {
 }
 
 // ====== Render the match list for a team in the detail view ======
+// Search query for filtering the currently-displayed team's match entries by match number
+let currentMatchEntrySearchQuery = '';
+
 function renderMatchListForTeam(eventCode, teamNumber) {
   const container = document.getElementById('td-match-entries');
   const countEl = document.getElementById('td-match-count');
@@ -304,21 +355,29 @@ function renderMatchListForTeam(eventCode, teamNumber) {
 
   const entries = getMatchEntriesForTeam(teamNumber, eventCode);
 
-  // Sort by match number descending
-  entries.sort((a, b) => (b.matchNumber || 0) - (a.matchNumber || 0));
+  // Sort by match number ascending (lowest at top)
+  entries.sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
+
+  const query = currentMatchEntrySearchQuery.trim();
+  const filtered = query ? entries.filter(entry => String(entry.matchNumber).includes(query)) : entries;
 
   if (countEl) {
-    countEl.textContent = `${entries.length} match(es) logged`;
+    countEl.textContent = query
+      ? `${filtered.length} of ${entries.length} match(es) shown`
+      : `${entries.length} match(es) logged`;
   }
 
   container.innerHTML = '';
 
-  if (entries.length === 0) {
-    container.innerHTML = '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No matches logged yet.</p>';
+  if (filtered.length === 0) {
+    container.innerHTML = query
+      ? '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No matches found for that search.</p>'
+      : '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No matches logged yet.</p>';
+    updateMatchBulkSelectUI();
     return;
   }
 
-  entries.forEach((entry, index) => {
+  filtered.forEach((entry, index) => {
     const item = document.createElement('div');
     item.className = 'match-entry-item';
     item.style.cssText = 'background:var(--card-bg, #fff); border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:12px;';
@@ -327,11 +386,35 @@ function renderMatchListForTeam(eventCode, teamNumber) {
     const header = document.createElement('div');
     header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;';
 
+    const numAndCheckbox = document.createElement('div');
+    numAndCheckbox.style.cssText = 'display:flex; align-items:center; gap:8px;';
+
+    // Bulk-select checkbox — only in select mode. Toggle visibility is already
+    // permission-gated (see updateMatchBulkSelectUI), so anyone who can see the
+    // mode at all is allowed to bulk-delete any entry, same as canEditOrDeleteEntry().
+    if (matchBulkSelectMode) {
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.style.cssText = 'width:18px; height:18px; flex-shrink:0; cursor:pointer;';
+      checkbox.checked = matchBulkSelectedEntryIds.has(entry.id);
+      checkbox.addEventListener('change', (e) => {
+        e.stopPropagation();
+        if (checkbox.checked) {
+          matchBulkSelectedEntryIds.add(entry.id);
+        } else {
+          matchBulkSelectedEntryIds.delete(entry.id);
+        }
+        updateMatchBulkSelectUI();
+      });
+      numAndCheckbox.appendChild(checkbox);
+    }
+
     const matchNumSpan = document.createElement('span');
     matchNumSpan.style.cssText = 'font-weight:600; font-size:1.05rem; color:var(--text-main);';
     matchNumSpan.textContent = `Match #${entry.matchNumber}`;
+    numAndCheckbox.appendChild(matchNumSpan);
 
-    header.appendChild(matchNumSpan);
+    header.appendChild(numAndCheckbox);
 
     if (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries(entry) : (entry.scoutedBy === currentUser?.uid)) {
       const editBtn = document.createElement('button');
@@ -373,6 +456,8 @@ function renderMatchListForTeam(eventCode, teamNumber) {
 
     container.appendChild(item);
   });
+
+  updateMatchBulkSelectUI();
 }
 
 // ====== Callback for match scouted state changes (set by first-api.js) ======
@@ -403,5 +488,73 @@ document.addEventListener('DOMContentLoaded', () => {
         renderMatchListForTeam(eventCode, teamNum);
       }
     };
+  }
+
+  // Search/filter match entries by match number
+  const matchEntrySearchInput = document.getElementById('input-match-entry-search');
+  if (matchEntrySearchInput) {
+    matchEntrySearchInput.addEventListener('input', (e) => {
+      currentMatchEntrySearchQuery = e.target.value;
+      const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
+      const eventCode = selectedEvent?.code;
+      if (teamNum && eventCode) {
+        renderMatchListForTeam(eventCode, teamNum);
+      }
+    });
+  }
+
+  // Match bulk-select toggle
+  const matchBulkToggleBtn = document.getElementById('btn-match-bulk-select-toggle');
+  if (matchBulkToggleBtn) {
+    matchBulkToggleBtn.addEventListener('click', () => {
+      matchBulkSelectMode = !matchBulkSelectMode;
+      matchBulkSelectedEntryIds.clear();
+      const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
+      const eventCode = selectedEvent?.code;
+      if (teamNum && eventCode) {
+        renderMatchListForTeam(eventCode, teamNum);
+      } else {
+        updateMatchBulkSelectUI();
+      }
+    });
+  }
+
+  // Match bulk delete
+  const matchBulkDeleteBtn = document.getElementById('btn-match-bulk-delete');
+  if (matchBulkDeleteBtn) {
+    matchBulkDeleteBtn.addEventListener('click', async () => {
+      const entryIds = [...matchBulkSelectedEntryIds];
+      if (entryIds.length === 0) return;
+      if (!confirm(`Delete ${entryIds.length} match scouting entr${entryIds.length === 1 ? 'y' : 'ies'}? This cannot be undone.`)) return;
+
+      showLoading('Deleting selected entries...');
+      let results = { succeeded: [], failed: [] };
+      try {
+        results = await bulkDeleteMatchScoutData(entryIds);
+      } finally {
+        hideLoading();
+      }
+
+      const statusEl = document.getElementById('match-bulk-delete-status');
+      if (statusEl) {
+        if (results.failed.length > 0) {
+          console.error('Bulk match delete: failed entry IDs:', results.failed);
+          statusEl.textContent = `Deleted ${results.succeeded.length} of ${entryIds.length} entries — ${results.failed.length} failed`;
+          statusEl.className = 'error-message';
+        } else {
+          statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
+          statusEl.className = 'success-message';
+        }
+        setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
+      }
+
+      matchBulkSelectMode = false;
+      matchBulkSelectedEntryIds.clear();
+      const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
+      const eventCode = selectedEvent?.code;
+      if (teamNum && eventCode) {
+        renderMatchListForTeam(eventCode, teamNum);
+      }
+    });
   }
 });

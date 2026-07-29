@@ -205,8 +205,13 @@
           <!-- Team list for Match Scouting -->
           <div style="margin-top:10px">
             <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (MATCH)</h3>
-            <div style="margin-bottom:10px;">
-              <input type="text" id="input-team-search-match" placeholder="Filter teams by number or name..." autocomplete="off" />
+            <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
+              <input type="text" id="input-team-search-match" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
+              <select id="select-team-sort-match" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
+                <option value="number">Sort: Number (low-high)</option>
+                <option value="name">Sort: Name (A-Z)</option>
+                <option value="opr">Sort: OPR (high-low)</option>
+              </select>
             </div>
             <p class="help-text" id="team-list-status-match">Select an event above to load teams.</p>
             <div id="team-list-match" class="team-list"></div>
@@ -238,6 +243,12 @@
                   <button id="btn-add-match-entry" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Match</button>
                 </div>
                 <p class="help-text" id="td-match-count" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
+                <input type="text" id="input-match-entry-search" placeholder="Search by match #..." autocomplete="off" style="margin-bottom:8px;">
+                <div id="match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+                  <button id="btn-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
+                  <button id="btn-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
+                  <span id="match-bulk-delete-status" style="font-size:0.8rem;"></span>
+                </div>
                 <div id="td-match-entries"></div>
               </div>
               <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📊 Export to Sheets</button>
@@ -254,8 +265,18 @@
           <!-- Team list for Pit Scouting -->
           <div style="margin-top:10px">
             <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (PIT)</h3>
-            <div style="margin-bottom:10px;">
-              <input type="text" id="input-team-search-pit" placeholder="Filter teams by number or name..." autocomplete="off" />
+            <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
+              <input type="text" id="input-team-search-pit" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
+              <select id="select-team-sort-pit" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
+                <option value="number">Sort: Number (low-high)</option>
+                <option value="name">Sort: Name (A-Z)</option>
+                <option value="opr">Sort: OPR (high-low)</option>
+              </select>
+            </div>
+            <div id="pit-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+              <button id="btn-pit-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
+              <button id="btn-pit-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
+              <span id="pit-bulk-delete-status" style="font-size:0.8rem;"></span>
             </div>
             <p class="help-text" id="team-list-status-pit">Select an event above to load teams.</p>
             <div id="team-list-pit" class="team-list"></div>
