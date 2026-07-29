@@ -318,6 +318,10 @@ function clearSelectedEvent() {
   if (typeof watchMatchScoutStatus === 'function') {
     watchMatchScoutStatus(null);
   }
+
+  if (typeof updatePinButtonUI === 'function') {
+    updatePinButtonUI();
+  }
 }
 
 // ====== Select an event ======
@@ -335,6 +339,13 @@ async function selectEvent(eventData) {
   document.getElementById('selected-event-code').textContent = `Code: ${eventData.code}`;
   document.getElementById('selected-event-teams-count').textContent = 'Loading teams...';
   document.getElementById('selected-event-area').classList.remove('hidden');
+
+  if (typeof updatePinButtonUI === 'function') {
+    updatePinButtonUI();
+  }
+  if (typeof renderPinnedEventsList === 'function') {
+    renderPinnedEventsList();
+  }
 
   showLoading(`Fetching teams for ${eventData.code}...`);
   try {
@@ -783,8 +794,13 @@ function renderMatchTeamList(teams) {
     nameSpan.className = 'team-name';
     nameSpan.textContent = team.name || team.nameFull || team.nameShort || team.schoolName || team.teamNameCalc || '';
 
+    const oprSpan = document.createElement('span');
+    oprSpan.className = 'team-opr-inline';
+    oprSpan.textContent = typeof team.opr === 'number' ? `OPR: ${team.opr.toFixed(1)}` : 'OPR: --';
+
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
+    leftGroup.appendChild(oprSpan);
 
     const btnGroup = document.createElement('div');
     btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
@@ -858,8 +874,13 @@ function renderPitTeamList(teams) {
     nameSpan.className = 'team-name';
     nameSpan.textContent = team.name || team.nameFull || team.nameShort || team.schoolName || team.teamNameCalc || '';
 
+    const oprSpan = document.createElement('span');
+    oprSpan.className = 'team-opr-inline';
+    oprSpan.textContent = typeof team.opr === 'number' ? `OPR: ${team.opr.toFixed(1)}` : 'OPR: --';
+
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
+    leftGroup.appendChild(oprSpan);
 
     const btnGroup = document.createElement('div');
     btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';

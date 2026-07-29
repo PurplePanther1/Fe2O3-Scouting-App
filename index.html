@@ -188,16 +188,18 @@
             <p class="help-text" id="selected-event-code"></p>
             <p class="help-text" id="selected-event-teams-count"></p>
             <button id="btn-export-event-sheets" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">📊 Export All Teams to Sheets</button>
+            <button id="btn-pin-event" class="btn btn-outline btn-small hidden" style="margin-top:10px; width:100%">📌 Pin This Event</button>
             <p id="event-export-error" class="error-message"></p>
             <p id="event-export-success" class="success-message"></p>
           </div>
           <p id="event-error" class="error-message"></p>
         </div>
 
-        <!-- Scouting Subtabs (Match Scouting / Pit Scouting) -->
+        <!-- Scouting Subtabs (Match Scouting / Pit Scouting / Pinned) -->
         <div id="scouting-subtabs" class="tabs" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
           <button class="tab active" data-subtab="match">Match Scouting</button>
           <button class="tab" data-subtab="pit">Pit Scouting</button>
+          <button class="tab" data-subtab="pinned">Pinned</button>
         </div>
 
         <!-- ====== MATCH SCOUTING SUBTAB CONTENT ====== -->
@@ -309,6 +311,14 @@
             </div>
             <p id="td-pit-error" class="error-message"></p>
           </div>
+        </div>
+
+        <!-- ====== PINNED EVENTS SUBTAB CONTENT ====== -->
+        <div id="subtab-pinned" class="subtab-content hidden" style="margin-top:16px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">PINNED EVENTS</h3>
+          <p class="help-text">Events the captain has pinned for quick access, shared with the whole team.</p>
+          <p class="help-text" id="pinned-events-status">No events pinned yet.</p>
+          <div id="pinned-events-list" class="event-list"></div>
         </div>
 
       </div>
@@ -526,6 +536,7 @@
   <script src="js/team.js"></script>
   <script src="js/members.js"></script>
   <script src="js/first-api.js"></script>
+  <script src="js/pinned-events.js"></script>
   <script src="js/ftcscout.js"></script>
   <script src="js/dynamic-form.js"></script>
   <script src="js/pit-scout.js"></script>

@@ -66,7 +66,9 @@ async function loadTeamMembers(teamId, teamData) {
 
     const nameEl = document.createElement('div');
     nameEl.className = 'member-name';
-    nameEl.textContent = uid === currentUser.uid ? 'You' : 'Loading...';
+    nameEl.textContent = uid === currentUser.uid
+      ? `${typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'You')} (You)`
+      : 'Loading...';
 
     const emailEl = document.createElement('div');
     emailEl.className = 'member-email';

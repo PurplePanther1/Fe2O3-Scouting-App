@@ -14,56 +14,70 @@ if ('serviceWorker' in navigator) {
 }
 
 // ====== Global Tab Navigation Handler ======
-let lastActiveScoutingSubTab = 'match'; // Remembers 'match' or 'pit'
+let lastActiveScoutingSubTab = 'match'; // Remembers 'match', 'pit', or 'pinned'
 
 document.addEventListener('DOMContentLoaded', () => {
-  const matchTab = document.getElementById('tab-match-scouting') || document.querySelector('[data-subtab="match"]') || document.querySelectorAll('.tab-btn')[0];
-  const pitTab = document.getElementById('tab-pit-scouting') || document.querySelector('[data-subtab="pit"]') || document.querySelectorAll('.tab-btn')[1];
-
-  const matchView = document.getElementById('subtab-match') || document.getElementById('match-scouting-view') || document.getElementById('view-match') || document.getElementById('match-view');
-  const pitView = document.getElementById('subtab-pit') || document.getElementById('pit-scouting-view') || document.getElementById('view-pit') || document.getElementById('pit-view');
+  const subtabs = {
+    match: {
+      tab: document.querySelector('[data-subtab="match"]'),
+      view: document.getElementById('subtab-match')
+    },
+    pit: {
+      tab: document.querySelector('[data-subtab="pit"]'),
+      view: document.getElementById('subtab-pit')
+    },
+    pinned: {
+      tab: document.querySelector('[data-subtab="pinned"]'),
+      view: document.getElementById('subtab-pinned')
+    }
+  };
 
   const activateSubTab = (subtab) => {
+    if (!subtabs[subtab]) return;
     lastActiveScoutingSubTab = subtab;
-    if (subtab === 'pit') {
-      if (pitTab) pitTab.classList.add('active');
-      if (matchTab) matchTab.classList.remove('active');
-      if (matchView) { matchView.classList.add('hidden'); matchView.classList.remove('active'); }
-      if (pitView) { pitView.classList.remove('hidden'); pitView.classList.add('active'); }
-      console.log('Switched to Pit Scouting View');
 
+    Object.entries(subtabs).forEach(([name, { tab, view }]) => {
+      const isActive = name === subtab;
+      if (tab) tab.classList.toggle('active', isActive);
+      if (view) {
+        view.classList.toggle('hidden', !isActive);
+        view.classList.toggle('active', isActive);
+      }
+    });
+
+    if (subtab === 'pit') {
+      console.log('Switched to Pit Scouting View');
       // If a team is currently selected, auto-load its pit detail
       if (typeof currentSelectedTeamNumber !== 'undefined' && currentSelectedTeamNumber && typeof selectedEvent !== 'undefined' && selectedEvent?.code) {
         const foundTeam = (typeof currentEventTeams !== 'undefined' ? currentEventTeams : []).find(t => t.teamNumber === currentSelectedTeamNumber);
-        wireTeamPitDetailClick(currentSelectedTeamNumber, selectedEvent.code, foundTeam || { teamNumber: currentSelectedTeamNumber });
+        if (typeof wireTeamPitDetailClick === 'function') {
+          wireTeamPitDetailClick(currentSelectedTeamNumber, selectedEvent.code, foundTeam || { teamNumber: currentSelectedTeamNumber });
+        }
       }
-    } else {
-      if (matchTab) matchTab.classList.add('active');
-      if (pitTab) pitTab.classList.remove('active');
-      if (matchView) { matchView.classList.remove('hidden'); matchView.classList.add('active'); }
-      if (pitView) { pitView.classList.add('hidden'); pitView.classList.remove('active'); }
+    } else if (subtab === 'match') {
       console.log('Switched to Match Scouting View');
-
       // If a team is currently selected, auto-load its match detail
       if (typeof currentSelectedTeamNumber !== 'undefined' && currentSelectedTeamNumber && typeof selectedEvent !== 'undefined' && selectedEvent?.code) {
         if (typeof loadTeamDetail === 'function') {
           loadTeamDetail(currentSelectedTeamNumber, selectedEvent.code);
         }
       }
+    } else if (subtab === 'pinned') {
+      console.log('Switched to Pinned Events View');
+      if (typeof renderPinnedEventsList === 'function') {
+        renderPinnedEventsList();
+      }
     }
   };
 
-  if (matchTab && pitTab) {
-    matchTab.addEventListener('click', (e) => {
-      e.preventDefault();
-      activateSubTab('match');
-    });
-
-    pitTab.addEventListener('click', (e) => {
-      e.preventDefault();
-      activateSubTab('pit');
-    });
-  }
+  Object.entries(subtabs).forEach(([name, { tab }]) => {
+    if (tab) {
+      tab.addEventListener('click', (e) => {
+        e.preventDefault();
+        activateSubTab(name);
+      });
+    }
+  });
 
   // Ensure top-level Scouting tab stays highlighted when switching sub-tabs, and restore last-active subtab when navigating back to Scouting
   const scoutingTopTab = document.querySelector('[data-dtab="scouting"]');
@@ -73,15 +87,14 @@ document.addEventListener('DOMContentLoaded', () => {
         activateSubTab(lastActiveScoutingSubTab);
       }, 10);
     });
-  }
 
-  if (scoutingTopTab && matchTab && pitTab) {
     const ensureTopTabActive = () => {
       if (!scoutingTopTab.classList.contains('active')) {
         scoutingTopTab.classList.add('active');
       }
     };
-    matchTab.addEventListener('click', ensureTopTabActive);
-    pitTab.addEventListener('click', ensureTopTabActive);
+    Object.values(subtabs).forEach(({ tab }) => {
+      if (tab) tab.addEventListener('click', ensureTopTabActive);
+    });
   }
 });

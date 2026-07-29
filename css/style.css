@@ -626,6 +626,13 @@ input[type="password"]::placeholder {
   color: var(--text-muted);
 }
 
+.team-item .team-opr-inline {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 /* ====== Pit Scouting Modal ====== */
 .modal-overlay {
   position: fixed;

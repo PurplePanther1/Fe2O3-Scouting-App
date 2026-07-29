@@ -70,10 +70,10 @@ service cloud.firestore {
 
       allow update: if isAuth() && (
         // An existing member updating the team (captain required to touch
-        // roles/permissions/name/joinCode)
+        // roles/permissions/name/joinCode/pinnedEvents)
         (
           resource.data.members.hasAny([request.auth.uid])
-          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode'])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode', 'pinnedEvents'])
               || resource.data.roles[request.auth.uid] == 'captain')
         )
         ||
