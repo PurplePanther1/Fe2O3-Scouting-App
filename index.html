@@ -447,12 +447,34 @@
             <option value="dropdown">Dropdown (select one)</option>
             <option value="text">Short Text</option>
             <option value="number">Number</option>
+            <option value="counter">Counter (+/-)</option>
             <option value="textarea">Long Text / Notes</option>
           </select>
         </div>
         <div class="pit-field" id="bld-field-options-group">
           <label for="bld-field-options">Dropdown Options (one per line)</label>
           <textarea id="bld-field-options" placeholder="Option 1&#10;Option 2&#10;Option 3" rows="4"></textarea>
+        </div>
+        <div class="pit-field" id="bld-field-counter-group" style="display:none">
+          <label>Counter Settings</label>
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px">
+            <div>
+              <label for="bld-field-min" style="font-size:0.75rem; font-weight:400">Minimum</label>
+              <input type="number" id="bld-field-min" value="0" />
+            </div>
+            <div>
+              <label for="bld-field-max" style="font-size:0.75rem; font-weight:400">Maximum (optional)</label>
+              <input type="number" id="bld-field-max" placeholder="No limit" />
+            </div>
+            <div>
+              <label for="bld-field-step" style="font-size:0.75rem; font-weight:400">Step</label>
+              <input type="number" id="bld-field-step" value="1" />
+            </div>
+            <div>
+              <label for="bld-field-default" style="font-size:0.75rem; font-weight:400">Starting Value</label>
+              <input type="number" id="bld-field-default" placeholder="Same as minimum" />
+            </div>
+          </div>
         </div>
         <div class="pit-field" style="display:flex; align-items:center; gap:8px">
           <input type="checkbox" id="bld-field-required" style="width:auto; margin:0" />
