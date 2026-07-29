@@ -22,7 +22,8 @@ function updateMatchBulkSelectUI() {
   const deleteBtn = document.getElementById('btn-match-bulk-delete');
   if (!toggleBtn || !deleteBtn) return;
 
-  const canBulkManage = typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false;
+  const canBulkManage = (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false)
+    && (typeof canUserBulkDelete === 'function' ? canUserBulkDelete() : false);
   if (!canBulkManage) {
     toggleBtn.classList.add('hidden');
     deleteBtn.classList.add('hidden');

@@ -79,6 +79,10 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Exposed so selecting an event (from search or the Pinned Events list) can
+  // jump the user to a scouting subtab, same as clicking a subtab button directly.
+  window.activateScoutingSubTab = activateSubTab;
+
   // Ensure top-level Scouting tab stays highlighted when switching sub-tabs, and restore last-active subtab when navigating back to Scouting
   const scoutingTopTab = document.querySelector('[data-dtab="scouting"]');
   if (scoutingTopTab) {

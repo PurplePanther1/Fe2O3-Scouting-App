@@ -87,55 +87,14 @@ async function loadTeamMembers(teamId, teamData) {
     item.appendChild(info);
     item.appendChild(badge);
 
-    // If current user is captain, show permission toggles for non-captain members (or even captain, but captain is always true)
+    // If current user is captain, show an "Edit Permissions" button for non-captain members
     if (isCaptain && role !== 'captain') {
-      const permsContainer = document.createElement('div');
-      permsContainer.className = 'member-permissions';
-      permsContainer.style.display = 'flex';
-      permsContainer.style.flexDirection = 'column';
-      permsContainer.style.gap = '4px';
-      permsContainer.style.marginLeft = '12px';
-      permsContainer.style.fontSize = '12px';
-
-      const userPerms = currentTeamPermissions[uid] || {};
-
-      // Toggle 1: Can edit templates
-      const labelTmpl = document.createElement('label');
-      labelTmpl.style.display = 'flex';
-      labelTmpl.style.alignItems = 'center';
-      labelTmpl.style.gap = '6px';
-      labelTmpl.style.cursor = 'pointer';
-
-      const checkboxTmpl = document.createElement('input');
-      checkboxTmpl.type = 'checkbox';
-      checkboxTmpl.checked = userPerms.canEditTemplates === true;
-      checkboxTmpl.addEventListener('change', async () => {
-        await updateMemberPermission(uid, 'canEditTemplates', checkboxTmpl.checked);
-      });
-
-      labelTmpl.appendChild(checkboxTmpl);
-      labelTmpl.appendChild(document.createTextNode('Edit templates'));
-
-      // Toggle 2: Can edit other entries
-      const labelEntries = document.createElement('label');
-      labelEntries.style.display = 'flex';
-      labelEntries.style.alignItems = 'center';
-      labelEntries.style.gap = '6px';
-      labelEntries.style.cursor = 'pointer';
-
-      const checkboxEntries = document.createElement('input');
-      checkboxEntries.type = 'checkbox';
-      checkboxEntries.checked = userPerms.canEditOtherEntries === true;
-      checkboxEntries.addEventListener('change', async () => {
-        await updateMemberPermission(uid, 'canEditOtherEntries', checkboxEntries.checked);
-      });
-
-      labelEntries.appendChild(checkboxEntries);
-      labelEntries.appendChild(document.createTextNode("Edit others' entries"));
-
-      permsContainer.appendChild(labelTmpl);
-      permsContainer.appendChild(labelEntries);
-      item.appendChild(permsContainer);
+      const editPermsBtn = document.createElement('button');
+      editPermsBtn.className = 'btn btn-small btn-outline';
+      editPermsBtn.style.marginLeft = '12px';
+      editPermsBtn.textContent = 'Edit Permissions';
+      editPermsBtn.addEventListener('click', () => openMemberPermissionsModal(uid));
+      item.appendChild(editPermsBtn);
     } else if (role === 'captain' && isCaptain) {
       const captainNote = document.createElement('div');
       captainNote.style.fontSize = '11px';
@@ -168,28 +127,70 @@ async function loadTeamMembers(teamId, teamData) {
   }
 }
 
-// ====== Update member permission in Firestore ======
-async function updateMemberPermission(uid, permissionKey, value) {
-  if (!currentTeamId || !currentUser) return;
+// ====== Edit Permissions Modal ======
+const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canBulkDelete', 'canPinEvents'];
+let memberPermissionsEditingUid = null;
+
+function openMemberPermissionsModal(uid) {
+  memberPermissionsEditingUid = uid;
+  const userPerms = currentTeamPermissions[uid] || {};
+
+  MEMBER_PERMISSION_KEYS.forEach(key => {
+    const checkbox = document.getElementById(`perm-${key}`);
+    if (checkbox) checkbox.checked = userPerms[key] === true;
+  });
+
+  const errorEl = document.getElementById('member-permissions-error');
+  if (errorEl) errorEl.textContent = '';
+
+  document.getElementById('member-permissions-modal').classList.remove('hidden');
+}
+
+function closeMemberPermissionsModal() {
+  memberPermissionsEditingUid = null;
+  document.getElementById('member-permissions-modal').classList.add('hidden');
+}
+
+// ====== Save the edited member's permissions to Firestore ======
+async function saveMemberPermissions() {
+  if (!memberPermissionsEditingUid || !currentTeamId) return;
+  const uid = memberPermissionsEditingUid;
+  const errorEl = document.getElementById('member-permissions-error');
+
+  const updates = {};
+  const newPerms = {};
+  MEMBER_PERMISSION_KEYS.forEach(key => {
+    const checkbox = document.getElementById(`perm-${key}`);
+    const value = checkbox ? checkbox.checked : false;
+    updates[`permissions.${uid}.${key}`] = value;
+    newPerms[key] = value;
+  });
+
   try {
-    const updates = {};
-    updates[`permissions.${uid}.${permissionKey}`] = value;
     await db.collection('teams').doc(currentTeamId).update(updates);
 
-    // Update local cache
-    if (!currentTeamPermissions[uid]) {
-      currentTeamPermissions[uid] = {};
-    }
-    currentTeamPermissions[uid][permissionKey] = value;
+    currentTeamPermissions[uid] = { ...(currentTeamPermissions[uid] || {}), ...newPerms };
     if (currentTeamData) {
       currentTeamData.permissions = currentTeamPermissions;
     }
+    closeMemberPermissionsModal();
   } catch (err) {
-    console.error('Failed to update permission:', err);
-    alert('Failed to update permission. Check connection and permissions.');
-    loadTeamMembers(currentTeamId, currentTeamData); // reload to reset UI
+    console.error('Failed to update permissions:', err);
+    if (errorEl) errorEl.textContent = 'Failed to save permissions. Check your connection.';
   }
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+  const cancelBtn = document.getElementById('btn-member-perms-cancel');
+  const cancelInlineBtn = document.getElementById('btn-member-perms-cancel-inline');
+  const overlay = document.getElementById('member-permissions-overlay');
+  const saveBtn = document.getElementById('btn-member-perms-save');
+
+  if (cancelBtn) cancelBtn.addEventListener('click', closeMemberPermissionsModal);
+  if (cancelInlineBtn) cancelInlineBtn.addEventListener('click', closeMemberPermissionsModal);
+  if (overlay) overlay.addEventListener('click', closeMemberPermissionsModal);
+  if (saveBtn) saveBtn.addEventListener('click', saveMemberPermissions);
+});
 
 document.getElementById('input-display-name').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') document.getElementById('btn-save-display-name').click();

@@ -195,11 +195,11 @@
           <p id="event-error" class="error-message"></p>
         </div>
 
-        <!-- Scouting Subtabs (Match Scouting / Pit Scouting / Pinned) -->
+        <!-- Scouting Subtabs (Match Scouting / Pit Scouting / Pinned Events) -->
         <div id="scouting-subtabs" class="tabs" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
           <button class="tab active" data-subtab="match">Match Scouting</button>
           <button class="tab" data-subtab="pit">Pit Scouting</button>
-          <button class="tab" data-subtab="pinned">Pinned</button>
+          <button class="tab" data-subtab="pinned">Pinned Events</button>
         </div>
 
         <!-- ====== MATCH SCOUTING SUBTAB CONTENT ====== -->
@@ -316,7 +316,7 @@
         <!-- ====== PINNED EVENTS SUBTAB CONTENT ====== -->
         <div id="subtab-pinned" class="subtab-content hidden" style="margin-top:16px">
           <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">PINNED EVENTS</h3>
-          <p class="help-text">Events the captain has pinned for quick access, shared with the whole team.</p>
+          <p class="help-text">Events pinned by the captain or authorized members, for quick access shared with the whole team.</p>
           <p class="help-text" id="pinned-events-status">No events pinned yet.</p>
           <div id="pinned-events-list" class="event-list"></div>
         </div>
@@ -514,6 +514,40 @@
         <div class="pit-modal-actions" style="margin-top:20px">
           <button type="button" id="btn-bld-cancel-inline" class="btn btn-outline">Cancel</button>
           <button type="button" id="btn-bld-save" class="btn btn-primary">Save Field</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Edit Member Permissions Modal -->
+  <div id="member-permissions-modal" class="modal-overlay hidden">
+    <div id="member-permissions-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:420px">
+      <div class="modal-header">
+        <h3 id="member-permissions-title">Edit Permissions</h3>
+        <button id="btn-member-perms-cancel" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
+          <input type="checkbox" id="perm-canEditTemplates" style="width:auto; margin:0" />
+          <label for="perm-canEditTemplates" style="margin:0">Edit templates</label>
+        </div>
+        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
+          <input type="checkbox" id="perm-canEditOtherEntries" style="width:auto; margin:0" />
+          <label for="perm-canEditOtherEntries" style="margin:0">Edit others' entries</label>
+        </div>
+        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
+          <input type="checkbox" id="perm-canBulkDelete" style="width:auto; margin:0" />
+          <label for="perm-canBulkDelete" style="margin:0">Bulk-delete entries</label>
+        </div>
+        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
+          <input type="checkbox" id="perm-canPinEvents" style="width:auto; margin:0" />
+          <label for="perm-canPinEvents" style="margin:0">Pin/unpin events</label>
+        </div>
+        <p id="member-permissions-error" class="error-message"></p>
+        <div class="pit-modal-actions" style="margin-top:20px">
+          <button type="button" id="btn-member-perms-cancel-inline" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-member-perms-save" class="btn btn-primary">Save</button>
         </div>
       </div>
     </div>

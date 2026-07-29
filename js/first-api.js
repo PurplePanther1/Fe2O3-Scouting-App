@@ -322,6 +322,9 @@ function clearSelectedEvent() {
   if (typeof updatePinButtonUI === 'function') {
     updatePinButtonUI();
   }
+  if (typeof renderPinnedEventsList === 'function') {
+    renderPinnedEventsList();
+  }
 }
 
 // ====== Select an event ======
@@ -339,6 +342,12 @@ async function selectEvent(eventData) {
   document.getElementById('selected-event-code').textContent = `Code: ${eventData.code}`;
   document.getElementById('selected-event-teams-count').textContent = 'Loading teams...';
   document.getElementById('selected-event-area').classList.remove('hidden');
+
+  // Selecting an event (from search or the Pinned Events list) always lands on
+  // Match Scouting, regardless of which subtab was active beforehand.
+  if (typeof window.activateScoutingSubTab === 'function') {
+    window.activateScoutingSubTab('match');
+  }
 
   if (typeof updatePinButtonUI === 'function') {
     updatePinButtonUI();
@@ -497,7 +506,8 @@ function updatePitBulkSelectUI() {
   const deleteBtn = document.getElementById('btn-pit-bulk-delete');
   if (!toggleBtn || !deleteBtn) return;
 
-  const canBulkManage = typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false;
+  const canBulkManage = (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false)
+    && (typeof canUserBulkDelete === 'function' ? canUserBulkDelete() : false);
   if (!canBulkManage) {
     toggleBtn.classList.add('hidden');
     deleteBtn.classList.add('hidden');

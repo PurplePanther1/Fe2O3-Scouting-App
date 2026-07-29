@@ -580,9 +580,34 @@ function canUserEditOtherEntries(entry) {
   if (!currentUser || !currentTeamData) return false;
   if (entry && entry.scoutedBy === currentUser.uid) return true;
   if (getCurrentUserRole() === 'captain') return true;
-  if (currentTeamData.permissions && 
-      currentTeamData.permissions[currentUser.uid] && 
+  if (currentTeamData.permissions &&
+      currentTeamData.permissions[currentUser.uid] &&
       currentTeamData.permissions[currentUser.uid].canEditOtherEntries === true) {
+    return true;
+  }
+  return false;
+}
+
+// UI-only gate for the bulk-select/delete toolbar — the underlying deletes still go
+// through canEditOrDeleteEntry() in firestore.rules, which only cares about
+// canEditOtherEntries, so this has no rules-side counterpart.
+function canUserBulkDelete() {
+  if (!currentUser || !currentTeamData) return false;
+  if (getCurrentUserRole() === 'captain') return true;
+  if (currentTeamData.permissions &&
+      currentTeamData.permissions[currentUser.uid] &&
+      currentTeamData.permissions[currentUser.uid].canBulkDelete === true) {
+    return true;
+  }
+  return false;
+}
+
+function canUserPinEvents() {
+  if (!currentUser || !currentTeamData) return false;
+  if (getCurrentUserRole() === 'captain') return true;
+  if (currentTeamData.permissions &&
+      currentTeamData.permissions[currentUser.uid] &&
+      currentTeamData.permissions[currentUser.uid].canPinEvents === true) {
     return true;
   }
   return false;

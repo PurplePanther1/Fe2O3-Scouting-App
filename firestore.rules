@@ -70,11 +70,17 @@ service cloud.firestore {
 
       allow update: if isAuth() && (
         // An existing member updating the team (captain required to touch
-        // roles/permissions/name/joinCode/pinnedEvents)
+        // roles/permissions/name/joinCode; pinnedEvents may also be touched by a
+        // member with permissions[uid].canPinEvents == true)
         (
           resource.data.members.hasAny([request.auth.uid])
-          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode', 'pinnedEvents'])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode'])
               || resource.data.roles[request.auth.uid] == 'captain')
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['pinnedEvents'])
+              || resource.data.roles[request.auth.uid] == 'captain'
+              || (resource.data.permissions != null
+                  && resource.data.permissions[request.auth.uid] != null
+                  && resource.data.permissions[request.auth.uid].canPinEvents == true))
         )
         ||
         // A brand-new user joining: the ONLY change allowed is appending their own
