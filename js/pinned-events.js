@@ -38,16 +38,16 @@ async function togglePinForEvent(eventEntry) {
       await teamRef.update({
         pinnedEvents: firebase.firestore.FieldValue.arrayRemove(existing)
       });
-      currentTeamData.pinnedEvents = currentTeamData.pinnedEvents.filter(e => e.code !== eventEntry.code);
     } else {
       const entry = { code: eventEntry.code, name: eventEntry.name || eventEntry.code };
       await teamRef.update({
         pinnedEvents: firebase.firestore.FieldValue.arrayUnion(entry)
       });
-      currentTeamData.pinnedEvents = [...(currentTeamData.pinnedEvents || []), entry];
     }
-    updatePinButtonUI();
-    renderPinnedEventsList();
+    // No local state mutation or re-render here — the live team doc listener
+    // (watchTeamDoc in auth.js) picks up this write, refreshes currentTeamData with
+    // the authoritative array, and re-renders (updatePinButtonUI/renderPinnedEventsList)
+    // for us. Doing it here too raced that listener and duplicated the visual row.
   } catch (err) {
     console.error('Failed to toggle pinned event:', err);
     alert('Failed to update pinned events. Check your connection and permissions.');
