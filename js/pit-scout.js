@@ -227,6 +227,14 @@ function closePitScoutForm() {
   currentPitTeamNumber = null;
   currentPitEventCode = null;
   currentFormController = null;
+
+  // If the Team Detail modal (Team Information tab) is open behind this form,
+  // refresh its pit data section — covers the save/delete case (already refreshed
+  // via refreshTeamListScoutedState, but harmless to repeat) as well as a plain
+  // cancel/close, so the section never shows anything stale after this closes.
+  if (currentSelectedTeamNumber && typeof renderPitDataForTeam === 'function' && selectedEvent?.code) {
+    renderPitDataForTeam(currentSelectedTeamNumber, selectedEvent.code);
+  }
 }
 
 // ====== Watch pit scouting status for a given event ======
@@ -323,17 +331,10 @@ function refreshTeamListScoutedState() {
     }
   });
 
-  // Also update the detail area scout button if a team is selected
-  const detailTeamNum = document.getElementById('td-team-number').textContent.replace('#', '');
-  if (detailTeamNum) {
-    const detailBtn = document.getElementById('btn-scout-team');
-    if (isTeamScouted(detailTeamNum, eventCode)) {
-      detailBtn.textContent = 'Edit Scout Data';
-      detailBtn.classList.add('btn-rescout');
-    } else {
-      detailBtn.textContent = 'Scout This Team';
-      detailBtn.classList.remove('btn-rescout');
-    }
+  // If the Team Detail modal is currently open for a team, refresh its pit
+  // scouting data section too, in case this save/delete affected that team.
+  if (currentSelectedTeamNumber && typeof renderPitDataForTeam === 'function') {
+    renderPitDataForTeam(currentSelectedTeamNumber, eventCode);
   }
 }
 

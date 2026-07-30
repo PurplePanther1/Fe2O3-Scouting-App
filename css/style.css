@@ -648,6 +648,13 @@ input[type="password"]::placeholder {
   display: none;
 }
 
+/* Pit/Match scouting forms can be opened from within the Team Detail modal (Team
+   Information tab) — they need to stack above it rather than behind it, since DOM
+   order alone (equal z-index) would otherwise put the later team-detail-modal on top. */
+#pit-modal, #match-modal {
+  z-index: 1001;
+}
+
 .modal-overlay-bg {
   position: absolute;
   inset: 0;

@@ -189,21 +189,40 @@
             <p class="help-text" id="selected-event-teams-count"></p>
             <button id="btn-export-event-sheets" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">📊 Export All Teams to Sheets</button>
             <button id="btn-pin-event" class="btn btn-outline btn-small hidden" style="margin-top:10px; width:100%">📌 Pin This Event</button>
+            <button id="btn-deselect-event" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">✕ Deselect Event</button>
             <p id="event-export-error" class="error-message"></p>
             <p id="event-export-success" class="success-message"></p>
           </div>
           <p id="event-error" class="error-message"></p>
         </div>
 
-        <!-- Scouting Subtabs (Match Scouting / Pit Scouting / Pinned Events) -->
+        <!-- Scouting Subtabs (Team Information / Pit Scouting / Match Scouting / Pinned Events) -->
         <div id="scouting-subtabs" class="tabs" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
-          <button class="tab active" data-subtab="match">Match Scouting</button>
+          <button class="tab active" data-subtab="info">Team Information</button>
           <button class="tab" data-subtab="pit">Pit Scouting</button>
+          <button class="tab" data-subtab="match">Match Scouting</button>
           <button class="tab" data-subtab="pinned">Pinned Events</button>
         </div>
 
+        <!-- ====== TEAM INFORMATION SUBTAB CONTENT ====== -->
+        <div id="subtab-info" class="subtab-content active" style="margin-top:16px">
+          <div style="margin-top:10px">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (INFO)</h3>
+            <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
+              <input type="text" id="input-team-search-info" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
+              <select id="select-team-sort-info" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
+                <option value="number">Sort: Number (low-high)</option>
+                <option value="name">Sort: Name (A-Z)</option>
+                <option value="opr">Sort: OPR (high-low)</option>
+              </select>
+            </div>
+            <p class="help-text" id="team-list-status-info">Select an event above to load teams.</p>
+            <div id="team-list-info" class="team-list"></div>
+          </div>
+        </div>
+
         <!-- ====== MATCH SCOUTING SUBTAB CONTENT ====== -->
-        <div id="subtab-match" class="subtab-content active" style="margin-top:16px">
+        <div id="subtab-match" class="subtab-content hidden" style="margin-top:16px">
           <!-- Team list for Match Scouting -->
           <div style="margin-top:10px">
             <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (MATCH)</h3>
@@ -217,48 +236,6 @@
             </div>
             <p class="help-text" id="team-list-status-match">Select an event above to load teams.</p>
             <div id="team-list-match" class="team-list"></div>
-          </div>
-
-          <!-- Team Detail View for Match Scouting -->
-          <div id="team-detail-area-match" class="hidden" style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
-            <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAM DETAIL</h3>
-            <div id="team-detail-card-match" style="background:var(--surface); border-radius:8px; padding:16px">
-              <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px">
-                <div>
-                  <h4 id="td-team-number" style="font-size:1.2rem; color:var(--primary)"></h4>
-                  <p id="td-team-name" class="help-text" style="margin-bottom:4px"></p>
-                  <p id="td-team-location" class="help-text" style="font-size:0.8rem; margin-bottom:0"></p>
-                </div>
-                <span id="td-opr-badge" class="member-role-badge" style="font-size:0.8rem; padding:4px 10px">OPR: --</span>
-              </div>
-              <div id="td-awards" style="margin-top:12px">
-                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; flex-wrap:wrap">
-                  <p class="help-text" style="font-size:0.8rem; margin-bottom:0; font-weight:600">AWARDS</p>
-                  <select id="td-awards-season-select" class="awards-season-select"></select>
-                </div>
-                <div id="td-awards-list"></div>
-              </div>
-              <!-- ====== Match Scouting Section in Team Detail ====== -->
-              <div id="td-match-scouting-section" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
-                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px">
-                  <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted)">MATCH SCOUTING ENTRIES</p>
-                  <button id="btn-add-match-entry" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Match</button>
-                </div>
-                <p class="help-text" id="td-match-count" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
-                <input type="text" id="input-match-entry-search" placeholder="Search by match #..." autocomplete="off" style="margin-bottom:8px;">
-                <div id="match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
-                  <button id="btn-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
-                  <button id="btn-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
-                  <span id="match-bulk-delete-status" style="font-size:0.8rem;"></span>
-                </div>
-                <div id="td-match-entries"></div>
-              </div>
-              <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📊 Export to Sheets</button>
-              <p id="td-export-match-error" class="error-message"></p>
-              <p id="td-export-match-success" class="success-message"></p>
-              <button id="btn-close-team-detail-match" class="btn btn-outline" style="margin-top:8px; width:100%; font-size:0.85rem;">Close Detail</button>
-            </div>
-            <p id="td-error" class="error-message"></p>
           </div>
         </div>
 
@@ -282,34 +259,6 @@
             </div>
             <p class="help-text" id="team-list-status-pit">Select an event above to load teams.</p>
             <div id="team-list-pit" class="team-list"></div>
-          </div>
-
-          <!-- Team Detail View for Pit Scouting -->
-          <div id="team-detail-area-pit" class="hidden" style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
-            <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAM PIT DETAIL</h3>
-            <div id="team-detail-card-pit" style="background:var(--surface); border-radius:8px; padding:16px">
-              <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px">
-                <div>
-                  <h4 id="td-pit-team-number" style="font-size:1.2rem; color:var(--primary)"></h4>
-                  <p id="td-pit-team-name" class="help-text" style="margin-bottom:4px"></p>
-                  <p id="td-pit-team-location" class="help-text" style="font-size:0.8rem; margin-bottom:0"></p>
-                </div>
-                <span id="td-pit-opr-badge" class="member-role-badge" style="font-size:0.8rem; padding:4px 10px">OPR: --</span>
-              </div>
-              <div id="td-pit-awards" style="margin-top:12px">
-                <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; flex-wrap:wrap">
-                  <p class="help-text" style="font-size:0.8rem; margin-bottom:0; font-weight:600">AWARDS</p>
-                  <select id="td-pit-awards-season-select" class="awards-season-select"></select>
-                </div>
-                <div id="td-pit-awards-list"></div>
-              </div>
-              <button id="btn-scout-team" class="btn btn-primary" style="margin-top:16px">Scout This Team (Pit)</button>
-              <button id="btn-export-team-pit" class="btn btn-outline" style="margin-top:12px; width:100%; font-size:0.85rem;">📊 Export to Sheets</button>
-              <p id="td-export-pit-error" class="error-message"></p>
-              <p id="td-export-pit-success" class="success-message"></p>
-              <button id="btn-close-team-detail-pit" class="btn btn-outline" style="margin-top:8px; width:100%; font-size:0.85rem;">Close Detail</button>
-            </div>
-            <p id="td-pit-error" class="error-message"></p>
           </div>
         </div>
 
@@ -424,6 +373,62 @@
         </div>
         <button type="button" id="match-delete-btn" class="btn btn-link btn-delete hidden" style="margin-top:12px; color:var(--error)">Delete this match entry</button>
       </form>
+    </div>
+  </div>
+
+  <!-- ====== Team Detail Modal (Team Information tab) ====== -->
+  <div id="team-detail-modal" class="modal-overlay hidden">
+    <div id="team-detail-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:600px">
+      <div class="modal-header">
+        <h3 id="team-detail-modal-title">Team Detail</h3>
+        <button id="btn-team-detail-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px; max-height:75vh; overflow-y:auto">
+        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px">
+          <div>
+            <h4 id="td-team-number" style="font-size:1.2rem; color:var(--primary)"></h4>
+            <p id="td-team-name" class="help-text" style="margin-bottom:4px"></p>
+            <p id="td-team-location" class="help-text" style="font-size:0.8rem; margin-bottom:0"></p>
+          </div>
+          <span id="td-opr-badge" class="member-role-badge" style="font-size:0.8rem; padding:4px 10px">OPR: --</span>
+        </div>
+        <div id="td-awards" style="margin-top:12px">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:6px; flex-wrap:wrap">
+            <p class="help-text" style="font-size:0.8rem; margin-bottom:0; font-weight:600">AWARDS</p>
+            <select id="td-awards-season-select" class="awards-season-select"></select>
+          </div>
+          <div id="td-awards-list"></div>
+        </div>
+        <!-- ====== Pit Scouting Data ====== -->
+        <div id="td-pit-data-section" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px">
+            <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted); margin-bottom:0">PIT SCOUTING DATA</p>
+            <button id="btn-team-info-pit-scout" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Pit Scout</button>
+          </div>
+          <p class="help-text" id="td-pit-data-status" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
+          <div id="td-pit-data-list"></div>
+        </div>
+        <!-- ====== Match Scouting Section in Team Detail ====== -->
+        <div id="td-match-scouting-section" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px">
+            <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted)">MATCH SCOUTING ENTRIES</p>
+            <button id="btn-add-match-entry" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Match</button>
+          </div>
+          <p class="help-text" id="td-match-count" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
+          <input type="text" id="input-match-entry-search" placeholder="Search by match #..." autocomplete="off" style="margin-bottom:8px;">
+          <div id="match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+            <button id="btn-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
+            <button id="btn-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
+            <span id="match-bulk-delete-status" style="font-size:0.8rem;"></span>
+          </div>
+          <div id="td-match-entries"></div>
+        </div>
+        <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📊 Export to Sheets</button>
+        <p id="td-export-match-error" class="error-message"></p>
+        <p id="td-export-match-success" class="success-message"></p>
+        <p id="td-error" class="error-message"></p>
+      </div>
     </div>
   </div>
 
@@ -575,6 +580,7 @@
   <script src="js/dynamic-form.js"></script>
   <script src="js/pit-scout.js"></script>
   <script src="js/match-scout.js"></script>
+  <script src="js/team-info.js"></script>
   <script src="js/form-builder.js"></script>
   <script src="js/app.js"></script>
   <script src="js/sheets-export.js"></script>

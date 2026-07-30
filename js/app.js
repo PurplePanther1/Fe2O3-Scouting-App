@@ -14,10 +14,14 @@ if ('serviceWorker' in navigator) {
 }
 
 // ====== Global Tab Navigation Handler ======
-let lastActiveScoutingSubTab = 'match'; // Remembers 'match', 'pit', or 'pinned'
+let lastActiveScoutingSubTab = 'info'; // Remembers 'info', 'match', 'pit', or 'pinned'
 
 document.addEventListener('DOMContentLoaded', () => {
   const subtabs = {
+    info: {
+      tab: document.querySelector('[data-subtab="info"]'),
+      view: document.getElementById('subtab-info')
+    },
     match: {
       tab: document.querySelector('[data-subtab="match"]'),
       view: document.getElementById('subtab-match')
@@ -45,23 +49,15 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
 
-    if (subtab === 'pit') {
-      console.log('Switched to Pit Scouting View');
-      // If a team is currently selected, auto-load its pit detail
-      if (typeof currentSelectedTeamNumber !== 'undefined' && currentSelectedTeamNumber && typeof selectedEvent !== 'undefined' && selectedEvent?.code) {
-        const foundTeam = (typeof currentEventTeams !== 'undefined' ? currentEventTeams : []).find(t => t.teamNumber === currentSelectedTeamNumber);
-        if (typeof wireTeamPitDetailClick === 'function') {
-          wireTeamPitDetailClick(currentSelectedTeamNumber, selectedEvent.code, foundTeam || { teamNumber: currentSelectedTeamNumber });
-        }
+    if (subtab === 'info') {
+      console.log('Switched to Team Information View');
+      if (typeof renderTeamInfoList === 'function' && typeof currentEventTeams !== 'undefined' && currentEventTeams.length > 0) {
+        renderTeamInfoList(currentEventTeams);
       }
+    } else if (subtab === 'pit') {
+      console.log('Switched to Pit Scouting View');
     } else if (subtab === 'match') {
       console.log('Switched to Match Scouting View');
-      // If a team is currently selected, auto-load its match detail
-      if (typeof currentSelectedTeamNumber !== 'undefined' && currentSelectedTeamNumber && typeof selectedEvent !== 'undefined' && selectedEvent?.code) {
-        if (typeof loadTeamDetail === 'function') {
-          loadTeamDetail(currentSelectedTeamNumber, selectedEvent.code);
-        }
-      }
     } else if (subtab === 'pinned') {
       console.log('Switched to Pinned Events View');
       if (typeof renderPinnedEventsList === 'function') {

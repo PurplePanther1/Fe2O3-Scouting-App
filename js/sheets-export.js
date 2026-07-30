@@ -222,11 +222,30 @@ async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, ma
 }
 
 // ====== Status message helper (mirrors the app's error/success paragraph convention) ======
+// Auto-clears after a few seconds, same convention as other status messages in the
+// app (e.g. bulk-delete status) — without this, a message like a cancelled Google
+// auth popup would sit in the DOM indefinitely, including reappearing stale the next
+// time the Team Detail modal (which hosts td-export-match-*) is reopened.
+const exportStatusTimers = {};
+
 function setExportStatus(prefix, type, message) {
   const errEl = document.getElementById(prefix + '-error');
   const okEl = document.getElementById(prefix + '-success');
   if (errEl) errEl.textContent = type === 'error' ? message : '';
   if (okEl) okEl.textContent = type === 'success' ? message : '';
+
+  const timerKey = `${prefix}-${type}`;
+  if (exportStatusTimers[timerKey]) {
+    clearTimeout(exportStatusTimers[timerKey]);
+    delete exportStatusTimers[timerKey];
+  }
+  if (message) {
+    exportStatusTimers[timerKey] = setTimeout(() => {
+      const el = document.getElementById(`${prefix}-${type}`);
+      if (el) el.textContent = '';
+      delete exportStatusTimers[timerKey];
+    }, 5000);
+  }
 }
 
 // ====== Export a single team's pit + match scouting data for the selected event ======
@@ -344,9 +363,6 @@ async function handleExportEventClick(statusPrefix) {
 document.addEventListener('DOMContentLoaded', () => {
   const btnMatch = document.getElementById('btn-export-team-match');
   if (btnMatch) btnMatch.addEventListener('click', () => handleExportTeamClick('td-export-match'));
-
-  const btnPit = document.getElementById('btn-export-team-pit');
-  if (btnPit) btnPit.addEventListener('click', () => handleExportTeamClick('td-export-pit'));
 
   const btnEvent = document.getElementById('btn-export-event-sheets');
   if (btnEvent) btnEvent.addEventListener('click', () => handleExportEventClick('event-export'));

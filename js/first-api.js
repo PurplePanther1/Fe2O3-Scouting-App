@@ -278,6 +278,10 @@ function clearSelectedEvent() {
   // next event's roster would still read as "selected" and show "Close Detail"
   // even though the detail panel was just hidden below.
   currentSelectedTeamNumber = null;
+  // Otherwise a stale array here would get re-rendered into the Team Information
+  // tab's list the next time the user switches to it (app.js re-renders from this
+  // array on every tab switch), showing the previous event's teams after clearing.
+  currentEventTeams = [];
   const area = document.getElementById('selected-event-area');
   if (area) area.classList.add('hidden');
   const nameEl = document.getElementById('selected-event-name');
@@ -300,10 +304,14 @@ function clearSelectedEvent() {
   const eventResults = document.getElementById('event-results');
   if (eventResults) eventResults.innerHTML = '';
 
-  const teamDetailMatch = document.getElementById('team-detail-area-match');
-  if (teamDetailMatch) teamDetailMatch.classList.add('hidden');
-  const teamDetailPit = document.getElementById('team-detail-area-pit');
-  if (teamDetailPit) teamDetailPit.classList.add('hidden');
+  const teamListInfo = document.getElementById('team-list-info');
+  if (teamListInfo) teamListInfo.innerHTML = '';
+  const statusInfo = document.getElementById('team-list-status-info');
+  if (statusInfo) statusInfo.textContent = 'Select an event above to load teams.';
+
+  if (typeof closeTeamDetailModal === 'function') {
+    closeTeamDetailModal();
+  }
 
   const tdError = document.getElementById('td-error');
   if (tdError) tdError.textContent = '';
@@ -343,10 +351,10 @@ async function selectEvent(eventData) {
   document.getElementById('selected-event-teams-count').textContent = 'Loading teams...';
   document.getElementById('selected-event-area').classList.remove('hidden');
 
-  // Selecting an event (from search or the Pinned Events list) always lands on
-  // Match Scouting, regardless of which subtab was active beforehand.
+  // Selecting an event always lands on Team Information, regardless of which
+  // subtab was active beforehand or which source (search vs. Pinned Events) it came from.
   if (typeof window.activateScoutingSubTab === 'function') {
-    window.activateScoutingSubTab('match');
+    window.activateScoutingSubTab('info');
   }
 
   if (typeof updatePinButtonUI === 'function') {
@@ -487,6 +495,9 @@ function renderTeamList(teams) {
   console.time('[Timing] renderTeamList total');
   renderMatchTeamList(teams);
   renderPitTeamList(teams);
+  if (typeof renderTeamInfoList === 'function') {
+    renderTeamInfoList(teams);
+  }
   console.timeEnd('[Timing] renderTeamList total');
 }
 
@@ -554,12 +565,17 @@ function applyTeamSortMode(mode) {
 
   const matchSelect = document.getElementById('select-team-sort-match');
   const pitSelect = document.getElementById('select-team-sort-pit');
+  const infoSelect = document.getElementById('select-team-sort-info');
   if (matchSelect && matchSelect.value !== currentTeamSortMode) matchSelect.value = currentTeamSortMode;
   if (pitSelect && pitSelect.value !== currentTeamSortMode) pitSelect.value = currentTeamSortMode;
+  if (infoSelect && infoSelect.value !== currentTeamSortMode) infoSelect.value = currentTeamSortMode;
 
   if (currentEventTeams && currentEventTeams.length > 0) {
     renderMatchTeamList(currentEventTeams);
     renderPitTeamList(currentEventTeams);
+    if (typeof renderTeamInfoList === 'function') {
+      renderTeamInfoList(currentEventTeams);
+    }
     applyTeamSearchFilter(currentTeamSearchQuery);
   }
 }
@@ -572,6 +588,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const pitSortSelect = document.getElementById('select-team-sort-pit');
   if (pitSortSelect) {
     pitSortSelect.addEventListener('change', (e) => applyTeamSortMode(e.target.value));
+  }
+  const infoSortSelect = document.getElementById('select-team-sort-info');
+  if (infoSortSelect) {
+    infoSortSelect.addEventListener('change', (e) => applyTeamSortMode(e.target.value));
   }
 
   // Pit bulk-select toggle
@@ -635,14 +655,18 @@ function applyTeamSearchFilter(query) {
   currentTeamSearchQuery = query || '';
   const q = currentTeamSearchQuery.trim().toLowerCase();
 
-  // Update both input values if they differ
+  // Update all input values if they differ
   const matchInput = document.getElementById('input-team-search-match');
   const pitInput = document.getElementById('input-team-search-pit');
+  const infoInput = document.getElementById('input-team-search-info');
   if (matchInput && matchInput.value !== currentTeamSearchQuery) {
     matchInput.value = currentTeamSearchQuery;
   }
   if (pitInput && pitInput.value !== currentTeamSearchQuery) {
     pitInput.value = currentTeamSearchQuery;
+  }
+  if (infoInput && infoInput.value !== currentTeamSearchQuery) {
+    infoInput.value = currentTeamSearchQuery;
   }
 
   // Filter match team items
@@ -658,6 +682,15 @@ function applyTeamSearchFilter(query) {
   const pitContainer = document.getElementById('team-list-pit');
   if (pitContainer) {
     pitContainer.querySelectorAll('.team-item').forEach(item => {
+      const text = item.textContent.toLowerCase();
+      item.style.display = (!q || text.includes(q)) ? '' : 'none';
+    });
+  }
+
+  // Filter info team items
+  const infoContainer = document.getElementById('team-list-info');
+  if (infoContainer) {
+    infoContainer.querySelectorAll('.team-item').forEach(item => {
       const text = item.textContent.toLowerCase();
       item.style.display = (!q || text.includes(q)) ? '' : 'none';
     });
@@ -679,6 +712,13 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
+  const infoSearchInput = document.getElementById('input-team-search-info');
+  if (infoSearchInput) {
+    infoSearchInput.addEventListener('input', (e) => {
+      applyTeamSearchFilter(e.target.value);
+    });
+  }
+
   // Also hook into scouting subtab buttons to re-apply filter on tab switch without resetting
   const subtabButtons = document.querySelectorAll('#scouting-subtabs .tab');
   subtabButtons.forEach(btn => {
@@ -689,83 +729,6 @@ document.addEventListener('DOMContentLoaded', () => {
       }, 10);
     });
   });
-});
-
-// ====== Unified Team Selection, Deselection & UI Sync ======
-function setGlobalSelectedTeam(teamNumber, eventCode, teamObj) {
-  if (currentSelectedTeamNumber === teamNumber) {
-    // Deselect / Close
-    currentSelectedTeamNumber = null;
-  } else {
-    // Select new
-    currentSelectedTeamNumber = teamNumber;
-  }
-
-  // Update visibility and contents of detail areas
-  const detailMatch = document.getElementById('team-detail-area-match');
-  const detailPit = document.getElementById('team-detail-area-pit');
-
-  if (currentSelectedTeamNumber === null) {
-    if (detailMatch) detailMatch.classList.add('hidden');
-    if (detailPit) detailPit.classList.add('hidden');
-  } else {
-    // Determine team object if not provided
-    const obj = teamObj || currentEventTeams.find(t => t.teamNumber === currentSelectedTeamNumber);
-
-    // Show Match detail if active or update both
-    if (detailMatch) detailMatch.classList.remove('hidden');
-    if (typeof loadTeamDetail === 'function') {
-      loadTeamDetail(currentSelectedTeamNumber, eventCode || selectedEvent?.code || '');
-    }
-
-    // Show Pit detail if active or populate pit fields
-    if (detailPit) detailPit.classList.remove('hidden');
-    const pitNumEl = document.getElementById('td-pit-team-number');
-    if (pitNumEl) pitNumEl.textContent = `#${currentSelectedTeamNumber}`;
-    const teamName = obj?.name || obj?.nameFull || obj?.nameShort || obj?.schoolName || obj?.teamNameCalc || 'Team Name Unavailable';
-    const pitNameEl = document.getElementById('td-pit-team-name');
-    if (pitNameEl) pitNameEl.textContent = teamName;
-
-    if (typeof loadTeamDetail === 'function') {
-      loadTeamDetail(currentSelectedTeamNumber, eventCode || selectedEvent?.code || '', 'td-pit-');
-    }
-
-    const scoutBtn = document.getElementById('team-detail-card-pit')?.querySelector('#btn-scout-team') || document.getElementById('team-detail-card-pit')?.querySelector('.btn-primary');
-    if (scoutBtn) {
-      const newBtn = scoutBtn.cloneNode(true);
-      scoutBtn.parentNode.replaceChild(newBtn, scoutBtn);
-      newBtn.addEventListener('click', () => {
-        if (typeof openPitScoutForm === 'function') {
-          openPitScoutForm(currentSelectedTeamNumber, eventCode || selectedEvent?.code);
-        }
-      });
-    }
-  }
-
-  // Refresh both team lists to update button text/state ("View Detail" vs "Close Detail") across both tabs
-  if (currentEventTeams && currentEventTeams.length > 0) {
-    renderMatchTeamList(currentEventTeams);
-    renderPitTeamList(currentEventTeams);
-    // Re-apply search filter so filter state isn't lost on re-render
-    applyTeamSearchFilter(currentTeamSearchQuery);
-  }
-}
-
-// Wire up close detail buttons
-document.addEventListener('DOMContentLoaded', () => {
-  const closeMatchBtn = document.getElementById('btn-close-team-detail-match');
-  if (closeMatchBtn) {
-    closeMatchBtn.addEventListener('click', () => {
-      setGlobalSelectedTeam(null, selectedEvent?.code);
-    });
-  }
-
-  const closePitBtn = document.getElementById('btn-close-team-detail-pit');
-  if (closePitBtn) {
-    closePitBtn.addEventListener('click', () => {
-      setGlobalSelectedTeam(null, selectedEvent?.code);
-    });
-  }
 });
 
 function renderMatchTeamList(teams) {
@@ -815,18 +778,6 @@ function renderMatchTeamList(teams) {
     const btnGroup = document.createElement('div');
     btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
 
-    const isSelected = currentSelectedTeamNumber === team.teamNumber;
-
-    // View/Close Detail button for Match
-    const viewDetailBtn = document.createElement('button');
-    viewDetailBtn.className = isSelected ? 'btn btn-small btn-primary' : 'btn btn-small btn-secondary';
-    viewDetailBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
-    viewDetailBtn.textContent = isSelected ? 'Close Detail' : 'View Detail';
-    viewDetailBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setGlobalSelectedTeam(team.teamNumber, selectedEvent?.code || '', team);
-    });
-
     // Match scout quick button (+ Match Scout)
     const scoutBtn = document.createElement('button');
     scoutBtn.className = 'btn btn-small btn-primary';
@@ -839,7 +790,6 @@ function renderMatchTeamList(teams) {
       }
     });
 
-    btnGroup.appendChild(viewDetailBtn);
     btnGroup.appendChild(scoutBtn);
 
     item.appendChild(leftGroup);
@@ -895,18 +845,6 @@ function renderPitTeamList(teams) {
     const btnGroup = document.createElement('div');
     btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
 
-    const isSelected = currentSelectedTeamNumber === team.teamNumber;
-
-    // View/Close Detail button for Pit
-    const viewDetailBtn = document.createElement('button');
-    viewDetailBtn.className = isSelected ? 'btn btn-small btn-primary' : 'btn btn-small btn-secondary';
-    viewDetailBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
-    viewDetailBtn.textContent = isSelected ? 'Close Detail' : 'View Detail';
-    viewDetailBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      setGlobalSelectedTeam(team.teamNumber, selectedEvent?.code || '', team);
-    });
-
     const scoutBtn = document.createElement('button');
     // btn-pit-quick-scout is a style-neutral hook (no CSS rule targets it) — it just
     // gives refreshTeamListScoutedState() a stable selector to find this exact button,
@@ -956,7 +894,6 @@ function renderPitTeamList(teams) {
       leftGroup.insertBefore(checkbox, leftGroup.firstChild);
     }
 
-    btnGroup.appendChild(viewDetailBtn);
     btnGroup.appendChild(scoutBtn);
 
     item.appendChild(leftGroup);
@@ -1007,6 +944,14 @@ async function doSearch() {
 
 // ====== Event Search Button ======
 document.getElementById('btn-search-events').addEventListener('click', doSearch);
+
+// ====== Deselect Event Button (normal-search flow's counterpart to the Pinned Events tab's Deselect button) ======
+const btnDeselectEvent = document.getElementById('btn-deselect-event');
+if (btnDeselectEvent) {
+  btnDeselectEvent.addEventListener('click', () => {
+    clearSelectedEvent();
+  });
+}
 
 // ====== Live Autocomplete (client-side, no API calls) ======
 document.getElementById('input-event-search').addEventListener('input', () => {

@@ -216,17 +216,12 @@ async function renderAwardsList(prefix) {
   });
 }
 
-// Wire up the awards season filters (Match & Pit) once
+// Wire up the awards season filter (in the Team Detail modal) once
 document.addEventListener('DOMContentLoaded', () => {
-  ['td-awards-season-select', 'td-pit-awards-season-select'].forEach(id => {
-    const select = document.getElementById(id);
-    if (select) {
-      select.addEventListener('change', () => {
-        const prefix = id.replace('awards-season-select', '');
-        renderAwardsList(prefix);
-      });
-    }
-  });
+  const select = document.getElementById('td-awards-season-select');
+  if (select) {
+    select.addEventListener('change', () => renderAwardsList('td-'));
+  }
 });
 
 // ====== Get or create cached team detail in Firestore ======
@@ -269,8 +264,6 @@ async function cacheTeamDetail(teamNumber, data) {
 
 // ====== Load team detail into the detail view ======
 async function loadTeamDetail(teamNumber, eventCode, prefix = 'td-') {
-  const isPit = prefix === 'td-pit-';
-  const detailArea = document.getElementById(isPit ? 'team-detail-area-pit' : 'team-detail-area-match') || document.getElementById('team-detail-area');
   const numberEl = document.getElementById(`${prefix}team-number`);
   const nameEl = document.getElementById(`${prefix}team-name`);
   const locationEl = document.getElementById(`${prefix}team-location`);
@@ -278,8 +271,7 @@ async function loadTeamDetail(teamNumber, eventCode, prefix = 'td-') {
   const awardsList = document.getElementById(`${prefix}awards-list`);
   const errorEl = document.getElementById(`${prefix}error`);
 
-  // Show detail area with loading state
-  if (detailArea) detailArea.classList.remove('hidden');
+  // Show loading state
   if (numberEl) numberEl.textContent = `#${teamNumber}`;
   if (nameEl) nameEl.textContent = 'Loading...';
   if (locationEl) locationEl.textContent = '';
@@ -287,8 +279,8 @@ async function loadTeamDetail(teamNumber, eventCode, prefix = 'td-') {
   if (awardsList) awardsList.innerHTML = '<p class="help-text" style="font-size:0.8rem">Loading awards...</p>';
   if (errorEl) errorEl.textContent = '';
 
-  // Render match entries immediately (from cache if available) if match view
-  if (!isPit && typeof renderMatchListForTeam === 'function' && eventCode) {
+  // Render match entries immediately (from cache if available)
+  if (typeof renderMatchListForTeam === 'function' && eventCode) {
     renderMatchListForTeam(eventCode, teamNumber);
   }
 
@@ -396,25 +388,14 @@ function renderTeamDetail(detail, teamNumber, prefix = 'td-') {
   renderAwardsList(prefix);
 }
 
-// ====== Wire up team list items to show detail on click ======
-function wireTeamDetailClick(teamNumber, eventCode) {
-  loadTeamDetail(teamNumber, eventCode);
+// ====== Add Match Entry button (in the Team Detail modal) ======
+const btnAddMatchEntry = document.getElementById('btn-add-match-entry');
+if (btnAddMatchEntry) {
+  btnAddMatchEntry.addEventListener('click', () => {
+    const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
+    const eventCode = selectedEvent?.code;
+    if (teamNum && eventCode && typeof openMatchScoutForm === 'function') {
+      openMatchScoutForm(teamNum, eventCode);
+    }
+  });
 }
-
-// ====== Scout This Team button ======
-document.getElementById('btn-scout-team').addEventListener('click', () => {
-  const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
-  const eventCode = selectedEvent?.code;
-  if (teamNum && eventCode && typeof openPitScoutForm === 'function') {
-    openPitScoutForm(teamNum, eventCode);
-  }
-});
-
-// ====== Add Match Entry button ======
-document.getElementById('btn-add-match-entry').addEventListener('click', () => {
-  const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
-  const eventCode = selectedEvent?.code;
-  if (teamNum && eventCode && typeof openMatchScoutForm === 'function') {
-    openMatchScoutForm(teamNum, eventCode);
-  }
-});
