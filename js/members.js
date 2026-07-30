@@ -268,27 +268,34 @@ async function transferCaptaincy(newCaptainUid) {
 
   showLoading('Transferring captain role...');
   try {
-    // Update roles map: old captain becomes member, new captain becomes captain
+    // Update roles map: old captain becomes member, new captain becomes captain.
+    // Both also get all four permissions granted explicitly — otherwise whoever
+    // ends up depending on the permissions map (the demoted former captain now,
+    // or the new captain if they're demoted later) would land on an effectively
+    // empty one, since captains never previously needed a permissions entry.
+    const fullPermissions = {
+      canEditTemplates: true,
+      canEditOtherEntries: true,
+      canBulkDelete: true,
+      canPinEvents: true
+    };
     const updates = {};
     updates[`roles.${currentUser.uid}`] = 'member';
     updates[`roles.${newCaptainUid}`] = 'captain';
+    updates[`permissions.${currentUser.uid}`] = fullPermissions;
+    updates[`permissions.${newCaptainUid}`] = fullPermissions;
 
     await db.collection('teams').doc(currentTeamId).update(updates);
 
-    // Keep the userTeams pointers in sync with the new roles (must happen after
-    // the roles update above, since the write rule validates against the real team doc)
+    // Only our own userTeams pointer can be written from here — userTeams/{uid} is
+    // self-write-only by design (see firestore.rules), so the new captain's pointer
+    // can't be updated from this session. It self-heals via ensureUserTeamPointer()
+    // (auth.js) the next time their own client runs it.
     await db.collection('userTeams').doc(currentUser.uid).set({ teamId: currentTeamId, role: 'member' });
-    await db.collection('userTeams').doc(newCaptainUid).set({ teamId: currentTeamId, role: 'captain' });
 
     hideLoading();
-    // Reload the team data to refresh the UI
-    const teamDoc = await db.collection('teams').doc(currentTeamId).get();
-    if (teamDoc.exists) {
-      const teamData = teamDoc.data();
-      currentTeamRoles = teamData.roles || {};
-      currentTeamData = { id: teamDoc.id, ...teamData };
-      await loadTeamMembers(currentTeamId, teamData);
-    }
+    // No manual reload needed — the live team doc listener (watchTeamDoc in auth.js)
+    // picks up this update and refreshes currentTeamData / the member list for us.
   } catch (err) {
     hideLoading();
     console.error('Transfer captaincy error:', err);

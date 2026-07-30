@@ -200,8 +200,15 @@ async function withStep(stepLabel, fn) {
 }
 
 // ====== Fetch all matchScouting docs for an event (same query shape as watchMatchScoutStatus) ======
-async function fetchMatchDocsForEvent(eventCode) {
-  const snap = await db.collection('matchScouting').where('eventCode', '==', eventCode).get();
+// The teamId filter isn't just a convenience narrowing — firestore.rules' matchScouting
+// read rule does a get() keyed on resource.data.teamId, and Firestore can only validate
+// that for a list query when a where() clause pins teamId to a single value; without it
+// the whole query is rejected as "insufficient permissions" for every requester.
+async function fetchMatchDocsForEvent(eventCode, teamId) {
+  const snap = await db.collection('matchScouting')
+    .where('eventCode', '==', eventCode)
+    .where('teamId', '==', teamId)
+    .get();
   const docs = [];
   snap.forEach(doc => docs.push({ id: doc.id, ...doc.data() }));
   return docs;
@@ -219,6 +226,68 @@ async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, ma
   await writeSheetValues(spreadsheetId, 'Match Scouting', matchRows);
 
   return createResp.spreadsheetUrl;
+}
+
+// ====== Build & download an .xlsx workbook from the same row data used for the
+// Google Sheets export (buildPitSheetRows/buildMatchSheetRows) — same two-tab shape,
+// just rendered client-side via SheetJS instead of written through the Sheets API. ======
+function downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs) {
+  if (typeof XLSX === 'undefined') {
+    throw new Error('Excel export library failed to load. Check your connection and try again.');
+  }
+
+  const pitRows = buildPitSheetRows(pitFields, pitDocs);
+  const matchRows = buildMatchSheetRows(matchFields, matchDocs);
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
+  XLSX.writeFile(wb, filename);
+}
+
+// ====== Filesystem-safe filename (team/event names can contain characters like / or :) ======
+function sanitizeFilename(name) {
+  return String(name).replace(/[\\/:*?"<>|]/g, '-');
+}
+
+// ====== Gather a single team's pit + match scouting data for the selected event ======
+// Shared by both the Google Sheets and Excel export paths for a team.
+async function gatherTeamExportData(teamNumber, eventCode, teamId) {
+  const [pitFields, matchFields] = await Promise.all([
+    loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
+    loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
+  ]);
+
+  const pitDoc = await withStep('Reading pit scouting data', () =>
+    db.collection('pitScouting').doc(`${eventCode}_${teamNumber}`).get());
+  const pitDocs = pitDoc.exists ? [{ id: pitDoc.id, ...pitDoc.data() }] : [];
+
+  const allMatchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode, teamId));
+  const matchDocs = allMatchDocs
+    .filter(d => Number(d.teamNumber) === Number(teamNumber))
+    .sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
+
+  return { pitFields, matchFields, pitDocs, matchDocs };
+}
+
+// ====== Gather every team's pit + match scouting data for the selected event ======
+// Shared by both the Google Sheets and Excel export paths for a whole event.
+async function gatherEventExportData(eventCode, teamId) {
+  const [pitFields, matchFields] = await Promise.all([
+    loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
+    loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
+  ]);
+
+  const pitSnap = await withStep('Reading pit scouting data',
+    () => db.collection('pitScouting').where('eventCode', '==', eventCode).where('teamId', '==', teamId).get());
+  const pitDocs = [];
+  pitSnap.forEach(doc => pitDocs.push({ id: doc.id, ...doc.data() }));
+  pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+
+  const matchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode, teamId));
+  matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
+
+  return { pitFields, matchFields, pitDocs, matchDocs };
 }
 
 // ====== Status message helper (mirrors the app's error/success paragraph convention) ======
@@ -271,19 +340,7 @@ async function handleExportTeamClick(statusPrefix) {
     await getGoogleAccessToken();
 
     showLoading('Gathering scouting data...');
-    const [pitFields, matchFields] = await Promise.all([
-      loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
-      loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
-    ]);
-
-    const pitDoc = await withStep('Reading pit scouting data', () =>
-      db.collection('pitScouting').doc(`${eventCode}_${teamNumber}`).get());
-    const pitDocs = pitDoc.exists ? [{ id: pitDoc.id, ...pitDoc.data() }] : [];
-
-    const allMatchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode));
-    const matchDocs = allMatchDocs
-      .filter(d => Number(d.teamNumber) === Number(teamNumber))
-      .sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
+    const { pitFields, matchFields, pitDocs, matchDocs } = await gatherTeamExportData(teamNumber, eventCode, teamId);
 
     showLoading('Creating Google Sheet...');
     const title = `Team ${teamNumber} Scouting — ${selectedEvent?.name || eventCode}`;
@@ -300,6 +357,42 @@ async function handleExportTeamClick(statusPrefix) {
   } catch (err) {
     hideLoading();
     console.error('Sheets export failed:', err);
+    setExportStatus(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Download a single team's pit + match scouting data as an .xlsx file ======
+async function handleExportTeamExcelClick(statusPrefix) {
+  setExportStatus(statusPrefix, 'error', '');
+  setExportStatus(statusPrefix, 'success', '');
+
+  const teamNumber = currentSelectedTeamNumber;
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!teamNumber || !eventCode) {
+    setExportStatus(statusPrefix, 'error', 'Select a team and event first.');
+    return;
+  }
+  if (!teamId) {
+    setExportStatus(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  showLoading('Gathering scouting data...');
+  try {
+    const { pitFields, matchFields, pitDocs, matchDocs } = await gatherTeamExportData(teamNumber, eventCode, teamId);
+
+    const filename = sanitizeFilename(`Team ${teamNumber} Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
+    downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
+
+    hideLoading();
+    setExportStatus(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
+      ? 'No scouting data found for this team yet — downloaded an empty workbook.'
+      : 'Excel file downloaded!');
+  } catch (err) {
+    hideLoading();
+    console.error('Excel export failed:', err);
     setExportStatus(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
   }
 }
@@ -326,19 +419,7 @@ async function handleExportEventClick(statusPrefix) {
     await getGoogleAccessToken();
 
     showLoading('Gathering scouting data...');
-    const [pitFields, matchFields] = await Promise.all([
-      loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
-      loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
-    ]);
-
-    const pitSnap = await withStep('Reading pit scouting data',
-      () => db.collection('pitScouting').where('eventCode', '==', eventCode).get());
-    const pitDocs = [];
-    pitSnap.forEach(doc => pitDocs.push({ id: doc.id, ...doc.data() }));
-    pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
-
-    const matchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode));
-    matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
+    const { pitFields, matchFields, pitDocs, matchDocs } = await gatherEventExportData(eventCode, teamId);
 
     showLoading('Creating Google Sheet...');
     const title = `${selectedEvent?.name || eventCode} — All Teams Scouting Export`;
@@ -359,11 +440,101 @@ async function handleExportEventClick(statusPrefix) {
   }
 }
 
+// ====== Download every team's pit + match scouting data for the event as one .xlsx file ======
+async function handleExportEventExcelClick(statusPrefix) {
+  setExportStatus(statusPrefix, 'error', '');
+  setExportStatus(statusPrefix, 'success', '');
+
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!eventCode) {
+    setExportStatus(statusPrefix, 'error', 'Select an event first.');
+    return;
+  }
+  if (!teamId) {
+    setExportStatus(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  showLoading('Gathering scouting data...');
+  try {
+    const { pitFields, matchFields, pitDocs, matchDocs } = await gatherEventExportData(eventCode, teamId);
+
+    const filename = sanitizeFilename(`${selectedEvent?.name || eventCode} - All Teams Scouting.xlsx`);
+    downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
+
+    hideLoading();
+    setExportStatus(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
+      ? 'No scouting data found for this event yet — downloaded an empty workbook.'
+      : 'Excel file downloaded!');
+  } catch (err) {
+    hideLoading();
+    console.error('Event Excel export failed:', err);
+    setExportStatus(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Export Choice Modal (Excel download vs Google Sheets) ======
+let exportChoiceContext = null;
+
+function openExportChoiceModal(context) {
+  exportChoiceContext = context;
+  const modal = document.getElementById('export-choice-modal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeExportChoiceModal() {
+  exportChoiceContext = null;
+  const modal = document.getElementById('export-choice-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
 // ====== Wire up buttons ======
 document.addEventListener('DOMContentLoaded', () => {
   const btnMatch = document.getElementById('btn-export-team-match');
-  if (btnMatch) btnMatch.addEventListener('click', () => handleExportTeamClick('td-export-match'));
+  if (btnMatch) {
+    btnMatch.addEventListener('click', () => {
+      openExportChoiceModal({
+        statusPrefix: 'td-export-match',
+        sheetsHandler: handleExportTeamClick,
+        excelHandler: handleExportTeamExcelClick
+      });
+    });
+  }
 
   const btnEvent = document.getElementById('btn-export-event-sheets');
-  if (btnEvent) btnEvent.addEventListener('click', () => handleExportEventClick('event-export'));
+  if (btnEvent) {
+    btnEvent.addEventListener('click', () => {
+      openExportChoiceModal({
+        statusPrefix: 'event-export',
+        sheetsHandler: handleExportEventClick,
+        excelHandler: handleExportEventExcelClick
+      });
+    });
+  }
+
+  const closeBtn = document.getElementById('btn-export-choice-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeExportChoiceModal);
+
+  const overlay = document.getElementById('export-choice-modal-overlay');
+  if (overlay) overlay.addEventListener('click', closeExportChoiceModal);
+
+  const excelBtn = document.getElementById('btn-export-choice-excel');
+  if (excelBtn) {
+    excelBtn.addEventListener('click', () => {
+      const ctx = exportChoiceContext;
+      closeExportChoiceModal();
+      if (ctx) ctx.excelHandler(ctx.statusPrefix);
+    });
+  }
+
+  const sheetsBtn = document.getElementById('btn-export-choice-sheets');
+  if (sheetsBtn) {
+    sheetsBtn.addEventListener('click', () => {
+      const ctx = exportChoiceContext;
+      closeExportChoiceModal();
+      if (ctx) ctx.sheetsHandler(ctx.statusPrefix);
+    });
+  }
 });

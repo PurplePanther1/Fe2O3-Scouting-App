@@ -187,7 +187,7 @@
             <p><strong id="selected-event-name"></strong></p>
             <p class="help-text" id="selected-event-code"></p>
             <p class="help-text" id="selected-event-teams-count"></p>
-            <button id="btn-export-event-sheets" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">📊 Export All Teams to Sheets</button>
+            <button id="btn-export-event-sheets" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">📤 Export All Teams</button>
             <button id="btn-pin-event" class="btn btn-outline btn-small hidden" style="margin-top:10px; width:100%">📌 Pin This Event</button>
             <button id="btn-deselect-event" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">✕ Deselect Event</button>
             <p id="event-export-error" class="error-message"></p>
@@ -424,7 +424,7 @@
           </div>
           <div id="td-match-entries"></div>
         </div>
-        <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📊 Export to Sheets</button>
+        <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📤 Export Data</button>
         <p id="td-export-match-error" class="error-message"></p>
         <p id="td-export-match-success" class="success-message"></p>
         <p id="td-error" class="error-message"></p>
@@ -558,6 +558,21 @@
     </div>
   </div>
 
+  <!-- Export Choice Modal (Excel download vs Google Sheets) -->
+  <div id="export-choice-modal" class="modal-overlay hidden">
+    <div id="export-choice-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:360px">
+      <div class="modal-header">
+        <h3 id="export-choice-title">Export Scouting Data</h3>
+        <button id="btn-export-choice-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px; display:flex; flex-direction:column; gap:10px">
+        <button id="btn-export-choice-excel" class="btn btn-outline">📥 Download as Excel (.xlsx)</button>
+        <button id="btn-export-choice-sheets" class="btn btn-primary">📊 Export to Google Sheets</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Loading overlay -->
   <div id="loading-overlay" class="loading-overlay hidden">
     <div class="spinner"></div>
@@ -570,6 +585,8 @@
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
   <!-- Google Identity Services (for client-side Google Sheets export authorization) -->
   <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <!-- SheetJS (for client-side .xlsx generation — Excel export option) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="js/firebase-config.js"></script>
   <script src="js/auth.js"></script>
   <script src="js/team.js"></script>

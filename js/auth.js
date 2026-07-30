@@ -85,6 +85,49 @@ async function ensureUserTeamPointer(uid, teamId, role) {
 }
 
 /**
+ * Live-sync currentTeamData with the real teams/{teamId} document, the same way
+ * pit/match scouting status already stay live via onSnapshot elsewhere. Without
+ * this, changes another team member makes (a captaincy transfer, a permission
+ * edit, a pinned event) only show up for everyone else after a manual refresh.
+ */
+let teamDocUnsubscribe = null;
+
+function watchTeamDoc(teamId) {
+  if (teamDocUnsubscribe) {
+    teamDocUnsubscribe();
+    teamDocUnsubscribe = null;
+  }
+  if (!teamId) return;
+
+  teamDocUnsubscribe = db.collection('teams').doc(teamId).onSnapshot((doc) => {
+    if (!doc.exists) return;
+    const teamData = { id: doc.id, ...doc.data() };
+
+    if (typeof currentTeamData !== 'undefined') {
+      currentTeamData = teamData;
+    }
+
+    const nameEl = document.getElementById('main-team-name');
+    if (nameEl) nameEl.textContent = teamData.name || 'Your Team';
+
+    if (typeof loadTeamMembers === 'function') {
+      loadTeamMembers(teamId, teamData);
+    }
+    if (typeof updatePermissionUI === 'function') {
+      updatePermissionUI();
+    }
+    if (typeof updatePinButtonUI === 'function') {
+      updatePinButtonUI();
+    }
+    if (typeof renderPinnedEventsList === 'function') {
+      renderPinnedEventsList();
+    }
+  }, (err) => {
+    console.warn('Team doc listener error:', err);
+  });
+}
+
+/**
  * Backfill joinCodes/{code} for a team created before that lookup collection
  * existed, so new members can still join it by code. Only the captain can do
  * this (matches the joinCodes create rule), and it's a no-op once it exists.
@@ -441,6 +484,7 @@ $('btn-verify-sign-out').addEventListener('click', async () => {
 // ====== SIGN OUT ======
 async function signOut() {
   try {
+    watchTeamDoc(null); // stop the live team doc listener
     await auth.signOut();
     showScreen('screen-login');
   } catch (err) {
@@ -492,6 +536,10 @@ async function handleAuthenticatedUser(user) {
       if (typeof updatePermissionUI === 'function') {
         updatePermissionUI();
       }
+      // Keep currentTeamData (and everything derived from it) live from here on,
+      // so role/permission/pinned-event changes made by anyone on the team show
+      // up immediately without a manual refresh.
+      watchTeamDoc(team.id);
       showScreen('screen-main');
     } else {
       clearErrors();
