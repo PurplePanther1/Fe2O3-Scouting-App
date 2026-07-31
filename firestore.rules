@@ -57,6 +57,29 @@ service cloud.firestore {
       );
     }
 
+    // Whether request.auth can view userId's private contact info: either
+    // they ARE userId (handled separately by the caller), they're captain of
+    // userId's team, or they hold the canViewMemberEmails permission on that
+    // team. Goes through the userTeams pointers (not a direct teams/{teamId}
+    // read) so it works without member-gated access to the target's own team
+    // document — same reason userTeams exists in the first place.
+    function canViewMemberEmail(userId) {
+      return isAuth()
+        && exists(/databases/$(database)/documents/userTeams/$(request.auth.uid))
+        && exists(/databases/$(database)/documents/userTeams/$(userId))
+        && get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId
+           == get(/databases/$(database)/documents/userTeams/$(userId)).data.teamId
+        && (
+          get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.role == 'captain'
+          || (
+            exists(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId))
+            && get(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId)).data.permissions != null
+            && get(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId)).data.permissions[request.auth.uid] != null
+            && get(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId)).data.permissions[request.auth.uid].canViewMemberEmails == true
+          )
+        );
+    }
+
     match /teams/{teamId} {
       // Only real members can read the full document. resource.data is already the
       // document being evaluated, so no get()/isTeamMember() (and no dependency on
@@ -74,8 +97,13 @@ service cloud.firestore {
         // member with permissions[uid].canPinEvents == true)
         (
           resource.data.members.hasAny([request.auth.uid])
+          // Guarded with an `in` presence check before indexing into roles —
+          // bracket access on a map key that doesn't exist throws in Firestore
+          // rules (unlike plain dot-field access, which returns null), and a
+          // plain member who never had roles.{uid} written would otherwise
+          // throw here instead of cleanly failing the captain check.
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode'])
-              || resource.data.roles[request.auth.uid] == 'captain')
+              || (request.auth.uid in resource.data.roles && resource.data.roles[request.auth.uid] == 'captain'))
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['pinnedEvents'])
               || resource.data.roles[request.auth.uid] == 'captain'
               || (resource.data.permissions != null
@@ -91,6 +119,28 @@ service cloud.firestore {
           !resource.data.members.hasAny([request.auth.uid])
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members'])
           && request.resource.data.members == resource.data.members.concat([request.auth.uid])
+        )
+        ||
+        // Self-leave (used by account deletion): a member removes only their own
+        // uid from members, and — if present — only their own entries from
+        // roles/permissions. A captain may only do this if they're the last
+        // remaining member; otherwise they must transfer captaincy first.
+        // Enforced here too, not just in the client UI, since this is a
+        // destructive, security-relevant operation.
+        (
+          resource.data.members.hasAny([request.auth.uid])
+          // Same `in`-guard reasoning as branch 1 above — a plain member with
+          // no roles.{uid} entry must resolve to "not captain" without ever
+          // indexing the missing key.
+          && (!(request.auth.uid in resource.data.roles) || resource.data.roles[request.auth.uid] != 'captain' || resource.data.members.size() == 1)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'roles', 'permissions'])
+          && request.resource.data.members == resource.data.members.removeAll([request.auth.uid])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles'])
+              || (!(request.auth.uid in request.resource.data.roles)
+                  && resource.data.roles.diff(request.resource.data.roles).affectedKeys().hasOnly([request.auth.uid])))
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['permissions'])
+              || (!(request.auth.uid in request.resource.data.permissions)
+                  && resource.data.permissions.diff(request.resource.data.permissions).affectedKeys().hasOnly([request.auth.uid])))
         )
       );
 
@@ -116,8 +166,15 @@ service cloud.firestore {
       allow create, update: if isAuth() && request.auth.uid == uid
         && exists(/databases/$(database)/documents/teams/$(request.resource.data.teamId))
         && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.members.hasAny([uid])
-        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[uid] == request.resource.data.role;
-      allow delete: if false;
+        // A plain member who joined via join code never gets an explicit
+        // roles.{uid} entry — the rest of this app treats absence from the
+        // roles map as meaning 'member' (see getCurrentUserRole(), the myRole
+        // computation in handleAuthenticatedUser(), etc.), so this rule needs
+        // to accept that same convention rather than only an exact match.
+        && (get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[uid] == request.resource.data.role
+            || (!(uid in get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles)
+                && request.resource.data.role == 'member'));
+      allow delete: if isAuth() && request.auth.uid == uid;
     }
 
     // Public lookup so a join code can be resolved to a team ID without needing
@@ -137,23 +194,18 @@ service cloud.firestore {
       // Public profile: display name + avatar only — not sensitive.
       allow read: if isAuth();
       allow create, update: if isAuth() && request.auth.uid == userId;
-      allow delete: if false;
+      allow delete: if isAuth() && request.auth.uid == userId;
 
-      // Private contact info (email): visible only to the user themself, or the
-      // captain of the same team (via the userTeams pointers above).
+      // Private contact info (email): visible only to the user themself, the
+      // captain of the same team, or a teammate granted canViewMemberEmails
+      // (via the userTeams pointers above).
       match /private/contact {
         allow read: if isAuth() && (
           request.auth.uid == userId
-          || (
-            exists(/databases/$(database)/documents/userTeams/$(request.auth.uid))
-            && exists(/databases/$(database)/documents/userTeams/$(userId))
-            && get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId
-               == get(/databases/$(database)/documents/userTeams/$(userId)).data.teamId
-            && get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.role == 'captain'
-          )
+          || canViewMemberEmail(userId)
         );
         allow write: if isAuth() && request.auth.uid == userId;
-        allow delete: if false;
+        allow delete: if isAuth() && request.auth.uid == userId;
       }
     }
 

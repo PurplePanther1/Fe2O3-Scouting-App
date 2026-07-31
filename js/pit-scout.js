@@ -329,6 +329,10 @@ function refreshTeamListScoutedState() {
         scoutBtn.textContent = '+ Pit Scout';
       }
     }
+
+    if (typeof updatePitTeamRowMetaLine === 'function') {
+      updatePitTeamRowMetaLine(item, teamNum, eventCode);
+    }
   });
 
   // If the Team Detail modal is currently open for a team, refresh its pit

@@ -3,17 +3,22 @@
 // Store the current team data (set after create or join)
 let currentTeamData = null;
 
-// Tab switching
-document.querySelectorAll('.tab').forEach(tab => {
+// Tab switching (Join Team / Create Team on screen-team) — scoped to this
+// screen specifically. This used to be a bare `.tab` selector, which matches
+// every tab group in the app (auth tabs, dashboard tabs, scouting subtabs,
+// builder tabs all share the `.tab` class) — clicking Join/Create, or Sign
+// In/Sign Up on the login screen (same shared class), was wiping the `active`
+// class off every tab everywhere else and never restoring it.
+document.querySelectorAll('#screen-team .tab').forEach(tab => {
   tab.addEventListener('click', () => {
     // Update tab buttons
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('#screen-team .tab').forEach(t => t.classList.remove('active'));
     tab.classList.add('active');
 
     // Update tab content
     const tabName = tab.dataset.tab;
     if (tabName) {
-      document.querySelectorAll('.tab-content').forEach(tc => tc.classList.remove('active'));
+      document.querySelectorAll('#screen-team .tab-content').forEach(tc => tc.classList.remove('active'));
       const contentEl = document.getElementById('tab-' + tabName);
       if (contentEl) {
         contentEl.classList.add('active');
@@ -24,6 +29,29 @@ document.querySelectorAll('.tab').forEach(tab => {
     clearErrors();
   });
 });
+
+// ====== Reset to Scouting → Team Information the same way handleAuthenticatedUser()
+// does on login. Called after create/join succeeds — without this, whatever
+// dashboard tab was left active from a PRIOR account's session in this same
+// browser tab (e.g. still on My Account, if that's where a just-deleted
+// account's session left off) would stay active instead of resetting for a
+// brand-new team, since create/join is a separate code path from login. ======
+function resetDashboardOnEnterTeam() {
+  // Always land on Scouting → Team Information here — unlike a refresh
+  // (where restoring saved state is exactly the point), joining/creating a
+  // team is always the START of a dashboard session in this tab, so there's
+  // nothing legitimate to restore. Calling restoreOrDefaultSessionState()
+  // here was wrong: it restores whatever's saved if anything is, and
+  // browsing the standalone My Account view (before joining) saves
+  // dashboardTab: 'account' as a side effect of activating that tab — which
+  // then got restored right back after joining instead of defaulting.
+  if (typeof window.activateDashboardTab === 'function') {
+    window.activateDashboardTab('scouting');
+  }
+  if (typeof window.activateScoutingSubTab === 'function') {
+    window.activateScoutingSubTab('info');
+  }
+}
 
 // ====== Generate a random join code ======
 function generateJoinCode() {
@@ -76,6 +104,29 @@ function setupCopyButton(btnId, codeId) {
 setupCopyButton('btn-copy-created-code', 'created-join-code');
 setupCopyButton('btn-copy-dashboard-code', 'dashboard-code-value');
 
+// ====== Require a display name before finishing create/join. The field is always
+// shown and pre-filled with any known name (see auth.js' handleAuthenticatedUser),
+// but the user must still press Create/Join to confirm it — an auto-filled Google
+// name is never used silently. Reuses the same saveDisplayName() write as the My
+// Team tab's field. ======
+async function ensureDisplayNameSet(errorElementId) {
+  const input = document.getElementById('input-screen-team-display-name');
+  const name = input ? input.value.trim() : '';
+  if (!name) {
+    showError(errorElementId, 'Please enter your display name to continue.');
+    return false;
+  }
+
+  try {
+    await saveDisplayName(name);
+    return true;
+  } catch (err) {
+    console.error('Failed to save display name:', err);
+    showError(errorElementId, 'Failed to save your display name. Please try again.');
+    return false;
+  }
+}
+
 // ====== Create Team ======
 $('btn-create-team').addEventListener('click', async () => {
   clearErrors();
@@ -90,6 +141,8 @@ $('btn-create-team').addEventListener('click', async () => {
     showError('create-error', 'You must be signed in to create a team.');
     return;
   }
+
+  if (!(await ensureDisplayNameSet('create-error'))) return;
 
   showLoading('Creating your team...');
   try {
@@ -122,12 +175,25 @@ $('btn-create-team').addEventListener('click', async () => {
     await db.collection('joinCodes').doc(joinCode).set({ teamId: teamRef.id });
     await db.collection('userTeams').doc(currentUser.uid).set({ teamId: teamRef.id, role: 'captain' });
 
-    // Store team data for dashboard
-    currentTeamData = {
-      id: teamRef.id,
-      name: teamName,
-      joinCode: joinCode
-    };
+    // Re-read the full team doc so currentTeamData gets the same complete
+    // shape handleAuthenticatedUser() populates on login (members/roles/
+    // permissions included). The previous {id, name, joinCode}-only object
+    // left currentTeamId unset (only loadTeamMembers() sets it) and
+    // permission checks reading an empty currentTeamData — silently broken
+    // until the next refresh re-ran the full login flow.
+    const createdSnap = await teamRef.get();
+    const fullTeamData = { id: teamRef.id, ...createdSnap.data() };
+    currentTeamData = fullTeamData;
+
+    if (typeof loadTeamMembers === 'function') {
+      loadTeamMembers(teamRef.id, fullTeamData);
+    }
+    if (typeof updatePermissionUI === 'function') {
+      updatePermissionUI();
+    }
+    if (typeof watchTeamDoc === 'function') {
+      watchTeamDoc(teamRef.id);
+    }
 
     // Show the join code on the create tab
     const joinCodeCreated = document.getElementById('join-code-created');
@@ -140,6 +206,7 @@ $('btn-create-team').addEventListener('click', async () => {
     $('main-team-name').textContent = teamName;
     showJoinCodeOnDashboard(joinCode);
     showScreen('screen-main');
+    resetDashboardOnEnterTeam();
   } catch (err) {
     hideLoading();
     console.error('Create team error:', err);
@@ -162,6 +229,8 @@ $('btn-join-team').addEventListener('click', async () => {
     return;
   }
 
+  if (!(await ensureDisplayNameSet('join-error'))) return;
+
   showLoading('Joining team...');
   try {
     // Resolve the join code to a team ID via the public lookup collection —
@@ -182,10 +251,21 @@ $('btn-join-team').addEventListener('click', async () => {
       const existingData = existingSnap.data();
       if (existingData.members && existingData.members.includes(currentUser.uid)) {
         hideLoading();
-        currentTeamData = { id: teamId, name: existingData.name, joinCode: existingData.joinCode };
+        const fullTeamData = { id: teamId, ...existingData };
+        currentTeamData = fullTeamData;
+        if (typeof loadTeamMembers === 'function') {
+          loadTeamMembers(teamId, fullTeamData);
+        }
+        if (typeof updatePermissionUI === 'function') {
+          updatePermissionUI();
+        }
+        if (typeof watchTeamDoc === 'function') {
+          watchTeamDoc(teamId);
+        }
         $('main-team-name').textContent = existingData.name;
         showJoinCodeOnDashboard(existingData.joinCode);
         showScreen('screen-main');
+        resetDashboardOnEnterTeam();
         return;
       }
     } catch (notYetMemberErr) {
@@ -204,12 +284,26 @@ $('btn-join-team').addEventListener('click', async () => {
 
     await db.collection('userTeams').doc(currentUser.uid).set({ teamId, role: 'member' });
 
-    currentTeamData = { id: teamId, name: teamData.name, joinCode: teamData.joinCode };
+    // Use the full team doc (members/roles/permissions included) rather than
+    // just {id, name, joinCode} — same reason as the create-team flow above.
+    const fullTeamData = { id: teamId, ...teamData };
+    currentTeamData = fullTeamData;
+
+    if (typeof loadTeamMembers === 'function') {
+      loadTeamMembers(teamId, fullTeamData);
+    }
+    if (typeof updatePermissionUI === 'function') {
+      updatePermissionUI();
+    }
+    if (typeof watchTeamDoc === 'function') {
+      watchTeamDoc(teamId);
+    }
 
     hideLoading();
     $('main-team-name').textContent = teamData.name;
     showJoinCodeOnDashboard(teamData.joinCode);
     showScreen('screen-main');
+    resetDashboardOnEnterTeam();
   } catch (err) {
     hideLoading();
     console.error('Join team error:', err);

@@ -130,8 +130,9 @@ async function renderPitDataForTeam(teamNumber, eventCode) {
   // The team may have switched (or the modal closed) while the config was loading
   if (currentSelectedTeamNumber !== teamNumber) return;
 
-  const scoutedBy = entry.scoutedByName || 'Unknown';
-  status.textContent = `Scouted by: ${scoutedBy}`;
+  const scoutedBy = entry.scoutedByName || entry.scoutedByEmail || 'Unknown';
+  const lastEditedBy = entry.lastEditedByName || entry.lastEditedByEmail || 'N/A';
+  status.textContent = `Scouted by: ${scoutedBy} | Last edited by: ${lastEditedBy}`;
 
   if (fields.length === 0) {
     container.innerHTML = '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No pit scouting fields configured.</p>';

@@ -28,7 +28,10 @@
       <!-- ====== SIGN IN FORM ====== -->
       <div id="tab-signin" class="tab-content auth-form active">
         <input type="email" id="input-signin-email" placeholder="Email address" autocomplete="email" />
-        <input type="password" id="input-signin-password" placeholder="Password" autocomplete="current-password" />
+        <div class="password-input-wrapper">
+          <input type="password" id="input-signin-password" placeholder="Password" autocomplete="current-password" />
+          <button type="button" class="btn-toggle-password" data-target="input-signin-password" aria-label="Show password">👁</button>
+        </div>
         <button id="btn-signin" class="btn btn-primary">Sign In</button>
         <button id="btn-forgot-password" class="btn-link">Forgot password?</button>
         <p id="signin-error" class="error-message"></p>
@@ -37,8 +40,14 @@
       <!-- ====== SIGN UP FORM ====== -->
       <div id="tab-signup" class="tab-content auth-form">
         <input type="email" id="input-signup-email" placeholder="Email address" autocomplete="email" />
-        <input type="password" id="input-signup-password" placeholder="Password (min 6 characters)" autocomplete="new-password" />
-        <input type="password" id="input-signup-confirm" placeholder="Confirm password" autocomplete="new-password" />
+        <div class="password-input-wrapper">
+          <input type="password" id="input-signup-password" placeholder="Password (min 6 characters)" autocomplete="new-password" />
+          <button type="button" class="btn-toggle-password" data-target="input-signup-password" aria-label="Show password">👁</button>
+        </div>
+        <div class="password-input-wrapper">
+          <input type="password" id="input-signup-confirm" placeholder="Confirm password" autocomplete="new-password" />
+          <button type="button" class="btn-toggle-password" data-target="input-signup-confirm" aria-label="Show password">👁</button>
+        </div>
         <button id="btn-signup" class="btn btn-primary">Create Account</button>
         <p id="signup-error" class="error-message"></p>
       </div>
@@ -65,11 +74,28 @@
       <p class="help-text" id="verify-message">
         We sent a verification email to <strong id="verify-email-display"></strong>.
         Please check your inbox and click the link to verify your account.
+        (Check your spam/junk folder if you don't see it.)
       </p>
       <button id="btn-resend-verification" class="btn btn-primary" style="margin-top:8px">Resend verification email</button>
       <button id="btn-check-verified" class="btn btn-outline" style="margin-top:12px; width:100%">I've verified — continue</button>
       <button id="btn-verify-sign-out" class="btn-link" style="margin-top:16px">Use a different account</button>
       <p id="verify-error" class="error-message"></p>
+    </div>
+  </section>
+
+  <!-- ====== SCREEN: Set Display Name (interstitial for existing users with a blank name) ====== -->
+  <section id="screen-set-display-name" class="screen">
+    <div class="card" style="text-align:center">
+      <div class="logo">
+        <h1 style="font-size:3rem; margin-bottom:8px">👋</h1>
+        <p class="subtitle" style="margin-bottom:16px">Set your display name</p>
+      </div>
+      <p class="help-text" style="margin-bottom:16px">
+        Choose a name your teammates will see on the member list and your scouting entries.
+      </p>
+      <input type="text" id="input-set-display-name" placeholder="e.g. Alex P." maxlength="40" />
+      <button id="btn-set-display-name-continue" class="btn btn-primary" style="margin-top:8px">Continue</button>
+      <p id="set-display-name-error" class="error-message"></p>
     </div>
   </section>
 
@@ -94,8 +120,14 @@
       <div class="logo">
         <p class="subtitle" style="margin-bottom:16px">Create a new password</p>
       </div>
-      <input type="password" id="input-new-password" placeholder="New password (min 6 characters)" autocomplete="new-password" />
-      <input type="password" id="input-new-password-confirm" placeholder="Confirm new password" autocomplete="new-password" />
+      <div class="password-input-wrapper">
+        <input type="password" id="input-new-password" placeholder="New password (min 6 characters)" autocomplete="new-password" />
+        <button type="button" class="btn-toggle-password" data-target="input-new-password" aria-label="Show password">👁</button>
+      </div>
+      <div class="password-input-wrapper">
+        <input type="password" id="input-new-password-confirm" placeholder="Confirm new password" autocomplete="new-password" />
+        <button type="button" class="btn-toggle-password" data-target="input-new-password-confirm" aria-label="Show password">👁</button>
+      </div>
       <button id="btn-set-password" class="btn btn-primary">Reset Password</button>
       <button id="btn-back-to-login-from-reset" class="btn-link" style="margin-top:12px">Back to sign in</button>
       <p id="set-password-error" class="error-message"></p>
@@ -110,7 +142,15 @@
       <div class="user-info" id="user-info">
         <img id="user-avatar" src="" alt="" />
         <span id="user-name"></span>
+        <button id="btn-open-my-account-standalone" class="btn btn-small btn-outline">My Account</button>
         <button id="btn-sign-out" class="btn btn-small btn-outline">Sign Out</button>
+      </div>
+
+      <!-- Always shown — pre-filled with any known name, but must be confirmed via Create/Join -->
+      <div id="screen-team-display-name-section" style="margin-bottom:20px; padding-bottom:20px; border-bottom:1px solid var(--border)">
+        <label for="input-screen-team-display-name" class="help-text" style="margin-bottom:4px; display:block">Your Display Name</label>
+        <p class="help-text" style="margin-bottom:8px">Teammates will see this on the member list and your scouting entries.</p>
+        <input type="text" id="input-screen-team-display-name" placeholder="e.g. Alex P." maxlength="40" />
       </div>
 
       <div class="tabs">
@@ -159,7 +199,7 @@
       <div id="dashboard-tabs" class="tabs" style="margin-top:16px">
         <button class="tab active" data-dtab="scouting">Scouting</button>
         <button class="tab" data-dtab="myteam">My Team</button>
-        <button class="tab" data-dtab="more">More</button>
+        <button class="tab" data-dtab="account">My Account</button>
       </div>
 
       <!-- ====== SCOUTING TAB ====== -->
@@ -316,13 +356,43 @@
           <button id="btn-open-match-form-builder" class="btn btn-primary">Edit Match Scouting Form</button>
         </div>
 
+        <!-- Leave team -->
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">LEAVE TEAM</h3>
+          <p class="help-text" style="margin-bottom:12px">Removes you from this team. You can rejoin later with the join code.</p>
+          <button id="btn-leave-team" class="btn btn-outline" style="width:100%">Leave Team</button>
+          <p id="leave-team-error" class="error-message"></p>
+        </div>
+
       </div>
 
-      <!-- ====== MORE TAB (placeholder) ====== -->
-      <div id="dtab-more" class="dtab-content">
-        <div style="text-align:center; padding:40px 0">
-          <p class="help-text" style="font-size:1rem">Coming soon...</p>
+      <!-- ====== MY ACCOUNT TAB ====== -->
+      <div id="dtab-account" class="dtab-content">
+
+        <!-- Only shown when reached standalone from the Join/Create Team screen -->
+        <button id="btn-my-account-standalone-back" class="btn btn-outline hidden" style="width:100%; margin-bottom:20px">← Back to Join/Create Team</button>
+
+        <!-- Account info -->
+        <div style="margin-top:0">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">ACCOUNT</h3>
+          <p class="help-text" style="margin-bottom:4px">Email</p>
+          <p id="account-email-display" style="margin-bottom:12px"></p>
+          <button id="btn-open-change-email" class="btn btn-outline" style="width:100%">Change Email</button>
         </div>
+
+        <!-- Change password (email/password accounts only) -->
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">PASSWORD</h3>
+          <button id="btn-open-change-password" class="btn btn-outline hidden" style="width:100%">Change Password</button>
+          <p id="account-password-note" class="help-text" style="font-size:0.85rem; margin-top:8px; margin-bottom:0"></p>
+        </div>
+
+        <!-- Delete account -->
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">DANGER ZONE</h3>
+          <button id="btn-open-delete-account" class="btn" style="width:100%; background:var(--error); color:#fff; border-color:var(--error);">Delete Account</button>
+        </div>
+
       </div>
 
     </div>
@@ -549,10 +619,133 @@
           <input type="checkbox" id="perm-canPinEvents" style="width:auto; margin:0" />
           <label for="perm-canPinEvents" style="margin:0">Pin/unpin events</label>
         </div>
+        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
+          <input type="checkbox" id="perm-canViewMemberEmails" style="width:auto; margin:0" />
+          <label for="perm-canViewMemberEmails" style="margin:0">View member emails</label>
+        </div>
         <p id="member-permissions-error" class="error-message"></p>
         <div class="pit-modal-actions" style="margin-top:20px">
           <button type="button" id="btn-member-perms-cancel-inline" class="btn btn-outline">Cancel</button>
           <button type="button" id="btn-member-perms-save" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Change Password Modal (My Account tab, email/password accounts only) -->
+  <div id="change-password-modal" class="modal-overlay hidden">
+    <div id="change-password-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:400px">
+      <div class="modal-header">
+        <h3>Change Password</h3>
+        <button id="btn-change-password-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <div class="pit-field">
+          <label for="input-change-password-current">Current Password</label>
+          <div class="password-input-wrapper">
+            <input type="password" id="input-change-password-current" autocomplete="current-password" />
+            <button type="button" class="btn-toggle-password" data-target="input-change-password-current" aria-label="Show password">👁</button>
+          </div>
+        </div>
+        <div class="pit-field">
+          <label for="input-change-password-new">New Password</label>
+          <div class="password-input-wrapper">
+            <input type="password" id="input-change-password-new" placeholder="Min 6 characters" autocomplete="new-password" />
+            <button type="button" class="btn-toggle-password" data-target="input-change-password-new" aria-label="Show password">👁</button>
+          </div>
+        </div>
+        <div class="pit-field">
+          <label for="input-change-password-confirm">Confirm New Password</label>
+          <div class="password-input-wrapper">
+            <input type="password" id="input-change-password-confirm" autocomplete="new-password" />
+            <button type="button" class="btn-toggle-password" data-target="input-change-password-confirm" aria-label="Show password">👁</button>
+          </div>
+        </div>
+        <p id="change-password-error" class="error-message"></p>
+        <p id="change-password-success" class="success-message"></p>
+        <div class="pit-modal-actions" style="margin-top:20px">
+          <button type="button" id="btn-change-password-cancel" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-change-password-save" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Change Email Modal (My Account tab) -->
+  <div id="change-email-modal" class="modal-overlay hidden">
+    <div id="change-email-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:400px">
+      <div class="modal-header">
+        <h3>Change Email</h3>
+        <button id="btn-change-email-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <div class="pit-field" id="change-email-password-field">
+          <label for="input-change-email-password">Current Password</label>
+          <div class="password-input-wrapper">
+            <input type="password" id="input-change-email-password" autocomplete="current-password" />
+            <button type="button" class="btn-toggle-password" data-target="input-change-email-password" aria-label="Show password">👁</button>
+          </div>
+        </div>
+        <p id="change-email-google-note" class="help-text hidden" style="margin-bottom:12px">
+          You'll be asked to confirm with Google before this change is submitted.
+        </p>
+        <div class="pit-field">
+          <label for="input-change-email-new">New Email Address</label>
+          <input type="email" id="input-change-email-new" placeholder="you@example.com" autocomplete="email" />
+        </div>
+        <p id="change-email-error" class="error-message"></p>
+        <p id="change-email-success" class="success-message"></p>
+        <div class="pit-modal-actions" style="margin-top:20px">
+          <button type="button" id="btn-change-email-cancel" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-change-email-save" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Account Modal (My Account tab) -->
+  <div id="delete-account-modal" class="modal-overlay hidden">
+    <div id="delete-account-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:420px">
+      <div class="modal-header">
+        <h3>Delete Account</h3>
+        <button id="btn-delete-account-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <!-- Shown instead of the form when captain + other members remain -->
+        <div id="delete-account-blocked" class="hidden">
+          <p class="error-message" style="margin-bottom:0">
+            You're the captain of this team, and other members are still on it.
+            Please transfer the captain role to another member (My Team tab)
+            before deleting your account.
+          </p>
+        </div>
+
+        <div id="delete-account-form">
+          <p class="help-text" style="margin-bottom:16px">
+            This permanently deletes your account and cannot be undone. Your
+            existing scouting entries will remain, credited to "Deleted User"
+            instead of your name — but you'll be removed from your team and
+            signed out.
+          </p>
+          <div class="pit-field" id="delete-account-password-field">
+            <label for="input-delete-account-password">Current Password</label>
+            <div class="password-input-wrapper">
+              <input type="password" id="input-delete-account-password" autocomplete="current-password" />
+              <button type="button" class="btn-toggle-password" data-target="input-delete-account-password" aria-label="Show password">👁</button>
+            </div>
+          </div>
+          <p id="delete-account-google-note" class="help-text hidden" style="margin-bottom:12px">
+            You'll be asked to confirm with Google before your account is deleted.
+          </p>
+          <p id="delete-account-error" class="error-message"></p>
+          <p id="delete-account-success" class="success-message"></p>
+          <div class="pit-modal-actions" style="margin-top:20px">
+            <button type="button" id="btn-delete-account-cancel" class="btn btn-outline">Cancel</button>
+            <button type="button" id="btn-delete-account-confirm" class="btn" style="background:var(--error); color:#fff; border-color:var(--error);">Delete My Account</button>
+          </div>
         </div>
       </div>
     </div>
@@ -592,6 +785,7 @@
   <script src="js/team.js"></script>
   <script src="js/members.js"></script>
   <script src="js/first-api.js"></script>
+  <script src="js/session-state.js"></script>
   <script src="js/pinned-events.js"></script>
   <script src="js/ftcscout.js"></script>
   <script src="js/dynamic-form.js"></script>
@@ -601,5 +795,6 @@
   <script src="js/form-builder.js"></script>
   <script src="js/app.js"></script>
   <script src="js/sheets-export.js"></script>
+  <script src="js/delete-account.js"></script>
 </body>
 </html>

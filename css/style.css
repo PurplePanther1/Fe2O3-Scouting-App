@@ -162,6 +162,33 @@ input[type="password"]::placeholder {
   opacity: 0.6;
 }
 
+/* ====== Password show/hide toggle ====== */
+.password-input-wrapper {
+  position: relative;
+}
+
+.password-input-wrapper input {
+  padding-right: 44px;
+}
+
+.btn-toggle-password {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 6px;
+  color: var(--text-muted);
+}
+
+.btn-toggle-password:hover {
+  color: var(--text);
+}
+
 /* ====== User Info Bar ====== */
 .user-info {
   display: flex;
@@ -181,6 +208,10 @@ input[type="password"]::placeholder {
 
 .user-info span {
   flex: 1;
+  min-width: 0; /* let this shrink/truncate instead of forcing the row (and its buttons) wider than the card — a flex item's default min-width is its content's width, so an unbroken long email fallback (no display name saved yet) can otherwise force an overflow */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 500;
   font-size: 0.95rem;
 }
@@ -360,6 +391,14 @@ input[type="password"]::placeholder {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+/* Standalone My Account view, reached from the Join/Create Team screen before
+   the user has a team — shows just the My Account tab content, no team name
+   banner or tab bar (there's no team/other tabs to navigate to yet). */
+#screen-main.standalone-account-mode #dashboard-header,
+#screen-main.standalone-account-mode #dashboard-tabs {
+  display: none;
 }
 
 #dashboard-team-info {

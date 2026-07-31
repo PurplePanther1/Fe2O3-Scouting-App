@@ -5,13 +5,25 @@ let currentTeamRoles = {};
 let currentTeamPermissions = {};
 
 // ====== Dashboard tab switching ======
+// Exposed globally so a fresh login can reset to the default tab (Scouting)
+// the same way a page refresh does, instead of duplicating this logic.
+function activateDashboardTab(name) {
+  document.querySelectorAll('#dashboard-tabs .tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.dtab === name);
+  });
+  document.querySelectorAll('.dtab-content').forEach(tc => tc.classList.remove('active'));
+  const content = document.getElementById('dtab-' + name);
+  if (content) content.classList.add('active');
+
+  if (typeof saveSessionState === 'function') {
+    saveSessionState();
+  }
+}
+window.activateDashboardTab = activateDashboardTab;
+
 document.querySelectorAll('#dashboard-tabs .tab').forEach(tab => {
   tab.addEventListener('click', () => {
-    document.querySelectorAll('#dashboard-tabs .tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    const dtabName = tab.dataset.dtab;
-    document.querySelectorAll('.dtab-content').forEach(tc => tc.classList.remove('active'));
-    document.getElementById('dtab-' + dtabName).classList.add('active');
+    activateDashboardTab(tab.dataset.dtab);
   });
 });
 
@@ -19,6 +31,10 @@ document.querySelectorAll('#dashboard-tabs .tab').forEach(tab => {
 setupCopyButton('btn-copy-myteam-code', 'myteam-join-code-value');
 
 // ====== Load and display team members ======
+// Resolves every member's display info up front (in parallel) before
+// rendering anything, so the list appears once with real names/emails
+// instead of flashing "Loading..." and raw uids per row while each fetch
+// trickles in — only the "Loading members..." status text covers the wait.
 async function loadTeamMembers(teamId, teamData) {
   currentTeamId = teamId;
   currentTeamRoles = teamData.roles || {};
@@ -39,7 +55,7 @@ async function loadTeamMembers(teamId, teamData) {
     return;
   }
 
-  status.textContent = `${teamData.members.length} member(s)`;
+  status.textContent = 'Loading members...';
 
   // Populate the display-name input with whatever this user has already chosen
   const nameInput = document.getElementById('input-display-name');
@@ -47,17 +63,35 @@ async function loadTeamMembers(teamId, teamData) {
     nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
   }
 
-  // Fetch user display info for each member
   const isCaptain = currentUser && currentTeamRoles[currentUser.uid] === 'captain';
 
-  for (const uid of teamData.members) {
+  const memberInfos = await Promise.all(teamData.members.map(uid => {
+    if (uid === currentUser.uid) {
+      // It's our own row — we already know our name/email/photo, no fetch needed
+      return Promise.resolve({
+        uid,
+        displayName: typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'You'),
+        email: currentUser.email || '',
+        photoURL: currentUser.photoURL || null
+      });
+    }
+    return fetchMemberInfo(uid);
+  }));
+
+  // The team may have changed while these fetches were in flight
+  if (currentTeamId !== teamId) return;
+
+  memberList.innerHTML = '';
+  status.textContent = `${teamData.members.length} member(s)`;
+
+  memberInfos.forEach(({ uid, displayName, email, photoURL }) => {
     const item = document.createElement('div');
     item.className = 'member-item';
 
     // Avatar
     const avatar = document.createElement('img');
     avatar.className = 'member-avatar';
-    avatar.src = 'https://ui-avatars.com/api/?name=U&background=16213e&color=a0a0b8';
+    avatar.src = photoURL || 'https://ui-avatars.com/api/?name=U&background=16213e&color=a0a0b8';
     avatar.alt = 'User';
 
     // Info
@@ -66,13 +100,11 @@ async function loadTeamMembers(teamId, teamData) {
 
     const nameEl = document.createElement('div');
     nameEl.className = 'member-name';
-    nameEl.textContent = uid === currentUser.uid
-      ? `${typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'You')} (You)`
-      : 'Loading...';
+    nameEl.textContent = uid === currentUser.uid ? `${displayName} (You)` : displayName;
 
     const emailEl = document.createElement('div');
     emailEl.className = 'member-email';
-    emailEl.textContent = uid;
+    emailEl.textContent = email;
 
     info.appendChild(nameEl);
     info.appendChild(emailEl);
@@ -115,20 +147,39 @@ async function loadTeamMembers(teamId, teamData) {
     }
 
     memberList.appendChild(item);
+  });
+}
 
-    if (uid === currentUser.uid) {
-      // It's our own row — we already know our name/email/photo, no fetch needed
-      emailEl.textContent = currentUser.email || '';
-      if (currentUser.photoURL) avatar.src = currentUser.photoURL;
-    } else {
-      // Fetch user display name in background
-      fetchUserDisplayName(uid, nameEl, emailEl, avatar);
+// ====== Resolve a member's display name/email/photo ahead of rendering ======
+async function fetchMemberInfo(uid) {
+  let displayName = uid;
+  let photoURL = null;
+  try {
+    const userDoc = await db.collection('users').doc(uid).get();
+    if (userDoc.exists) {
+      const data = userDoc.data();
+      displayName = data.displayName || uid;
+      if (data.photoURL) photoURL = data.photoURL;
     }
+  } catch (_) {
+    // displayName stays as the uid fallback
   }
+
+  // Email is private — this resolves for the captain viewing a teammate, or the
+  // user viewing themself; a permission-denied here just means "don't show it."
+  let email = '';
+  try {
+    const contactDoc = await db.collection('users').doc(uid).collection('private').doc('contact').get();
+    email = contactDoc.exists ? (contactDoc.data().email || '') : '';
+  } catch (_) {
+    email = '';
+  }
+
+  return { uid, displayName, email, photoURL };
 }
 
 // ====== Edit Permissions Modal ======
-const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canBulkDelete', 'canPinEvents'];
+const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canBulkDelete', 'canPinEvents', 'canViewMemberEmails'];
 let memberPermissionsEditingUid = null;
 
 function openMemberPermissionsModal(uid) {
@@ -210,13 +261,7 @@ document.getElementById('btn-save-display-name').addEventListener('click', async
   if (!currentUser) return;
 
   try {
-    await db.collection('users').doc(currentUser.uid).set({
-      displayName: name,
-      photoURL: currentUser.photoURL || null,
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-
-    currentUserProfile = { ...(currentUserProfile || {}), displayName: name };
+    await saveDisplayName(name);
 
     status.textContent = 'Saved!';
     status.className = 'success-message';
@@ -232,33 +277,6 @@ document.getElementById('btn-save-display-name').addEventListener('click', async
     status.className = 'error-message';
   }
 });
-
-// ====== Fetch user display name from Firestore user profiles ======
-async function fetchUserDisplayName(uid, nameEl, emailEl, avatarEl) {
-  try {
-    const userDoc = await db.collection('users').doc(uid).get();
-    if (userDoc.exists) {
-      const data = userDoc.data();
-      nameEl.textContent = data.displayName || uid;
-      if (data.photoURL) {
-        avatarEl.src = data.photoURL;
-      }
-    } else {
-      nameEl.textContent = uid;
-    }
-  } catch (_) {
-    nameEl.textContent = uid;
-  }
-
-  // Email is private — this resolves for the captain viewing a teammate, or the
-  // user viewing themself; a permission-denied here just means "don't show it."
-  try {
-    const contactDoc = await db.collection('users').doc(uid).collection('private').doc('contact').get();
-    emailEl.textContent = contactDoc.exists ? (contactDoc.data().email || '') : '';
-  } catch (_) {
-    emailEl.textContent = '';
-  }
-}
 
 // ====== Transfer captaincy to another member ======
 async function transferCaptaincy(newCaptainUid) {
@@ -302,6 +320,62 @@ async function transferCaptaincy(newCaptainUid) {
     alert('Failed to transfer captain role. Check your connection and try again.');
   }
 }
+
+// ====== Leave Team (My Team tab) — same self-leave rule path as account
+// deletion (selfLeaveTeam, defined in delete-account.js), but doesn't touch
+// Firebase Auth or delete the account itself. Blocked for a captain while
+// other members remain, exactly like account deletion. ======
+async function leaveTeam() {
+  const errorEl = document.getElementById('leave-team-error');
+  if (errorEl) errorEl.textContent = '';
+
+  if (!currentUser || !currentTeamId) return;
+
+  const isCaptain = typeof getCurrentUserRole === 'function' && getCurrentUserRole() === 'captain';
+  const otherMembersExist = !!(currentTeamData && Array.isArray(currentTeamData.members) && currentTeamData.members.length > 1);
+
+  if (isCaptain && otherMembersExist) {
+    if (errorEl) errorEl.textContent = 'You must transfer the captain role to another member (above) before leaving.';
+    return;
+  }
+
+  if (!confirm('Leave this team? You can rejoin later with the join code.')) return;
+
+  showLoading('Leaving team...');
+  try {
+    if (typeof watchTeamDoc === 'function') watchTeamDoc(null);
+
+    if (typeof selfLeaveTeam === 'function') {
+      await selfLeaveTeam(currentTeamId, currentUser.uid);
+    }
+    await db.collection('userTeams').doc(currentUser.uid).delete();
+
+    hideLoading();
+
+    // Reset team-related state and land back on the Join/Create screen —
+    // same shape as handleAuthenticatedUser()'s "no team" branch. currentTeamId
+    // and currentTeamData are reset by showScreen() itself below.
+    currentTeamRoles = {};
+    currentTeamPermissions = {};
+    if (typeof clearSelectedEvent === 'function') clearSelectedEvent();
+    if (typeof clearSessionState === 'function') clearSessionState();
+
+    const nameInput = document.getElementById('input-screen-team-display-name');
+    if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
+
+    // showScreen() itself resets the join-code/team-name fields, the "team
+    // created" card, and currentTeamData/currentTeamId whenever screen-team
+    // is shown, so no need to do it here too.
+    showScreen('screen-team');
+  } catch (err) {
+    hideLoading();
+    console.error('Leave team error:', err);
+    if (errorEl) errorEl.textContent = 'Failed to leave team. Please try again.';
+  }
+}
+
+const btnLeaveTeam = document.getElementById('btn-leave-team');
+if (btnLeaveTeam) btnLeaveTeam.addEventListener('click', leaveTeam);
 
 // ====== Expose loadTeamMembers globally so auth.js can call it ======
 window.loadTeamMembers = loadTeamMembers;

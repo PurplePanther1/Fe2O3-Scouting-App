@@ -60,7 +60,14 @@ async function ensureUserProfile(user) {
     console.warn('Failed to sync private contact doc:', err);
   }
 
-  currentUserProfile = { displayName: profile.displayName || '', photoURL: profile.photoURL || null, email: user.email || '' };
+  currentUserProfile = {
+    displayName: profile.displayName || '',
+    photoURL: profile.photoURL || null,
+    email: user.email || '',
+    // True only once the user has explicitly gone through saveDisplayName() —
+    // an auto-filled Google name doesn't count until they've actually confirmed it.
+    displayNameConfirmed: !!profile.displayNameConfirmed
+  };
   return currentUserProfile;
 }
 
@@ -146,6 +153,30 @@ async function ensureJoinCodeDoc(teamId, joinCode) {
 }
 
 /**
+ * Save the user's chosen display name to Firestore and update currentUserProfile.
+ * The single write path behind every display-name entry point in the app: the
+ * My Team tab's "Your Display Name" field, the create/join team screen's inline
+ * prompt, and the post-login "set a display name" gate for existing users.
+ * Always marks the name as explicitly confirmed — calling this at all means the
+ * user saw the field (pre-filled or not) and pressed a button to proceed with it.
+ */
+async function saveDisplayName(name) {
+  const trimmed = (name || '').trim();
+  if (!trimmed) throw new Error('Please enter a name.');
+  if (!currentUser) throw new Error('You must be signed in.');
+
+  await db.collection('users').doc(currentUser.uid).set({
+    displayName: trimmed,
+    photoURL: currentUser.photoURL || null,
+    displayNameConfirmed: true,
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }, { merge: true });
+
+  currentUserProfile = { ...(currentUserProfile || {}), displayName: trimmed, displayNameConfirmed: true };
+  return trimmed;
+}
+
+/**
  * The name to show for the current user: their chosen display name first,
  * falling back to whatever Firebase Auth knows (Google name, then email).
  */
@@ -177,6 +208,33 @@ function hideLoading() {
 function showScreen(screenId) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(screenId).classList.add('active');
+
+  // screen-team's join-code/team-name fields and "team created" card belong
+  // to whatever create/join attempt was last in progress — stale if a
+  // different account reaches this screen in the same tab (e.g. delete
+  // account → create a new one, without a refresh). Reset them every time
+  // this screen is shown rather than at each individual call site, so a
+  // future path that lands here doesn't need to remember to do it too. The
+  // display name field is deliberately left alone — it's meant to stay
+  // pre-filled with the signed-in user's known name.
+  if (screenId === 'screen-team') {
+    const joinCodeInput = document.getElementById('input-join-code');
+    if (joinCodeInput) joinCodeInput.value = '';
+    const teamNameInput = document.getElementById('input-team-name');
+    if (teamNameInput) teamNameInput.value = '';
+    const joinCodeCreated = document.getElementById('join-code-created');
+    if (joinCodeCreated) joinCodeCreated.classList.add('hidden');
+
+    // This screen means "no current team" by definition — clear these too,
+    // not just the form fields above. Previously only leaveTeam() did this,
+    // so any other path reaching screen-team (e.g. a brand-new account that
+    // never joined a team) left currentTeamData/currentTeamId pointing at
+    // whatever team a PRIOR account in this same tab had, which later made
+    // delete-account try team-scoped writes (self-leave, anonymization)
+    // against a team the current account was never a member of.
+    if (typeof currentTeamData !== 'undefined') currentTeamData = null;
+    if (typeof currentTeamId !== 'undefined') currentTeamId = null;
+  }
 }
 
 /**
@@ -192,7 +250,47 @@ function clearErrors() {
   document.querySelectorAll('.success-message').forEach(el => el.textContent = '');
 }
 
+/**
+ * Clear every credential field across the Sign In / Sign Up / Forgot Password
+ * forms. Called on sign-out and whenever the user switches between these
+ * forms, so a previously entered email/password never lingers into a
+ * different form or a later session.
+ */
+function clearAuthFormFields() {
+  ['input-signin-email', 'input-signin-password',
+   'input-signup-email', 'input-signup-password', 'input-signup-confirm',
+   'input-reset-email'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+}
+
+// ====== Show/Hide Password Toggles (every password field in the app) ======
+document.querySelectorAll('.btn-toggle-password').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const input = document.getElementById(btn.dataset.target);
+    if (!input) return;
+    const showing = input.type === 'text';
+    input.type = showing ? 'password' : 'text';
+    btn.textContent = showing ? '👁' : '🙈';
+    btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+  });
+});
+
 // ====== Auth Tab Switching (Sign In / Sign Up) ======
+// Exposed as a function so sign-out can reset it back to Sign In — a page
+// refresh gets this for free from the HTML defaults, but nothing previously
+// reset it after sign-out/account-deletion within the same tab, so it could
+// stay stuck on Sign Up.
+function resetAuthTabs() {
+  document.querySelectorAll('#auth-tabs .tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === 'signin');
+  });
+  document.querySelectorAll('.auth-form').forEach(f => {
+    f.classList.toggle('active', f.id === 'tab-signin');
+  });
+}
+
 document.querySelectorAll('#auth-tabs .tab').forEach(tab => {
   tab.addEventListener('click', () => {
     document.querySelectorAll('#auth-tabs .tab').forEach(t => t.classList.remove('active'));
@@ -201,6 +299,7 @@ document.querySelectorAll('#auth-tabs .tab').forEach(tab => {
     document.querySelectorAll('.auth-form').forEach(f => f.classList.remove('active'));
     document.getElementById('tab-' + tabName).classList.add('active');
     clearErrors();
+    clearAuthFormFields();
   });
 });
 
@@ -211,12 +310,17 @@ function friendlyAuthError(code) {
     'auth/wrong-password': 'Incorrect password. Please try again.',
     'auth/invalid-credential': 'Invalid email or password. Please try again.',
     'auth/invalid-email': 'Please enter a valid email address.',
-    'auth/email-already-in-use': 'An account with this email already exists. Try signing in instead.',
+    // Deliberately vague — confirming "an account already exists" for this
+    // email is an enumeration leak, whether hit during sign-up or Change Email.
+    'auth/email-already-in-use': 'This email address can\'t be used right now. Please try a different one or contact support.',
     'auth/weak-password': 'Password must be at least 6 characters.',
     'auth/too-many-requests': 'Too many attempts. Please wait a moment and try again.',
     'auth/user-disabled': 'This account has been disabled.',
     'auth/operation-not-allowed': 'Email/password sign-in is not enabled. Please contact support.',
     'auth/network-request-failed': 'Network error. Check your internet connection and try again.',
+    'auth/requires-recent-login': 'For security, please re-enter your current password to continue.',
+    'auth/popup-closed-by-user': 'Sign-in was cancelled.',
+    'auth/popup-blocked': 'Pop-up was blocked. Please allow pop-ups for this site.',
   };
   return map[code] || 'Something went wrong. Please try again.';
 }
@@ -255,8 +359,7 @@ $('btn-signup').addEventListener('click', async () => {
 
     hideLoading();
     // Show verify-email screen
-    $('verify-email-display').textContent = cred.user.email;
-    showScreen('screen-verify-email');
+    showVerifyEmailScreen(cred.user.email);
   } catch (err) {
     hideLoading();
     console.error('Sign up error:', err);
@@ -286,8 +389,7 @@ $('btn-signin').addEventListener('click', async () => {
     // Check email verification
     if (!cred.user.emailVerified) {
       hideLoading();
-      $('verify-email-display').textContent = cred.user.email;
-      showScreen('screen-verify-email');
+      showVerifyEmailScreen(cred.user.email);
       return;
     }
 
@@ -321,18 +423,27 @@ $('btn-google-login').addEventListener('click', async () => {
 });
 
 // ====== FORGOT PASSWORD ======
+// Basic format check only (not full RFC 5322) — an @ with something on both
+// sides and a plausible-looking TLD. This catches genuinely malformed input
+// before we bother calling Firebase; it can't verify the domain is real or
+// actually receives mail, since that would require a network lookup.
+const EMAIL_FORMAT_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
 $('btn-forgot-password').addEventListener('click', () => {
   clearErrors();
+  clearAuthFormFields();
   showScreen('screen-forgot-password');
 });
 
 $('btn-back-to-login').addEventListener('click', () => {
   clearErrors();
+  clearAuthFormFields();
   showScreen('screen-login');
 });
 
 $('btn-back-to-login-from-reset').addEventListener('click', () => {
   clearErrors();
+  clearAuthFormFields();
   showScreen('screen-login');
 });
 
@@ -344,18 +455,26 @@ $('btn-send-reset').addEventListener('click', async () => {
     showError('reset-error', 'Please enter your email address.');
     return;
   }
+  if (!EMAIL_FORMAT_REGEX.test(email)) {
+    showError('reset-error', 'Please enter a valid email address.');
+    return;
+  }
 
   showLoading('Sending reset link...');
   try {
     await auth.sendPasswordResetEmail(email);
     hideLoading();
-    $('reset-success').textContent = 'Password reset link sent! Check your inbox.';
+    $('reset-success').textContent = 'Password reset link sent! Check your inbox. (Check your spam/junk folder if you don\'t see it.)';
     $('input-reset-email').value = '';
   } catch (err) {
     hideLoading();
     console.error('Password reset error:', err);
     if (err.code === 'auth/user-not-found') {
-      showError('reset-error', 'No account found with this email address.');
+      // Deliberately shown as if it succeeded — confirming "no account exists"
+      // here is an enumeration leak, exactly as revealing "an account exists"
+      // would be. Nothing was actually sent, but the response looks identical.
+      $('reset-success').textContent = 'Password reset link sent! Check your inbox. (Check your spam/junk folder if you don\'t see it.)';
+      $('input-reset-email').value = '';
     } else if (err.code === 'auth/invalid-email') {
       showError('reset-error', 'Please enter a valid email address.');
     } else {
@@ -429,6 +548,47 @@ $('btn-set-password').addEventListener('click', async () => {
 });
 
 // ====== VERIFY EMAIL SCREEN ======
+// Polls for verification automatically instead of requiring the manual
+// button — reloads the Firebase user every few seconds and checks
+// emailVerified. The button stays as a fallback for whenever polling is slow
+// or the tab was backgrounded (most browsers throttle timers in background
+// tabs, so this alone isn't guaranteed to fire promptly).
+let verifyEmailPollInterval = null;
+
+function showVerifyEmailScreen(email) {
+  $('verify-email-display').textContent = email;
+  showScreen('screen-verify-email');
+  startVerifyEmailPolling();
+}
+
+function startVerifyEmailPolling() {
+  stopVerifyEmailPolling(); // avoid stacking multiple intervals
+  verifyEmailPollInterval = setInterval(async () => {
+    if (!currentUser) {
+      stopVerifyEmailPolling();
+      return;
+    }
+    try {
+      await currentUser.reload();
+      const freshUser = auth.currentUser;
+      if (freshUser && freshUser.emailVerified) {
+        stopVerifyEmailPolling();
+        await handleAuthenticatedUser(freshUser);
+      }
+    } catch (err) {
+      // Non-fatal — the manual button is still there, and the next tick tries again.
+      console.warn('Email verification poll failed:', err);
+    }
+  }, 4000);
+}
+
+function stopVerifyEmailPolling() {
+  if (verifyEmailPollInterval) {
+    clearInterval(verifyEmailPollInterval);
+    verifyEmailPollInterval = null;
+  }
+}
+
 $('btn-resend-verification').addEventListener('click', async () => {
   clearErrors();
   if (!currentUser) {
@@ -440,7 +600,7 @@ $('btn-resend-verification').addEventListener('click', async () => {
   try {
     await currentUser.sendEmailVerification();
     hideLoading();
-    showError('verify-error', 'Verification email resent! Check your inbox.');
+    showError('verify-error', 'Verification email resent! Check your inbox. (Check your spam/junk folder if you don\'t see it.)');
   } catch (err) {
     hideLoading();
     console.error('Resend verification error:', err);
@@ -481,11 +641,247 @@ $('btn-verify-sign-out').addEventListener('click', async () => {
   await signOut();
 });
 
+// ====== Set Display Name gate (existing users with a blank display name) ======
+$('btn-set-display-name-continue').addEventListener('click', async () => {
+  clearErrors();
+  const input = $('input-set-display-name');
+  const name = input.value.trim();
+
+  if (!name) {
+    showError('set-display-name-error', 'Please enter a name.');
+    return;
+  }
+  if (!currentUser) return;
+
+  showLoading('Saving...');
+  try {
+    await saveDisplayName(name);
+    hideLoading();
+    // Re-run the post-login flow now that the name is set — mirrors the
+    // "I've verified — continue" pattern above.
+    await handleAuthenticatedUser(currentUser);
+  } catch (err) {
+    hideLoading();
+    console.error('Failed to save display name:', err);
+    showError('set-display-name-error', 'Failed to save. Please try again.');
+  }
+});
+
+$('input-set-display-name').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('btn-set-display-name-continue').click();
+});
+
+// ====== Change Password (My Account tab, email/password accounts only) ======
+function openChangePasswordModal() {
+  $('input-change-password-current').value = '';
+  $('input-change-password-new').value = '';
+  $('input-change-password-confirm').value = '';
+  $('change-password-error').textContent = '';
+  $('change-password-success').textContent = '';
+  $('change-password-modal').classList.remove('hidden');
+}
+
+function closeChangePasswordModal() {
+  $('change-password-modal').classList.add('hidden');
+}
+
+async function saveNewPassword() {
+  const errorEl = $('change-password-error');
+  const successEl = $('change-password-success');
+  errorEl.textContent = '';
+  successEl.textContent = '';
+
+  const currentPassword = $('input-change-password-current').value;
+  const newPassword = $('input-change-password-new').value;
+  const confirmPassword = $('input-change-password-confirm').value;
+
+  if (!currentPassword) {
+    errorEl.textContent = 'Please enter your current password.';
+    return;
+  }
+  if (!newPassword || newPassword.length < 6) {
+    errorEl.textContent = 'New password must be at least 6 characters.';
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    errorEl.textContent = 'New passwords do not match.';
+    return;
+  }
+  if (!currentUser || !currentUser.email) {
+    errorEl.textContent = 'You must be signed in to change your password.';
+    return;
+  }
+
+  showLoading('Verifying your identity...');
+  try {
+    // Firebase requires a recent sign-in before allowing a password change —
+    // re-entering the current password is how we satisfy that here.
+    const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, currentPassword);
+    await currentUser.reauthenticateWithCredential(cred);
+
+    showLoading('Updating password...');
+    await currentUser.updatePassword(newPassword);
+
+    hideLoading();
+    successEl.textContent = 'Password updated!';
+    setTimeout(() => {
+      closeChangePasswordModal();
+    }, 1200);
+  } catch (err) {
+    hideLoading();
+    console.error('Change password error:', err);
+    errorEl.textContent = friendlyAuthError(err.code);
+  }
+}
+
+$('btn-open-change-password').addEventListener('click', openChangePasswordModal);
+$('btn-change-password-close').addEventListener('click', closeChangePasswordModal);
+$('btn-change-password-cancel').addEventListener('click', closeChangePasswordModal);
+$('change-password-modal-overlay').addEventListener('click', closeChangePasswordModal);
+$('btn-change-password-save').addEventListener('click', saveNewPassword);
+
+// ====== Change Email (My Account tab) ======
+// Uses verifyBeforeUpdateEmail() rather than updateEmail() — this sends a
+// confirmation link to the NEW address and Firebase only actually changes the
+// account's email once that link is clicked, so no Firestore write happens here.
+// ensureUserProfile() already re-syncs private/contact.email from
+// currentUser.email on every login, so the next sign-in after confirming
+// picks up the change automatically — no extra sync code needed.
+function openChangeEmailModal() {
+  if (!currentUser) return;
+  const hasPasswordProvider = !!(currentUser.providerData &&
+    currentUser.providerData.some(p => p.providerId === 'password'));
+
+  $('input-change-email-password').value = '';
+  $('input-change-email-new').value = '';
+  $('change-email-error').textContent = '';
+  $('change-email-success').textContent = '';
+  $('change-email-password-field').classList.toggle('hidden', !hasPasswordProvider);
+  $('change-email-google-note').classList.toggle('hidden', hasPasswordProvider);
+
+  $('change-email-modal').classList.remove('hidden');
+}
+
+function closeChangeEmailModal() {
+  $('change-email-modal').classList.add('hidden');
+}
+
+async function saveNewEmail() {
+  const errorEl = $('change-email-error');
+  const successEl = $('change-email-success');
+  errorEl.textContent = '';
+  successEl.textContent = '';
+
+  const newEmail = $('input-change-email-new').value.trim();
+  if (!newEmail) {
+    errorEl.textContent = 'Please enter a new email address.';
+    return;
+  }
+  if (!currentUser) {
+    errorEl.textContent = 'You must be signed in to change your email.';
+    return;
+  }
+  if (currentUser.email && newEmail.toLowerCase() === currentUser.email.toLowerCase()) {
+    errorEl.textContent = "That's already your current email address.";
+    return;
+  }
+
+  const hasPasswordProvider = !!(currentUser.providerData &&
+    currentUser.providerData.some(p => p.providerId === 'password'));
+
+  // Reauth and the actual email update are handled as two separate try/catch
+  // stages — a wrong current password and a new-email-already-in-use error both
+  // used to fall through to the same generic "Invalid email or password"
+  // message, which is wrong for both: a reauth failure here is always a
+  // password problem (the email side of that credential is our own, already-
+  // correct one), and conflating it with the unrelated new-email conflict below
+  // was actively confusing.
+  showLoading('Verifying your identity...');
+  try {
+    if (hasPasswordProvider) {
+      const currentPassword = $('input-change-email-password').value;
+      if (!currentPassword) {
+        hideLoading();
+        errorEl.textContent = 'Please enter your current password.';
+        return;
+      }
+      const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, currentPassword);
+      await currentUser.reauthenticateWithCredential(cred);
+    } else {
+      // Google-only accounts have no password — reauthenticate with the same
+      // provider/popup flow used for Google sign-in.
+      const provider = new firebase.auth.GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await currentUser.reauthenticateWithPopup(provider);
+    }
+  } catch (err) {
+    hideLoading();
+    console.error('Change email reauth error:', err);
+    if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/popup-blocked') {
+      errorEl.textContent = friendlyAuthError(err.code);
+    } else if (hasPasswordProvider) {
+      errorEl.textContent = 'Incorrect password. Please try again.';
+    } else {
+      errorEl.textContent = 'Could not verify your identity. Please try again.';
+    }
+    return;
+  }
+
+  showLoading('Sending confirmation email...');
+  try {
+    await currentUser.verifyBeforeUpdateEmail(newEmail);
+
+    hideLoading();
+    successEl.textContent = `Check ${newEmail} to confirm the change. Your email here won't update until you click the link. (Check your spam/junk folder if you don't see it.)`;
+    setTimeout(() => {
+      closeChangeEmailModal();
+    }, 4000);
+  } catch (err) {
+    hideLoading();
+    console.error('Change email update error:', err);
+    // friendlyAuthError() already keeps auth/email-already-in-use generic —
+    // it never confirms whether the new address has an existing account.
+    errorEl.textContent = friendlyAuthError(err.code);
+  }
+}
+
+$('btn-open-change-email').addEventListener('click', openChangeEmailModal);
+$('btn-change-email-close').addEventListener('click', closeChangeEmailModal);
+$('btn-change-email-cancel').addEventListener('click', closeChangeEmailModal);
+$('change-email-modal-overlay').addEventListener('click', closeChangeEmailModal);
+$('btn-change-email-save').addEventListener('click', saveNewEmail);
+
 // ====== SIGN OUT ======
 async function signOut() {
   try {
     watchTeamDoc(null); // stop the live team doc listener
+    stopVerifyEmailPolling(); // in case sign-out happened from the verify-email screen
     await auth.signOut();
+    clearAuthFormFields();
+    // Resets the in-memory selectedEvent/currentEventTeams/currentSelectedTeamNumber
+    // and their DOM (event-search area, team lists, detail modal). Without this,
+    // selectedEvent stays stale in memory, and the very next
+    // activateDashboardTab()/activateScoutingSubTab() call during the next
+    // login (each of which calls saveSessionState() internally) would read
+    // that stale event and write it straight back into sessionStorage —
+    // silently undoing clearSessionState() below.
+    if (typeof clearSelectedEvent === 'function') {
+      clearSelectedEvent();
+    }
+    if (typeof clearSessionState === 'function') {
+      clearSessionState();
+    }
+    // In case sign-out happened from the standalone My Account view (reached
+    // from the Join/Create Team screen) — don't leave screen-main stuck
+    // hiding its dashboard header/tabs for whoever logs in next.
+    const mainScreen = document.getElementById('screen-main');
+    if (mainScreen) mainScreen.classList.remove('standalone-account-mode');
+    const standaloneBackBtn = document.getElementById('btn-my-account-standalone-back');
+    if (standaloneBackBtn) standaloneBackBtn.classList.add('hidden');
+    // A refresh gets this reset for free from the HTML defaults — sign-out
+    // needs to do it explicitly so Sign Up doesn't stay active into the next
+    // session in this same tab.
+    resetAuthTabs();
     showScreen('screen-login');
   } catch (err) {
     console.error('Sign out error:', err);
@@ -495,11 +891,62 @@ async function signOut() {
 $('btn-sign-out').addEventListener('click', signOut);
 $('btn-main-sign-out').addEventListener('click', signOut);
 
+// ====== My Account tab: email + Change Password gating ======
+// currentUser.email (Firebase Auth) is already the source of truth for the
+// signed-in user's own email — no need to read users/{uid}/private/contact,
+// which exists only so *other* people (the captain) can see a teammate's email.
+function renderAccountInfo() {
+  if (!currentUser) return;
+
+  const emailEl = document.getElementById('account-email-display');
+  if (emailEl) emailEl.textContent = currentUser.email || '(no email on this account)';
+
+  const hasPasswordProvider = !!(currentUser.providerData &&
+    currentUser.providerData.some(p => p.providerId === 'password'));
+
+  const changePwBtn = document.getElementById('btn-open-change-password');
+  const note = document.getElementById('account-password-note');
+  if (changePwBtn) changePwBtn.classList.toggle('hidden', !hasPasswordProvider);
+  if (note) {
+    note.textContent = hasPasswordProvider ? '' : 'Signed in with Google — no password to change.';
+  }
+}
+
+// ====== Standalone My Account view (from the Join/Create Team screen, for a
+// user who doesn't have a team yet — e.g. right after deleting their old
+// account and signing up fresh). Reuses the same #dtab-account markup/logic
+// as the normal My Account tab; just hides the dashboard header/tab bar
+// (there's no team name or other tabs to show yet) and adds a Back button. ======
+function openStandaloneMyAccount() {
+  const mainScreen = document.getElementById('screen-main');
+  if (mainScreen) mainScreen.classList.add('standalone-account-mode');
+  showScreen('screen-main');
+  if (typeof activateDashboardTab === 'function') activateDashboardTab('account');
+  renderAccountInfo();
+  const backBtn = document.getElementById('btn-my-account-standalone-back');
+  if (backBtn) backBtn.classList.remove('hidden');
+}
+
+function closeStandaloneMyAccount() {
+  const mainScreen = document.getElementById('screen-main');
+  if (mainScreen) mainScreen.classList.remove('standalone-account-mode');
+  const backBtn = document.getElementById('btn-my-account-standalone-back');
+  if (backBtn) backBtn.classList.add('hidden');
+  showScreen('screen-team');
+}
+
+$('btn-open-my-account-standalone').addEventListener('click', openStandaloneMyAccount);
+$('btn-my-account-standalone-back').addEventListener('click', closeStandaloneMyAccount);
+
 // ====== Handle authenticated user (team lookup + navigation) ======
 async function handleAuthenticatedUser(user) {
   currentUser = user;
+  // Reaching this function always means we're past the verify-email gate
+  // (manually, via auto-poll, or because the account was already verified).
+  stopVerifyEmailPolling();
   await ensureUserProfile(user);
   const displayName = getCurrentUserDisplayName();
+  renderAccountInfo();
 
   // Update user info in team screen
   $('user-avatar').src = user.photoURL || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(displayName);
@@ -512,6 +959,19 @@ async function handleAuthenticatedUser(user) {
     const team = await getUserTeam(user.uid);
     hideLoading();
     if (team) {
+      // Existing users who haven't explicitly confirmed a display name yet must
+      // do so before reaching the dashboard — same blocking pattern as the
+      // email-verification gate above. This also catches an auto-filled Google
+      // name the user never actually chose, not just a genuinely blank one.
+      // Brand-new users without a team yet are prompted inline on the create/join
+      // screen instead (see the branch below), not here.
+      if (!currentUserProfile || !currentUserProfile.displayNameConfirmed) {
+        const nameInput = document.getElementById('input-set-display-name');
+        if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
+        showScreen('screen-set-display-name');
+        return;
+      }
+
       const myRole = (team.roles && team.roles[user.uid]) || 'member';
       await ensureUserTeamPointer(user.uid, team.id, myRole);
       if (myRole === 'captain') {
@@ -540,9 +1000,35 @@ async function handleAuthenticatedUser(user) {
       // so role/permission/pinned-event changes made by anyone on the team show
       // up immediately without a manual refresh.
       watchTeamDoc(team.id);
+
       showScreen('screen-main');
+
+      // Restore whatever tab/subtab/event this browser tab had before a
+      // refresh (sessionStorage — cleared when the tab/browser closes, so a
+      // brand-new session still starts clean), or fall back to the same
+      // default a fresh page load starts on (Scouting → Team Information, no
+      // event). Runs after showScreen so the dashboard appears immediately;
+      // any event reload uses the same loading overlay a manual event
+      // selection already does.
+      if (typeof restoreOrDefaultSessionState === 'function') {
+        restoreOrDefaultSessionState().catch(err => {
+          console.error('Failed to restore session state:', err);
+        });
+      } else {
+        if (typeof window.activateDashboardTab === 'function') {
+          window.activateDashboardTab('scouting');
+        }
+        if (typeof window.activateScoutingSubTab === 'function') {
+          window.activateScoutingSubTab('info');
+        }
+      }
     } else {
       clearErrors();
+      // Always shown — pre-filled with whatever name is already known (Google or
+      // a prior save), if any, but the user must still press Create/Join to
+      // proceed, so an unconfirmed auto-filled name is never used silently.
+      const nameInput = document.getElementById('input-screen-team-display-name');
+      if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
       showScreen('screen-team');
     }
   } catch (err) {
@@ -567,8 +1053,7 @@ auth.onAuthStateChanged(async (user) => {
 
       if (!isGoogleUser) {
         // Email/password user with unverified email → show verify screen
-        $('verify-email-display').textContent = user.email;
-        showScreen('screen-verify-email');
+        showVerifyEmailScreen(user.email);
         return;
       }
       // Google user — emailVerified should be true, but just in case, fall through

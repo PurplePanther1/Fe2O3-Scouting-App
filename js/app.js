@@ -64,6 +64,10 @@ document.addEventListener('DOMContentLoaded', () => {
         renderPinnedEventsList();
       }
     }
+
+    if (typeof saveSessionState === 'function') {
+      saveSessionState();
+    }
   };
 
   Object.entries(subtabs).forEach(([name, { tab }]) => {

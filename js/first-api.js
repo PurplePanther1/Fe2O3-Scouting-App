@@ -333,12 +333,20 @@ function clearSelectedEvent() {
   if (typeof renderPinnedEventsList === 'function') {
     renderPinnedEventsList();
   }
+
+  if (typeof saveSessionState === 'function') {
+    saveSessionState();
+  }
 }
 
 // ====== Select an event ======
 async function selectEvent(eventData) {
   console.time('[Timing] selectEvent total');
   selectedEvent = eventData;
+
+  if (typeof saveSessionState === 'function') {
+    saveSessionState();
+  }
 
   // Highlight this event in the search results list (if rendered)
   document.querySelectorAll('.event-item').forEach(el => {
@@ -799,6 +807,32 @@ function renderMatchTeamList(teams) {
   console.timeEnd('[Timing] renderMatchTeamList');
 }
 
+// ====== Show/update/remove the "Scouted by / Last edited by" line on a pit
+// team-list row — called on initial render and again (via
+// refreshTeamListScoutedState) right after a save/delete, so it reflects the
+// new state immediately rather than waiting for the next full re-render. ======
+function updatePitTeamRowMetaLine(item, teamNumber, eventCode) {
+  let metaLine = item.querySelector('.pit-row-meta');
+  const isScouted = typeof isTeamScouted === 'function' ? isTeamScouted(teamNumber, eventCode) : false;
+  const entry = (isScouted && typeof getPitScoutedEntry === 'function') ? getPitScoutedEntry(teamNumber, eventCode) : null;
+
+  if (!entry) {
+    if (metaLine) metaLine.remove();
+    return;
+  }
+
+  if (!metaLine) {
+    metaLine = document.createElement('div');
+    metaLine.className = 'pit-row-meta';
+    metaLine.style.cssText = 'font-size:0.75rem; color:var(--text-muted);';
+    item.appendChild(metaLine);
+  }
+
+  const scoutedBy = entry.scoutedByName || entry.scoutedByEmail || 'Unknown';
+  const lastEditedBy = entry.lastEditedByName || entry.lastEditedByEmail || 'N/A';
+  metaLine.textContent = `Scouted by: ${scoutedBy} | Last edited by: ${lastEditedBy}`;
+}
+
 function renderPitTeamList(teams) {
   console.time('[Timing] renderPitTeamList');
   const container = document.getElementById('team-list-pit');
@@ -822,6 +856,13 @@ function renderPitTeamList(teams) {
     const item = document.createElement('div');
     item.className = 'team-item team-item-pit';
     item.dataset.teamNumber = team.teamNumber;
+    // Overrides the shared .team-item row layout so a second, full-width line
+    // (Scouted by / Last edited by) can stack below the number/name/buttons
+    // row for teams that have been pit scouted.
+    item.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:4px;';
+
+    const topRow = document.createElement('div');
+    topRow.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px;';
 
     const leftGroup = document.createElement('div');
     leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0;';
@@ -896,8 +937,12 @@ function renderPitTeamList(teams) {
 
     btnGroup.appendChild(scoutBtn);
 
-    item.appendChild(leftGroup);
-    item.appendChild(btnGroup);
+    topRow.appendChild(leftGroup);
+    topRow.appendChild(btnGroup);
+    item.appendChild(topRow);
+
+    updatePitTeamRowMetaLine(item, team.teamNumber, selectedEvent?.code);
+
     container.appendChild(item);
   });
 
