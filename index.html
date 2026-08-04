@@ -227,7 +227,7 @@
             <p><strong id="selected-event-name"></strong></p>
             <p class="help-text" id="selected-event-code"></p>
             <p class="help-text" id="selected-event-teams-count"></p>
-            <button id="btn-export-event-sheets" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">📤 Export All Teams</button>
+            <button id="btn-export-event-sheets" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">📤 Export Pit + Match Data (All Teams)</button>
             <button id="btn-pin-event" class="btn btn-outline btn-small hidden" style="margin-top:10px; width:100%">📌 Pin This Event</button>
             <button id="btn-deselect-event" class="btn btn-outline btn-small" style="margin-top:10px; width:100%">✕ Deselect Event</button>
             <p id="event-export-error" class="error-message"></p>
@@ -494,7 +494,7 @@
           </div>
           <div id="td-match-entries"></div>
         </div>
-        <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📤 Export Data</button>
+        <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📤 Export Pit + Match Data</button>
         <p id="td-export-match-error" class="error-message"></p>
         <p id="td-export-match-success" class="success-message"></p>
         <p id="td-error" class="error-message"></p>
@@ -716,7 +716,7 @@
       <div style="padding:16px 24px 24px">
         <!-- Shown instead of the form when captain + other members remain -->
         <div id="delete-account-blocked" class="hidden">
-          <p class="error-message" style="margin-bottom:0">
+          <p class="error-message" id="delete-account-blocked-message" style="margin-bottom:0">
             You're the captain of this team, and other members are still on it.
             Please transfer the captain role to another member (My Team tab)
             before deleting your account.
@@ -730,6 +730,12 @@
             instead of your name — but you'll be removed from your team and
             signed out.
           </p>
+          <!-- Shown instead of/alongside the note above when the user is the
+               SOLE member of one or more teams — deleting the account also
+               permanently deletes those teams entirely, not just their
+               membership on them. Not blocking (unlike delete-account-blocked
+               above), just a heads-up. -->
+          <p class="error-message hidden" id="delete-account-sole-owner-warning" style="margin-bottom:16px"></p>
           <div class="pit-field" id="delete-account-password-field">
             <label for="input-delete-account-password">Current Password</label>
             <div class="password-input-wrapper">
@@ -756,7 +762,7 @@
     <div id="export-choice-modal-overlay" class="modal-overlay-bg"></div>
     <div class="modal-card" style="max-width:360px">
       <div class="modal-header">
-        <h3 id="export-choice-title">Export Scouting Data</h3>
+        <h3 id="export-choice-title">Export Pit + Match Data</h3>
         <button id="btn-export-choice-close" class="btn-modal-close">&times;</button>
       </div>
       <div style="padding:16px 24px 24px; display:flex; flex-direction:column; gap:10px">

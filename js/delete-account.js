@@ -1,14 +1,21 @@
 // ====== Delete Account ======
-// Full sequence: reauthenticate → anonymize the departing user's own
-// attribution on their team's pit/match scouting entries → self-leave the
-// team (members/roles/permissions, via the rules' self-leave branch) →
-// delete userTeams/{uid} → delete users/{uid}/private/contact →
-// delete users/{uid} → delete the Firebase Auth account itself.
+// Full sequence: reauthenticate → for EVERY team the account belongs to
+// (multi-team support): if they're the team's LAST member, delete the whole
+// team (deleteEntireTeam() — its data doesn't survive them); otherwise
+// anonymize the departing user's own attribution on that team's pit/match
+// scouting entries, then self-leave it (members/roles/permissions + that
+// team's memberContacts/{uid} copy, via the rules' self-leave branch) →
+// delete users/{uid}/private/contact → delete users/{uid} → delete the
+// Firebase Auth account itself.
 //
-// A captain is blocked from this entirely while other members remain on the
-// team — they must transfer captaincy first (My Team tab) — matching the
-// rules' self-leave branch, which only allows a captain to use it when
-// members.size() == 1.
+// Blocked entirely if the user is captain of ANY team (not just the active
+// one) with other members remaining on it — they must transfer captaincy
+// there first (My Team tab) — matching the rules' self-leave branch, which
+// only allows a captain to use it when members.size() == 1. This must be an
+// all-or-nothing check across every team: allowing the deletion to proceed
+// for teams where they're not blocked would leave them account-deleted while
+// still stranded as captain of whichever team WAS blocking, with no one able
+// to ever remove or transfer them again.
 
 // ====== Open the modal — shows the captain-block message instead of the
 // form when that applies ======
@@ -25,15 +32,50 @@ function openDeleteAccountModal() {
   successEl.textContent = '';
   if (passwordInput) passwordInput.value = '';
 
-  const isCaptain = typeof getCurrentUserRole === 'function' && getCurrentUserRole() === 'captain';
-  const otherMembersExist = !!(currentTeamData && Array.isArray(currentTeamData.members) && currentTeamData.members.length > 1);
+  // Check EVERY team the user belongs to, not just the active one — deleting
+  // the account must not strand a team the user happens to be captain of
+  // (but isn't currently viewing) without anyone who can transfer captaincy,
+  // since a captain can only self-leave via this same rule when they're the
+  // team's last member.
+  const teamsToCheck = (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.length > 0)
+    ? myTeams
+    : (currentTeamData ? [currentTeamData] : []);
+  const blockingTeams = teamsToCheck.filter(t =>
+    t && t.roles && t.roles[currentUser.uid] === 'captain'
+    && Array.isArray(t.members) && t.members.length > 1
+  );
 
-  if (isCaptain && otherMembersExist) {
+  if (blockingTeams.length > 0) {
+    const blockedMessageEl = document.getElementById('delete-account-blocked-message');
+    if (blockedMessageEl) {
+      const names = blockingTeams.map(t => t.name || 'Unnamed team').join(', ');
+      blockedMessageEl.textContent = blockingTeams.length === 1
+        ? `You're the captain of "${names}", and other members are still on it. Please transfer the captain role to another member (My Team tab) before deleting your account.`
+        : `You're the captain of these teams, and other members are still on them: ${names}. Please transfer the captain role for each one (My Team tab) before deleting your account.`;
+    }
     blockedEl.classList.remove('hidden');
     formEl.classList.add('hidden');
   } else {
     blockedEl.classList.add('hidden');
     formEl.classList.remove('hidden');
+
+    // Not blocked, but may still be the SOLE member of one or more teams —
+    // deleting the account will delete those teams entirely (see
+    // deleteEntireTeam()), not just remove their own membership. A heads-up,
+    // not a block: nothing prevents them from proceeding.
+    const soleOwnerWarningEl = document.getElementById('delete-account-sole-owner-warning');
+    const soleOwnerTeams = teamsToCheck.filter(t => t && Array.isArray(t.members) && t.members.length === 1);
+    if (soleOwnerWarningEl) {
+      if (soleOwnerTeams.length > 0) {
+        const names = soleOwnerTeams.map(t => t.name || 'Unnamed team').join(', ');
+        soleOwnerWarningEl.textContent = soleOwnerTeams.length === 1
+          ? `You're the only member of "${names}" — deleting your account will permanently delete this ENTIRE team and all its scouting data, not just your own membership.`
+          : `You're the only member of these teams: ${names}. Deleting your account will permanently delete these ENTIRE teams and all their scouting data, not just your own membership.`;
+        soleOwnerWarningEl.classList.remove('hidden');
+      } else {
+        soleOwnerWarningEl.classList.add('hidden');
+      }
+    }
 
     const hasPasswordProvider = !!(currentUser.providerData &&
       currentUser.providerData.some(p => p.providerId === 'password'));
@@ -101,6 +143,88 @@ async function selfLeaveTeam(teamId, uid) {
   updates[`roles.${uid}`] = firebase.firestore.FieldValue.delete();
   updates[`permissions.${uid}`] = firebase.firestore.FieldValue.delete();
   await db.collection('teams').doc(teamId).update(updates);
+
+  // Clean up this team's copy of the departing user's email alongside their
+  // membership — teams/{teamId}/memberContacts/{uid} only exists so this
+  // team's captain/permitted teammates can see it, and shouldn't outlive
+  // this person's membership on it.
+  try {
+    await db.collection('teams').doc(teamId).collection('memberContacts').doc(uid).delete();
+  } catch (err) {
+    console.warn(`Failed to delete memberContacts for team ${teamId}:`, err);
+  }
+}
+
+// ====== Delete every pitScouting/matchScouting entry for a team — used when
+// the WHOLE team is being deleted (last member leaving), not just anonymized
+// like anonymizeOwnScoutingEntries() does for a team that carries on without
+// them. Best-effort per document, same style: a failure on one entry is
+// logged and skipped rather than aborting the rest. ======
+async function deleteAllScoutingEntriesForTeam(teamId) {
+  const collections = ['pitScouting', 'matchScouting'];
+
+  for (const collectionName of collections) {
+    try {
+      const snap = await db.collection(collectionName).where('teamId', '==', teamId).get();
+      for (const doc of snap.docs) {
+        try {
+          await doc.ref.delete();
+        } catch (err) {
+          console.warn(`Failed to delete ${collectionName}/${doc.id}:`, err);
+        }
+      }
+    } catch (err) {
+      console.warn(`Failed to query ${collectionName} for team deletion:`, err);
+    }
+  }
+}
+
+// ====== Delete an entire team — used instead of anonymize+self-leave when
+// the departing member is the team's LAST one (firestore.rules gates the
+// team doc/formConfig/joinCodes delete rules on members.size() == 1, exactly
+// this case). Order matters: entries, formConfig, joinCodes, and
+// memberContacts are all deleted BEFORE the team doc itself, because
+// canEditOrDeleteEntry()/canEditTemplates() depend on the team doc still
+// existing with this user's captain role intact in `roles` — delete the team
+// doc first and every one of those deletes would be denied afterward.
+// Shared by Delete Account and the My Team tab's "Leave Team" button, same
+// as selfLeaveTeam(). ======
+async function deleteEntireTeam(teamId, uid, teamData) {
+  await deleteAllScoutingEntriesForTeam(teamId);
+
+  // formConfig docs may not exist if the team never customized either form —
+  // deleting a doc that doesn't exist is a harmless no-op.
+  try {
+    await db.collection('teams').doc(teamId).collection('formConfig').doc('pitScouting').delete();
+  } catch (err) {
+    console.warn(`Failed to delete pitScouting formConfig for team ${teamId}:`, err);
+  }
+  try {
+    await db.collection('teams').doc(teamId).collection('formConfig').doc('matchScouting').delete();
+  } catch (err) {
+    console.warn(`Failed to delete matchScouting formConfig for team ${teamId}:`, err);
+  }
+
+  if (teamData && teamData.joinCode) {
+    try {
+      await db.collection('joinCodes').doc(teamData.joinCode).delete();
+    } catch (err) {
+      console.warn(`Failed to delete joinCodes entry for team ${teamId}:`, err);
+    }
+  }
+
+  try {
+    await db.collection('teams').doc(teamId).collection('memberContacts').doc(uid).delete();
+  } catch (err) {
+    console.warn(`Failed to delete memberContacts for team ${teamId}:`, err);
+  }
+
+  // Must be last — everything above depends on this document (and this
+  // user's captain role within it) still existing. Deliberately not wrapped
+  // in try/catch here, same as selfLeaveTeam()'s team-doc update: a failure
+  // here is the operation failing, and should propagate to the caller's
+  // withStep() wrapper rather than being silently swallowed.
+  await db.collection('teams').doc(teamId).delete();
 }
 
 async function confirmDeleteAccount() {
@@ -155,7 +279,14 @@ async function confirmDeleteAccount() {
   }
 
   const uid = currentUser.uid;
-  const teamId = currentTeamData?.id || null;
+  // Every team this account belongs to, not just the active one — deleting
+  // the account has to clean up all of them, or it'd leave the departed
+  // user's uid stuck in every OTHER team's members/roles/permissions and
+  // memberContacts forever (no one can ever remove them after this point —
+  // only the account itself could self-leave, and it's about to stop existing).
+  const teams = (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.length > 0)
+    ? myTeams.slice()
+    : (currentTeamData ? [currentTeamData] : []);
 
   // Stop listeners tied to team/event membership before we start removing
   // that membership — otherwise they'll harmlessly error out mid-sequence
@@ -165,19 +296,30 @@ async function confirmDeleteAccount() {
   if (typeof watchMatchScoutStatus === 'function') watchMatchScoutStatus(null);
 
   try {
-    if (teamId) {
-      showLoading('Cleaning up your scouting data...');
-      await anonymizeOwnScoutingEntries(teamId, uid);
+    for (const team of teams) {
+      const teamLabel = team.name || team.id;
+      const isSoleMember = Array.isArray(team.members) && team.members.length === 1;
 
-      showLoading('Removing you from your team...');
+      if (isSoleMember) {
+        // Last member — the whole team (and its data) goes with them, not
+        // just their own membership. See deleteEntireTeam() for why order
+        // matters here.
+        showLoading(teams.length > 1 ? `Deleting team ${teamLabel} and all its data...` : 'Deleting your team and all its data...');
+        await withStep(`Deleting team ${teamLabel}`, () => deleteEntireTeam(team.id, uid, team));
+        continue;
+      }
+
+      showLoading(teams.length > 1 ? `Cleaning up your scouting data (${teamLabel})...` : 'Cleaning up your scouting data...');
+      await anonymizeOwnScoutingEntries(team.id, uid);
+
+      showLoading(teams.length > 1 ? `Removing you from ${teamLabel}...` : 'Removing you from your team...');
       // Labeled via withStep() (same helper sheets-export.js uses) so any
-      // failure here is identifiable by step rather than a bare "Missing or
-      // insufficient permissions" with no indication of which write it was.
-      await withStep('Leaving team (self-leave write)', () => selfLeaveTeam(teamId, uid));
+      // failure here is identifiable by step (and by team) rather than a
+      // bare "Missing or insufficient permissions".
+      await withStep(`Leaving team ${teamLabel} (self-leave write)`, () => selfLeaveTeam(team.id, uid));
     }
 
     showLoading('Deleting your account data...');
-    await withStep('Deleting userTeams pointer', () => db.collection('userTeams').doc(uid).delete());
     await withStep('Deleting private contact doc', () => db.collection('users').doc(uid).collection('private').doc('contact').delete());
     await withStep('Deleting user profile doc', () => db.collection('users').doc(uid).delete());
 

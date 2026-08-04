@@ -1,16 +1,42 @@
 // ====== Match Scouting Form ======
 // Data stored in Firestore collection "matchScouting"
-// Document ID: `${eventCode}_${matchNumber}_${teamNumber}`
-// Fields: eventCode, matchNumber, teamNumber, plus dynamic fields from formConfig
-//         scoutedBy (uid), scoutedByName, scoutedAt, updatedAt
+// Document ID: `${teamId}_${eventCode}_${matchNumber}_${teamNumber}` — teamId
+// (the SCOUTING team's own Firestore team ID) is included so two different
+// scouting teams can never collide, even though match numbers are canonical/
+// shared across a real event (two different teams both scouting the same
+// target team in the same real match is a plausible collision, not just an
+// artifact of reused test data — same reasoning as pit-scout.js, see there
+// for the fuller writeup). Older entries (saved before this existed) used
+// `${eventCode}_${matchNumber}_${teamNumber}` — left as-is (see
+// findExistingMatchDoc() below) rather than migrated.
+// Fields: eventCode, matchNumber, teamNumber, teamId, plus dynamic fields
+//         from formConfig, scoutedBy (uid), scoutedByName, scoutedAt, updatedAt
 // Unlike pit scouting, each team can have multiple match entries (one per match).
 
 let currentMatchTeamNumber = null;
 let currentMatchEventCode = null;
 let currentMatchDocId = null; // set when editing an existing entry
 let matchScoutUnsubscribe = null; // Firestore snapshot listener
-let matchEntriesCache = {}; // keyed by "eventCode_teamNumber" -> array of entries
+let matchEntriesCache = {}; // keyed by "eventCode_teamNumber" -> array of entries (each entry's own .id is the real doc id, format-agnostic)
 let currentMatchFormController = null; // returned by renderDynamicForm
+
+// ====== Find this team's existing match-scouting entry for (eventCode,
+// matchNumber, teamNumber), regardless of which document-ID scheme it was
+// saved under — same reasoning/pattern as pit-scout.js's findExistingPitDoc().
+// Queries by data fields rather than guessing an ID. Returns { id, ...data }
+// or null. ======
+async function findExistingMatchDoc(teamId, eventCode, matchNumber, teamNumber) {
+  const snap = await db.collection('matchScouting')
+    .where('teamId', '==', teamId)
+    .where('eventCode', '==', eventCode)
+    .where('matchNumber', '==', Number(matchNumber))
+    .where('teamNumber', '==', Number(teamNumber))
+    .limit(1)
+    .get();
+  if (snap.empty) return null;
+  const doc = snap.docs[0];
+  return { id: doc.id, ...doc.data() };
+}
 
 // Bulk-select state for the match entries list (captain / canEditOtherEntries only)
 let matchBulkSelectMode = false;
@@ -164,29 +190,44 @@ async function saveMatchScoutForm() {
       return;
     }
 
-    const docId = `${currentMatchEventCode}_${matchNumber}_${currentMatchTeamNumber}`;
     const teamId = currentTeamData?.id;
+    if (!teamId) {
+      errorEl.textContent = 'Team data not loaded. Please rejoin your team.';
+      return;
+    }
     const userDisplayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
 
     showLoading('Saving match scouting data...');
     try {
-      // Check if doc exists (either currentMatchDocId or docId)
-      let targetDocId = currentMatchDocId || docId;
-      let existingDoc;
-      try {
-        existingDoc = await db.collection('matchScouting').doc(targetDocId).get();
-      } catch (existenceCheckErr) {
-        // TEMPORARY DIAGNOSTIC — remove after tracking down the nonexistent-doc read issue
-        console.log('[DIAG match-scout] existence-check .get() FAILED for targetDocId:', targetDocId);
-        console.log('[DIAG match-scout] full error object:', existenceCheckErr);
-        console.log('[DIAG match-scout] err.code:', existenceCheckErr.code);
-        console.log('[DIAG match-scout] err.message:', existenceCheckErr.message);
-        console.log('[DIAG match-scout] err.details:', existenceCheckErr.details);
-        throw existenceCheckErr;
+      // If editing a known entry, read it directly by its real id first —
+      // needed for scoutedBy/scoutedAt continuity even if the match number
+      // below is being changed (i.e. "moving" this entry to a new slot).
+      let existingData = null;
+      if (currentMatchDocId) {
+        const knownDoc = await db.collection('matchScouting').doc(currentMatchDocId).get();
+        if (knownDoc.exists) existingData = knownDoc.data();
       }
-      const isExisting = existingDoc.exists;
-      const existingData = isExisting ? existingDoc.data() : null;
 
+      // Resolve the write target: the entry being edited, if the match
+      // number hasn't changed; otherwise whatever (if anything) already
+      // occupies the target match number's slot — regardless of which
+      // document-ID era it was saved under (see findExistingMatchDoc()) —
+      // or a fresh, collision-safe ID for a genuinely new entry/slot.
+      let docId;
+      if (currentMatchDocId && Number(existingData?.matchNumber) === Number(matchNumber)) {
+        docId = currentMatchDocId;
+      } else {
+        const targetSlot = await findExistingMatchDoc(teamId, currentMatchEventCode, matchNumber, currentMatchTeamNumber);
+        if (targetSlot) {
+          docId = targetSlot.id;
+          existingData = targetSlot;
+        } else {
+          docId = `${teamId}_${currentMatchEventCode}_${matchNumber}_${currentMatchTeamNumber}`;
+          if (!currentMatchDocId) existingData = null;
+        }
+      }
+
+      const isExisting = !!existingData;
       const scoutedByUid = isExisting ? (existingData.scoutedBy || currentUser.uid) : currentUser.uid;
 
       const payload = {

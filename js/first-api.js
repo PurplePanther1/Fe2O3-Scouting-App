@@ -917,8 +917,15 @@ function renderPitTeamList(teams) {
     // been pit scouted (nothing to delete otherwise). Toggle visibility is already
     // permission-gated (see updatePitBulkSelectUI), so anyone who can see the mode
     // at all is allowed to bulk-delete any scouted entry.
-    if (pitBulkSelectMode && isScouted && selectedEvent?.code) {
-      const docId = `${selectedEvent.code}_${team.teamNumber}`;
+    // Use the cached entry's real doc id rather than reconstructing one —
+    // pitScoutedEntriesCache is keyed by data (eventCode_teamNumber) but
+    // each entry's own .id is whatever Firestore actually assigned it,
+    // which may be an old- or new-format ID (see pit-scout.js).
+    const pitEntryForBulkSelect = (isScouted && selectedEvent?.code && typeof getPitScoutedEntry === 'function')
+      ? getPitScoutedEntry(team.teamNumber, selectedEvent.code)
+      : null;
+    if (pitBulkSelectMode && pitEntryForBulkSelect?.id) {
+      const docId = pitEntryForBulkSelect.id;
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.style.cssText = 'width:18px; height:18px; flex-shrink:0; cursor:pointer;';

@@ -328,6 +328,13 @@ function renderNumber(field, savedValue) {
   input.min = '0';
   if (field.required) input.required = true;
   if (savedValue != null) input.value = savedValue;
+  // The match form's Cycle Time field shows a browser-native autocomplete
+  // dropdown of previously typed values (no name attribute is set on these
+  // dynamic inputs, so Chrome falls back to keying its form-value history off
+  // id, which is stable/reused across every render of this field) — other
+  // fields don't show it, so scope the fix to just this one rather than
+  // disabling autocomplete on every dynamic number field.
+  if (field.id === 'cycleTime') input.autocomplete = 'off';
   return input;
 }
 

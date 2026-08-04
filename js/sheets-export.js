@@ -258,9 +258,12 @@ async function gatherTeamExportData(teamNumber, eventCode, teamId) {
     loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
   ]);
 
-  const pitDoc = await withStep('Reading pit scouting data', () =>
-    db.collection('pitScouting').doc(`${eventCode}_${teamNumber}`).get());
-  const pitDocs = pitDoc.exists ? [{ id: pitDoc.id, ...pitDoc.data() }] : [];
+  // findExistingPitDoc() (pit-scout.js) queries by data fields rather than
+  // guessing a document ID, so it finds this team's entry regardless of
+  // which document-ID era it was saved under.
+  const pitEntry = await withStep('Reading pit scouting data', () =>
+    findExistingPitDoc(teamId, eventCode, teamNumber));
+  const pitDocs = pitEntry ? [pitEntry] : [];
 
   const allMatchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode, teamId));
   const matchDocs = allMatchDocs

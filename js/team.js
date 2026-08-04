@@ -25,10 +25,31 @@ document.querySelectorAll('#screen-team .tab').forEach(tab => {
       }
     }
 
-    // Clear errors
+    // Clear errors, and whatever code/name was entered on the tab being left —
+    // same reasoning as switching between the Sign In/Sign Up tabs clearing
+    // their own fields (clearAuthFormFields() in auth.js).
     clearErrors();
+    const joinCodeInput = document.getElementById('input-join-code');
+    if (joinCodeInput) joinCodeInput.value = '';
+    const teamNameInput = document.getElementById('input-team-name');
+    if (teamNameInput) teamNameInput.value = '';
   });
 });
+
+// ====== Reset screen-team's tabs to "Join Team" — the screen's own default,
+// same idea as resetAuthTabs() (auth.js) always resetting Sign In/Sign Up
+// back to Sign In. Without this, whichever tab was left active from a PRIOR
+// account's session in this same browser tab (e.g. still on Create Team, if
+// that's where a just-deleted account's session left off) would stay active
+// instead of resetting, since nothing else re-applies the HTML's default. ======
+function resetTeamTabs() {
+  document.querySelectorAll('#screen-team .tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === 'join');
+  });
+  document.querySelectorAll('#screen-team .tab-content').forEach(c => {
+    c.classList.toggle('active', c.id === 'tab-join');
+  });
+}
 
 // ====== Reset to Scouting → Team Information the same way handleAuthenticatedUser()
 // does on login. Called after create/join succeeds — without this, whatever
@@ -173,7 +194,7 @@ $('btn-create-team').addEventListener('click', async () => {
     });
 
     await db.collection('joinCodes').doc(joinCode).set({ teamId: teamRef.id });
-    await db.collection('userTeams').doc(currentUser.uid).set({ teamId: teamRef.id, role: 'captain' });
+    await ensureMemberContact(teamRef.id, currentUser.uid, currentUserProfile?.email || currentUser.email || '');
 
     // Re-read the full team doc so currentTeamData gets the same complete
     // shape handleAuthenticatedUser() populates on login (members/roles/
@@ -282,7 +303,7 @@ $('btn-join-team').addEventListener('click', async () => {
     const joinedSnap = await teamRef.get();
     const teamData = joinedSnap.data();
 
-    await db.collection('userTeams').doc(currentUser.uid).set({ teamId, role: 'member' });
+    await ensureMemberContact(teamId, currentUser.uid, currentUserProfile?.email || currentUser.email || '');
 
     // Use the full team doc (members/roles/permissions included) rather than
     // just {id, name, joinCode} — same reason as the create-team flow above.

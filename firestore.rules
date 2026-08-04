@@ -57,29 +57,6 @@ service cloud.firestore {
       );
     }
 
-    // Whether request.auth can view userId's private contact info: either
-    // they ARE userId (handled separately by the caller), they're captain of
-    // userId's team, or they hold the canViewMemberEmails permission on that
-    // team. Goes through the userTeams pointers (not a direct teams/{teamId}
-    // read) so it works without member-gated access to the target's own team
-    // document — same reason userTeams exists in the first place.
-    function canViewMemberEmail(userId) {
-      return isAuth()
-        && exists(/databases/$(database)/documents/userTeams/$(request.auth.uid))
-        && exists(/databases/$(database)/documents/userTeams/$(userId))
-        && get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId
-           == get(/databases/$(database)/documents/userTeams/$(userId)).data.teamId
-        && (
-          get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.role == 'captain'
-          || (
-            exists(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId))
-            && get(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId)).data.permissions != null
-            && get(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId)).data.permissions[request.auth.uid] != null
-            && get(/databases/$(database)/documents/teams/$(get(/databases/$(database)/documents/userTeams/$(request.auth.uid)).data.teamId)).data.permissions[request.auth.uid].canViewMemberEmails == true
-          )
-        );
-    }
-
     match /teams/{teamId} {
       // Only real members can read the full document. resource.data is already the
       // document being evaluated, so no get()/isTeamMember() (and no dependency on
@@ -144,37 +121,62 @@ service cloud.firestore {
         )
       );
 
-      allow delete: if false;
+      // Only when you are the literal last member — mirrors the self-leave
+      // branch's members.size() == 1 condition above. Whoever is the sole
+      // remaining member is always its captain: the self-leave branch blocks
+      // a captain from leaving while other members remain, and
+      // transferCaptaincy() always writes an explicit roles.{uid} = 'captain'
+      // for whoever it hands the role to — so there's no path to a lone
+      // non-captain survivor, and no separate role check is needed here.
+      allow delete: if isAuth()
+        && resource.data.members.size() == 1
+        && resource.data.members.hasAny([request.auth.uid]);
 
       match /formConfig/{configDoc} {
         allow read: if isTeamMember(teamId);
         allow create, update: if isAuth()
           && exists(/databases/$(database)/documents/teams/$(teamId))
           && canEditTemplates(teamId);
-        allow delete: if false;
+        // Same last-member-only condition as the team doc's own delete rule
+        // above — this subcollection doc isn't the team doc itself, so it
+        // needs its own get() rather than inheriting resource.data directly.
+        allow delete: if isAuth()
+          && exists(/databases/$(database)/documents/teams/$(teamId))
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.members.size() == 1
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([request.auth.uid]);
       }
-    }
 
-    // Denormalized per-user pointer to their current {teamId, role}. Used only so
-    // the private/contact rule below can check "is the requester the captain of the
-    // SAME team as the profile they're reading" without needing read access to the
-    // (member-gated) teams/{teamId} document itself. Self-write only, and the write
-    // is cross-validated against the real team doc, so it can't be forged to claim
-    // a membership/captaincy that isn't real.
-    match /userTeams/{uid} {
-      allow read: if isAuth() && request.auth.uid == uid;
-      allow create, update: if isAuth() && request.auth.uid == uid
-        && exists(/databases/$(database)/documents/teams/$(request.resource.data.teamId))
-        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.members.hasAny([uid])
-        // A plain member who joined via join code never gets an explicit
-        // roles.{uid} entry — the rest of this app treats absence from the
-        // roles map as meaning 'member' (see getCurrentUserRole(), the myRole
-        // computation in handleAuthenticatedUser(), etc.), so this rule needs
-        // to accept that same convention rather than only an exact match.
-        && (get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[uid] == request.resource.data.role
-            || (!(uid in get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles)
-                && request.resource.data.role == 'member'));
-      allow delete: if isAuth() && request.auth.uid == uid;
+      // Per-team copy of a member's email — lets THIS team's captain (or a
+      // teammate granted canViewMemberEmails) see it, scoped to this team
+      // specifically. Replaces the old userTeams-based cross-user pointer
+      // comparison, which could only express "shared team" correctly when
+      // every user had exactly one — with multi-team support, "captain of
+      // some team we happen to share" is the wrong (leaky) question; the
+      // right one is "captain of THIS team," which this rule answers
+      // directly without any cross-referencing. Self-write only, cross-
+      // validated against real membership on this specific team.
+      match /memberContacts/{uid} {
+        // Must include self-access: ensureMemberContact() (auth.js) does a
+        // read first to check whether a write is even needed, before every
+        // member's own doc necessarily exists — without this clause that
+        // read is denied for anyone who isn't already captain/permitted,
+        // which throws, which skips the write that follows it in the same
+        // try block. The result: no plain member's doc ever gets created,
+        // so captain/permitted-teammate reads of it later find nothing.
+        allow read: if isTeamMember(teamId) && (
+          request.auth.uid == uid
+          || isCaptain(get(/databases/$(database)/documents/teams/$(teamId)).data)
+          || (
+            get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null
+            && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid] != null
+            && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid].canViewMemberEmails == true
+          )
+        );
+        allow write: if isAuth() && request.auth.uid == uid
+          && exists(/databases/$(database)/documents/teams/$(teamId))
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([uid]);
+        allow delete: if isAuth() && request.auth.uid == uid;
+      }
     }
 
     // Public lookup so a join code can be resolved to a team ID without needing
@@ -187,7 +189,13 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.joinCode == code
         && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[request.auth.uid] == 'captain';
       allow update: if false;
-      allow delete: if false;
+      // Only when the team this code points to is down to its last member —
+      // same condition as teams/{teamId}'s own delete rule, checked via the
+      // team this specific joinCodes doc's teamId field references.
+      allow delete: if isAuth()
+        && exists(/databases/$(database)/documents/teams/$(resource.data.teamId))
+        && get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.members.size() == 1
+        && get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.members.hasAny([request.auth.uid]);
     }
 
     match /users/{userId} {
@@ -196,14 +204,11 @@ service cloud.firestore {
       allow create, update: if isAuth() && request.auth.uid == userId;
       allow delete: if isAuth() && request.auth.uid == userId;
 
-      // Private contact info (email): visible only to the user themself, the
-      // captain of the same team, or a teammate granted canViewMemberEmails
-      // (via the userTeams pointers above).
+      // Private contact info (email): self only. Teammates who can see a
+      // member's email read the per-team copy at
+      // teams/{teamId}/memberContacts/{uid} instead (see above).
       match /private/contact {
-        allow read: if isAuth() && (
-          request.auth.uid == userId
-          || canViewMemberEmail(userId)
-        );
+        allow read: if isAuth() && request.auth.uid == userId;
         allow write: if isAuth() && request.auth.uid == userId;
         allow delete: if isAuth() && request.auth.uid == userId;
       }

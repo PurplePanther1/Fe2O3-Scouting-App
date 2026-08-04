@@ -48,14 +48,23 @@ async function loadTeamMembers(teamId, teamData) {
 
   const memberList = document.getElementById('member-list');
   const status = document.getElementById('member-list-status');
-  memberList.innerHTML = '';
 
   if (!teamData.members || teamData.members.length === 0) {
+    memberList.innerHTML = '';
     status.textContent = 'No members found.';
     return;
   }
 
-  status.textContent = 'Loading members...';
+  // Only show the "Loading members..." flash (and blank the list) on a
+  // genuine first load. A refresh triggered by the live team-doc listener —
+  // e.g. right after saving a permission change — re-runs this whole
+  // function, but the existing rows should stay visible while the new data
+  // fetches, then get swapped in once ready, instead of blanking to a
+  // loading state the user just watched load a moment ago.
+  const isFirstLoad = memberList.children.length === 0;
+  if (isFirstLoad) {
+    status.textContent = 'Loading members...';
+  }
 
   // Populate the display-name input with whatever this user has already chosen
   const nameInput = document.getElementById('input-display-name');
@@ -75,7 +84,7 @@ async function loadTeamMembers(teamId, teamData) {
         photoURL: currentUser.photoURL || null
       });
     }
-    return fetchMemberInfo(uid);
+    return fetchMemberInfo(teamId, uid);
   }));
 
   // The team may have changed while these fetches were in flight
@@ -151,7 +160,7 @@ async function loadTeamMembers(teamId, teamData) {
 }
 
 // ====== Resolve a member's display name/email/photo ahead of rendering ======
-async function fetchMemberInfo(uid) {
+async function fetchMemberInfo(teamId, uid) {
   let displayName = uid;
   let photoURL = null;
   try {
@@ -165,11 +174,13 @@ async function fetchMemberInfo(uid) {
     // displayName stays as the uid fallback
   }
 
-  // Email is private — this resolves for the captain viewing a teammate, or the
-  // user viewing themself; a permission-denied here just means "don't show it."
+  // Email is private — reads the per-team copy at
+  // teams/{teamId}/memberContacts/{uid}, visible to this team's captain or a
+  // teammate with canViewMemberEmails; a permission-denied here just means
+  // "don't show it."
   let email = '';
   try {
-    const contactDoc = await db.collection('users').doc(uid).collection('private').doc('contact').get();
+    const contactDoc = await db.collection('teams').doc(teamId).collection('memberContacts').doc(uid).get();
     email = contactDoc.exists ? (contactDoc.data().email || '') : '';
   } catch (_) {
     email = '';
@@ -305,12 +316,6 @@ async function transferCaptaincy(newCaptainUid) {
 
     await db.collection('teams').doc(currentTeamId).update(updates);
 
-    // Only our own userTeams pointer can be written from here — userTeams/{uid} is
-    // self-write-only by design (see firestore.rules), so the new captain's pointer
-    // can't be updated from this session. It self-heals via ensureUserTeamPointer()
-    // (auth.js) the next time their own client runs it.
-    await db.collection('userTeams').doc(currentUser.uid).set({ teamId: currentTeamId, role: 'member' });
-
     hideLoading();
     // No manual reload needed — the live team doc listener (watchTeamDoc in auth.js)
     // picks up this update and refreshes currentTeamData / the member list for us.
@@ -324,7 +329,9 @@ async function transferCaptaincy(newCaptainUid) {
 // ====== Leave Team (My Team tab) — same self-leave rule path as account
 // deletion (selfLeaveTeam, defined in delete-account.js), but doesn't touch
 // Firebase Auth or delete the account itself. Blocked for a captain while
-// other members remain, exactly like account deletion. ======
+// other members remain, exactly like account deletion. If this user is the
+// team's LAST member, leaving deletes the entire team instead (also shared
+// with account deletion — see deleteEntireTeam() in delete-account.js). ======
 async function leaveTeam() {
   const errorEl = document.getElementById('leave-team-error');
   if (errorEl) errorEl.textContent = '';
@@ -339,34 +346,65 @@ async function leaveTeam() {
     return;
   }
 
-  if (!confirm('Leave this team? You can rejoin later with the join code.')) return;
+  // The last remaining member is always its captain (see deleteEntireTeam()
+  // for why) — leaving in that case deletes the entire team and its data,
+  // not just this membership, so the confirm wording needs to say so.
+  const isSoleMember = !!(currentTeamData && Array.isArray(currentTeamData.members) && currentTeamData.members.length === 1);
+  const confirmMessage = isSoleMember
+    ? "Leave this team? Since you're the last member, the ENTIRE team and all its data will be permanently deleted."
+    : 'Leave this team? You can rejoin later with the join code.';
+  if (!confirm(confirmMessage)) return;
+
+  const leftTeamId = currentTeamId;
+  const leftTeamData = currentTeamData;
 
   showLoading('Leaving team...');
   try {
+    // Stop listeners tied to this team's data before removing it — same
+    // teardown confirmDeleteAccount() already does, which leaveTeam() was
+    // missing for the pit/match listeners (only watchTeamDoc was stopped).
     if (typeof watchTeamDoc === 'function') watchTeamDoc(null);
+    if (typeof watchPitScoutStatus === 'function') watchPitScoutStatus(null);
+    if (typeof watchMatchScoutStatus === 'function') watchMatchScoutStatus(null);
 
-    if (typeof selfLeaveTeam === 'function') {
-      await selfLeaveTeam(currentTeamId, currentUser.uid);
+    if (isSoleMember) {
+      if (typeof deleteEntireTeam === 'function') {
+        await deleteEntireTeam(leftTeamId, currentUser.uid, leftTeamData);
+      }
+    } else if (typeof selfLeaveTeam === 'function') {
+      await selfLeaveTeam(leftTeamId, currentUser.uid);
     }
-    await db.collection('userTeams').doc(currentUser.uid).delete();
+
+    // Remove the left team from myTeams (multi-team support) — both branches
+    // below depend on this already reflecting the team we just left.
+    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+      myTeams = myTeams.filter(t => t.id !== leftTeamId);
+    }
 
     hideLoading();
 
-    // Reset team-related state and land back on the Join/Create screen —
-    // same shape as handleAuthenticatedUser()'s "no team" branch. currentTeamId
-    // and currentTeamData are reset by showScreen() itself below.
-    currentTeamRoles = {};
-    currentTeamPermissions = {};
-    if (typeof clearSelectedEvent === 'function') clearSelectedEvent();
-    if (typeof clearSessionState === 'function') clearSessionState();
+    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.length > 0) {
+      // Still a member of at least one other team — switch to it instead of
+      // landing on the "no team" screen, which would be wrong here; leaving
+      // one team doesn't mean the account has no team anymore.
+      if (typeof switchActiveTeam === 'function') {
+        switchActiveTeam(myTeams[0].id);
+      }
+    } else {
+      // Genuinely their last team. Reset team-related state and land back on
+      // the Join/Create screen — same shape as handleAuthenticatedUser()'s
+      // "no team" branch. currentTeamId/currentTeamData/myTeams are reset by
+      // showScreen() itself below.
+      currentTeamRoles = {};
+      currentTeamPermissions = {};
+      if (typeof clearSelectedEvent === 'function') clearSelectedEvent();
+      if (typeof clearSessionState === 'function') clearSessionState();
 
-    const nameInput = document.getElementById('input-screen-team-display-name');
-    if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
+      const nameInput = document.getElementById('input-screen-team-display-name');
+      if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
 
-    // showScreen() itself resets the join-code/team-name fields, the "team
-    // created" card, and currentTeamData/currentTeamId whenever screen-team
-    // is shown, so no need to do it here too.
-    showScreen('screen-team');
+      showScreen('screen-team');
+    }
   } catch (err) {
     hideLoading();
     console.error('Leave team error:', err);

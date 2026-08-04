@@ -12,6 +12,11 @@ const loadingText = $('loading-text');
 // Currently authenticated user
 let currentUser = null;
 
+// Every team the current user belongs to (multi-team support) — populated on
+// login from getUserTeams(). currentTeamData/currentTeamId (team.js/members.js)
+// point at whichever one of these is currently "active" (see switchActiveTeam()).
+let myTeams = [];
+
 // Firestore-backed profile for the current user (displayName the user chose, email, photoURL)
 let currentUserProfile = null;
 
@@ -22,7 +27,9 @@ let currentUserProfile = null;
  * Split across two documents so email can stay private while displayName/photo
  * stay broadly visible to teammates:
  *   users/{uid}                 — displayName, photoURL (not sensitive)
- *   users/{uid}/private/contact — email (captain + self only, see firestore.rules)
+ *   users/{uid}/private/contact — email (self only; teammates who can see it
+ *                                 read the per-team copy at
+ *                                 teams/{teamId}/memberContacts/{uid} instead)
  */
 async function ensureUserProfile(user) {
   const ref = db.collection('users').doc(user.uid);
@@ -72,22 +79,24 @@ async function ensureUserProfile(user) {
 }
 
 /**
- * Keep userTeams/{uid} (a denormalized {teamId, role} pointer) in sync with the
- * real teams/{teamId} document. This is what lets a captain's rules-check "is this
- * requester the captain of the SAME team as the profile they're reading" happen
- * without ever needing read access to the (member-gated) team document itself.
- * Self-write only, and the write rule cross-validates against the real team doc,
- * so this can't be forged to claim a membership/captaincy that isn't real.
+ * Keep teams/{teamId}/memberContacts/{uid} (this user's email, denormalized
+ * per team) in sync with their real email. This is what lets a team's
+ * captain (or a teammate with canViewMemberEmails) see this member's email
+ * scoped to THIS team specifically — replaces the old userTeams-based
+ * cross-user pointer comparison, which could only express "shared team"
+ * correctly when everyone had exactly one. Self-write only, and the write
+ * rule cross-validates against the real team doc, so this can't be forged to
+ * claim a membership that isn't real.
  */
-async function ensureUserTeamPointer(uid, teamId, role) {
+async function ensureMemberContact(teamId, uid, email) {
   try {
-    const ref = db.collection('userTeams').doc(uid);
+    const ref = db.collection('teams').doc(teamId).collection('memberContacts').doc(uid);
     const doc = await ref.get();
-    if (!doc.exists || doc.data().teamId !== teamId || doc.data().role !== role) {
-      await ref.set({ teamId, role });
+    if (!doc.exists || doc.data().email !== email) {
+      await ref.set({ email: email || '' });
     }
   } catch (err) {
-    console.warn('Failed to sync userTeams pointer:', err);
+    console.warn(`Failed to sync memberContacts for team ${teamId}:`, err);
   }
 }
 
@@ -218,6 +227,12 @@ function showScreen(screenId) {
   // display name field is deliberately left alone — it's meant to stay
   // pre-filled with the signed-in user's known name.
   if (screenId === 'screen-team') {
+    // Always land on the Join Team tab, regardless of whichever was last
+    // active — same idea as resetAuthTabs() always resetting Sign In/Sign Up
+    // back to Sign In, applied generally here rather than at each individual
+    // call site that shows this screen.
+    if (typeof resetTeamTabs === 'function') resetTeamTabs();
+
     const joinCodeInput = document.getElementById('input-join-code');
     if (joinCodeInput) joinCodeInput.value = '';
     const teamNameInput = document.getElementById('input-team-name');
@@ -234,6 +249,7 @@ function showScreen(screenId) {
     // against a team the current account was never a member of.
     if (typeof currentTeamData !== 'undefined') currentTeamData = null;
     if (typeof currentTeamId !== 'undefined') currentTeamId = null;
+    if (typeof myTeams !== 'undefined') myTeams = [];
   }
 }
 
@@ -956,9 +972,9 @@ async function handleAuthenticatedUser(user) {
   // Check if user belongs to a team
   showLoading('Looking up your team...');
   try {
-    const team = await getUserTeam(user.uid);
+    const teams = await getUserTeams(user.uid);
     hideLoading();
-    if (team) {
+    if (teams.length > 0) {
       // Existing users who haven't explicitly confirmed a display name yet must
       // do so before reaching the dashboard — same blocking pattern as the
       // email-verification gate above. This also catches an auto-filled Google
@@ -972,8 +988,30 @@ async function handleAuthenticatedUser(user) {
         return;
       }
 
+      // Keep this user's per-team email copy fresh for EVERY team they
+      // belong to, not just whichever one is shown below — a captain on a
+      // different team than the one displayed here still needs to see an
+      // up-to-date email if/when they view it.
+      const myEmail = (currentUserProfile && currentUserProfile.email) || user.email || '';
+      await Promise.all(teams.map(t => ensureMemberContact(t.id, user.uid, myEmail)));
+
+      // Full list of every team this user belongs to (multi-team support) —
+      // the Stage 3 switcher UI will read this directly; for now the
+      // dashboard still only ever displays one team at a time.
+      myTeams = teams;
+
+      // Resolve which team is "active": whatever was last stored for this
+      // uid, if it's still a team they belong to, else just the first one
+      // (which is also the ONLY one for anybody still single-team — same
+      // behavior as before this existed). Re-persist the resolved choice so
+      // a first-ever login (nothing stored yet) primes it for next time, and
+      // a stored team that's no longer valid (e.g. they left it elsewhere)
+      // gets corrected rather than silently retried forever.
+      const storedActiveTeamId = getStoredActiveTeamId(user.uid);
+      const team = teams.find(t => t.id === storedActiveTeamId) || teams[0];
+      setStoredActiveTeamId(user.uid, team.id);
+
       const myRole = (team.roles && team.roles[user.uid]) || 'member';
-      await ensureUserTeamPointer(user.uid, team.id, myRole);
       if (myRole === 'captain') {
         await ensureJoinCodeDoc(team.id, team.joinCode);
       }
@@ -1155,17 +1193,120 @@ function updatePermissionUI() {
 }
 
 /**
- * Query Firestore to find which team a user belongs to.
- * Scans all teams where members array contains the uid.
+ * Query Firestore for every team a user belongs to (multi-team support).
+ * Scans all teams where members array contains the uid — no limit, since a
+ * user may belong to more than one.
  */
-async function getUserTeam(uid) {
+async function getUserTeams(uid) {
   const snapshot = await db.collection('teams')
     .where('members', 'array-contains', uid)
-    .limit(1)
     .get();
 
-  if (snapshot.empty) return null;
+  return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+}
 
-  const doc = snapshot.docs[0];
-  return { id: doc.id, ...doc.data() };
+/**
+ * The first/only team a user belongs to. Stage 1 of multi-team support keeps
+ * the dashboard showing a single team — this is the one spot that still
+ * legitimately needs "first team" rather than the full list; a later stage
+ * (the team switcher) will replace this call site with getUserTeams() directly.
+ */
+async function getUserTeam(uid) {
+  const teams = await getUserTeams(uid);
+  return teams[0] || null;
+}
+
+// ====== Active-team persistence (multi-team support) ======
+// localStorage, not sessionStorage — unlike dashboard tab/subtab/selected
+// event (session-state.js, deliberately tab-scoped and cleared on sign-out),
+// which team is "active" is meant to survive closing the browser entirely.
+// Scoped per uid so a shared device signing into a different account doesn't
+// inherit — or clobber — another account's choice.
+function activeTeamStorageKey(uid) {
+  return `fe2o3_active_team_${uid}`;
+}
+
+function getStoredActiveTeamId(uid) {
+  try {
+    return localStorage.getItem(activeTeamStorageKey(uid));
+  } catch (err) {
+    console.warn('Failed to read stored active team:', err);
+    return null;
+  }
+}
+
+function setStoredActiveTeamId(uid, teamId) {
+  try {
+    localStorage.setItem(activeTeamStorageKey(uid), teamId);
+  } catch (err) {
+    console.warn('Failed to persist active team:', err);
+  }
+}
+
+/**
+ * Switch which of the user's teams (myTeams) is "active" — everything the
+ * dashboard shows (Scouting tabs, Pinned Events, My Team, permission checks)
+ * reads currentTeamData/currentTeamId, so re-pointing those and refreshing
+ * whatever depends on them is the whole job. Not called from anywhere yet —
+ * Stage 3 wires this to the team-switcher UI.
+ */
+function switchActiveTeam(teamId) {
+  if (!currentUser) return;
+  const team = (myTeams || []).find(t => t.id === teamId);
+  if (!team) {
+    console.warn(`switchActiveTeam: ${teamId} is not one of this user's teams`);
+    return;
+  }
+  if (currentTeamId === teamId) return; // already active — nothing to do
+
+  setStoredActiveTeamId(currentUser.uid, teamId);
+
+  // Set synchronously (from the already-fetched myTeams entry) rather than
+  // waiting on watchTeamDoc()'s snapshot below — watchPitScoutStatus()/
+  // watchMatchScoutStatus() further down read currentTeamData.id the moment
+  // they're called to build their query, so it has to be correct immediately,
+  // not once a network round-trip later. watchTeamDoc()'s own snapshot will
+  // very shortly re-confirm/refresh this with the live doc anyway.
+  currentTeamData = team;
+  currentTeamId = teamId;
+  $('main-team-name').textContent = team.name || 'Your Team';
+  if (team.joinCode && typeof showJoinCodeOnDashboard === 'function') {
+    showJoinCodeOnDashboard(team.joinCode);
+  }
+
+  // A team detail modal open at the moment of switching would otherwise keep
+  // showing pit/match data scoped to the team being switched away from.
+  if (typeof closeTeamDetailModal === 'function') {
+    closeTeamDetailModal();
+  }
+
+  // Re-subscribes the live team-doc listener to the new team (it already
+  // unsubscribes whichever team it was previously watching) — its snapshot
+  // callback handles loadTeamMembers()/updatePermissionUI()/pin button/
+  // pinned events for us, same as it does for any other team-doc change.
+  watchTeamDoc(teamId);
+
+  // Same reset a fresh create/join gets — land on Scouting → Team
+  // Information regardless of whatever tab was active on the team being left.
+  if (typeof resetDashboardOnEnterTeam === 'function') {
+    resetDashboardOnEnterTeam();
+  }
+
+  // The one genuinely new case multi-team support introduces: "the active
+  // team changed but the selected event didn't." watchPitScoutStatus()/
+  // watchMatchScoutStatus() (pit-scout.js/match-scout.js) close over
+  // currentTeamData.id at subscription time and never re-read it — until
+  // now, that was fine, because a team never changed out from under a
+  // selected event. Re-subscribing them here (now that currentTeamData
+  // already points at the new team, set above) refreshes everything they
+  // drive: scouted-state checkmarks on the team list, and the match count
+  // on a currently open team detail modal.
+  if (selectedEvent?.code) {
+    if (typeof watchPitScoutStatus === 'function') {
+      watchPitScoutStatus(selectedEvent.code);
+    }
+    if (typeof watchMatchScoutStatus === 'function') {
+      watchMatchScoutStatus(selectedEvent.code);
+    }
+  }
 }
