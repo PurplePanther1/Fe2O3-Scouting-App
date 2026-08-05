@@ -108,6 +108,38 @@ async function ensureMemberContact(teamId, uid, email) {
  */
 let teamDocUnsubscribe = null;
 
+/**
+ * Point currentTeamData (and everything derived from it: member list,
+ * permission UI, pin button, pinned events) at a fresh team doc — shared by
+ * watchTeamDoc() (the active team's own listener) and watchMyTeams() (which
+ * also needs to run this, not just update its myTeams entry, whenever the
+ * team it just heard about happens to be the currently active one). Without
+ * this shared, ANY listener that observes the active team's doc changing
+ * refreshes the same state, instead of only whichever one happened to be
+ * subscribed at the time.
+ */
+function refreshActiveTeamData(teamId, teamData) {
+  if (typeof currentTeamData !== 'undefined') {
+    currentTeamData = teamData;
+  }
+
+  const nameEl = document.getElementById('main-team-name');
+  if (nameEl) nameEl.textContent = teamData.name || 'Your Team';
+
+  if (typeof loadTeamMembers === 'function') {
+    loadTeamMembers(teamId, teamData);
+  }
+  if (typeof updatePermissionUI === 'function') {
+    updatePermissionUI();
+  }
+  if (typeof updatePinButtonUI === 'function') {
+    updatePinButtonUI();
+  }
+  if (typeof renderPinnedEventsList === 'function') {
+    renderPinnedEventsList();
+  }
+}
+
 function watchTeamDoc(teamId) {
   if (teamDocUnsubscribe) {
     teamDocUnsubscribe();
@@ -118,26 +150,7 @@ function watchTeamDoc(teamId) {
   teamDocUnsubscribe = db.collection('teams').doc(teamId).onSnapshot((doc) => {
     if (!doc.exists) return;
     const teamData = { id: doc.id, ...doc.data() };
-
-    if (typeof currentTeamData !== 'undefined') {
-      currentTeamData = teamData;
-    }
-
-    const nameEl = document.getElementById('main-team-name');
-    if (nameEl) nameEl.textContent = teamData.name || 'Your Team';
-
-    if (typeof loadTeamMembers === 'function') {
-      loadTeamMembers(teamId, teamData);
-    }
-    if (typeof updatePermissionUI === 'function') {
-      updatePermissionUI();
-    }
-    if (typeof updatePinButtonUI === 'function') {
-      updatePinButtonUI();
-    }
-    if (typeof renderPinnedEventsList === 'function') {
-      renderPinnedEventsList();
-    }
+    refreshActiveTeamData(teamId, teamData);
   }, (err) => {
     console.warn('Team doc listener error:', err);
   });
@@ -871,6 +884,13 @@ $('btn-change-email-save').addEventListener('click', saveNewEmail);
 async function signOut() {
   try {
     watchTeamDoc(null); // stop the live team doc listener
+    // Stop every per-team myTeams listener and drop the (now stale, belongs
+    // to the departing account) list itself — otherwise these listeners would
+    // keep running against the OLD account's teams for whoever signs in next
+    // in this same tab, and watchMyTeams() would have nothing to tear down
+    // them with once myTeams no longer reflects which teams they came from.
+    myTeams = [];
+    if (typeof watchMyTeams === 'function') watchMyTeams();
     stopVerifyEmailPolling(); // in case sign-out happened from the verify-email screen
     await auth.signOut();
     clearAuthFormFields();
@@ -999,6 +1019,7 @@ async function handleAuthenticatedUser(user) {
       // the Stage 3 switcher UI will read this directly; for now the
       // dashboard still only ever displays one team at a time.
       myTeams = teams;
+      if (typeof watchMyTeams === 'function') watchMyTeams();
 
       // Resolve which team is "active": whatever was last stored for this
       // uid, if it's still a team they belong to, else just the first one
@@ -1286,10 +1307,15 @@ function switchActiveTeam(teamId) {
   // pinned events for us, same as it does for any other team-doc change.
   watchTeamDoc(teamId);
 
-  // Same reset a fresh create/join gets — land on Scouting → Team
-  // Information regardless of whatever tab was active on the team being left.
-  if (typeof resetDashboardOnEnterTeam === 'function') {
-    resetDashboardOnEnterTeam();
+  // Land on the My Team tab, not Scouting — unlike a fresh login/create/join
+  // (which lands on Scouting since there's nothing to manage on a team
+  // you're just now seeing for the first time), switching to a team you
+  // already belong to is a "manage my membership" action, so My Team is the
+  // more useful landing spot. This covers every caller of switchActiveTeam()
+  // — the switcher dropdown, Join Another Team, and Leave Team's
+  // switch-to-a-remaining-team branch — from one place.
+  if (typeof activateDashboardTab === 'function') {
+    activateDashboardTab('myteam');
   }
 
   // The one genuinely new case multi-team support introduces: "the active
@@ -1309,4 +1335,78 @@ function switchActiveTeam(teamId) {
       watchMatchScoutStatus(selectedEvent.code);
     }
   }
+}
+
+// ====== Live-sync myTeams with each team's real document (multi-team
+// support). currentTeamData is already kept live for whichever ONE team is
+// active, via watchTeamDoc()'s listener — but that only ever updates the
+// separate currentTeamData global, never the matching entry inside the
+// myTeams array, so every entry in myTeams (including the active team's own
+// entry) was otherwise a one-time snapshot from login that never refreshed.
+// That's what let a captaincy transfer or another member joining go
+// unnoticed by anything reading myTeams (e.g. the Delete Account
+// captain-block check) until a full page refresh re-ran getUserTeams().
+//
+// This sets up one listener per team currently in myTeams — not just the
+// active one, since a background team's staleness needs its own listener
+// too (watchTeamDoc only ever watches one team at a time). A small amount of
+// overlap with watchTeamDoc on the active team's own doc is expected and
+// harmless (Firestore has no trouble maintaining two independent listeners
+// on the same document); keeping the two systems fully separate is simpler
+// to reason about than trying to coordinate them.
+//
+// Call again whenever the SET of teams changes (not just their contents) —
+// login, joining another team, leaving one — since that's what determines
+// which docs need a listener at all; a fresh call always tears down every
+// previous listener first, so it's safe (and required) to call repeatedly
+// rather than trying to diff the old set against the new one. ======
+let myTeamsUnsubscribes = {};
+
+function watchMyTeams() {
+  Object.values(myTeamsUnsubscribes).forEach(unsub => unsub());
+  myTeamsUnsubscribes = {};
+
+  (myTeams || []).forEach(t => {
+    if (!t || !t.id) return;
+    const teamId = t.id;
+    myTeamsUnsubscribes[teamId] = db.collection('teams').doc(teamId).onSnapshot((doc) => {
+      if (!Array.isArray(myTeams)) return;
+
+      if (!doc.exists) {
+        // The team's gone (e.g. deleted by its last member elsewhere) —
+        // drop it rather than leaving a stale ghost entry, and stop
+        // listening to a document that will never exist again.
+        myTeams = myTeams.filter(team => team.id !== teamId);
+        if (myTeamsUnsubscribes[teamId]) {
+          delete myTeamsUnsubscribes[teamId];
+        }
+      } else {
+        const fresh = { id: doc.id, ...doc.data() };
+        const idx = myTeams.findIndex(team => team.id === teamId);
+        if (idx !== -1) {
+          myTeams[idx] = fresh;
+        }
+
+        // If this happens to be the ACTIVE team, also refresh currentTeamData
+        // (and the member list/permission/pin UI derived from it) from here —
+        // not just the myTeams entry. watchTeamDoc() already does this too via
+        // its own listener on the same doc (a harmless, expected overlap), but
+        // that redundancy is exactly what makes this a reliable second path
+        // rather than the only one: relying solely on watchTeamDoc meant a
+        // captaincy transfer (or any other change) landing while its listener
+        // was momentarily not the one covering this doc — e.g. mid-switch —
+        // would otherwise wait for a manual switch-away-and-back or a refresh
+        // to show up, instead of updating live like it does here.
+        if (teamId === currentTeamId) {
+          refreshActiveTeamData(teamId, fresh);
+        }
+      }
+
+      if (typeof renderTeamSwitcher === 'function') {
+        renderTeamSwitcher();
+      }
+    }, (err) => {
+      console.warn(`myTeams listener error for team ${teamId}:`, err);
+    });
+  });
 }

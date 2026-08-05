@@ -133,6 +133,25 @@ html, body {
   font-size: 0.85rem;
 }
 
+/* ====== Grant All Permissions button — fill proportional to how many of the
+   five permissions a member currently has (set via inline background-image,
+   a left-to-right green gradient, in JS). Transparent past the fill point
+   lets the normal .btn-outline background show through underneath. */
+.btn-grant-all {
+  /* Overrides .btn-outline's muted text color — that gray reads fine on the
+     transparent/unfilled portion but has poor contrast against the green
+     fill, so text stays white at every fill level, not just when maxed. */
+  color: #fff !important;
+  transition: background-image 0.2s;
+}
+
+.btn-grant-all.maxed {
+  background: var(--success) !important;
+  background-image: none !important;
+  border-color: var(--success) !important;
+  color: #fff !important;
+}
+
 /* ====== Inputs ====== */
 input[type="text"],
 input[type="email"],
@@ -473,6 +492,15 @@ input[type="password"]::placeholder {
 .awards-season-select:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Same visual language as .awards-season-select, sized up for a standalone,
+   full-width control (the My Team tab's team switcher) rather than a small
+   inline sort dropdown. */
+.team-switcher-select {
+  width: 100%;
+  padding: 10px 30px 10px 12px;
+  font-size: 0.95rem;
 }
 
 /* ====== Event Search ====== */

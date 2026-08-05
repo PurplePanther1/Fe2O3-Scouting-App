@@ -315,6 +315,12 @@
       <!-- ====== MY TEAM TAB ====== -->
       <div id="dtab-myteam" class="dtab-content">
 
+        <!-- Team switcher — only shown when the user belongs to more than one team -->
+        <div id="team-switcher-section" class="hidden" style="margin-top:0; margin-bottom:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">ACTIVE TEAM</h3>
+          <select id="select-active-team" class="awards-season-select team-switcher-select"></select>
+        </div>
+
         <!-- Join code section -->
         <div class="join-code-card" style="margin-top:0">
           <p class="help-text" style="margin-bottom:8px">Team join code — share this with your members:</p>
@@ -322,6 +328,30 @@
             <code id="myteam-join-code-value"></code>
             <button id="btn-copy-myteam-code" class="btn btn-small btn-outline">Copy</button>
           </div>
+        </div>
+
+        <!-- Join another team -->
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">JOIN ANOTHER TEAM</h3>
+          <p class="help-text" style="margin-bottom:12px">Enter a join code to join an additional team — you'll keep your membership on your other team(s) too.</p>
+          <div style="display:flex; gap:8px; align-items:flex-start">
+            <input type="text" id="input-join-another-team-code" placeholder="e.g. FE2O3-AB12" maxlength="20" style="margin-bottom:0; text-transform:uppercase" />
+            <button id="btn-join-another-team" class="btn btn-primary" style="width:auto; white-space:nowrap">Join</button>
+          </div>
+          <p id="join-another-team-error" class="error-message"></p>
+          <p id="join-another-team-success" class="success-message"></p>
+        </div>
+
+        <!-- Create a new team -->
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">CREATE A NEW TEAM</h3>
+          <p class="help-text" style="margin-bottom:12px">Start a brand-new team — you'll be its captain, and you'll keep your membership on your other team(s) too.</p>
+          <div style="display:flex; gap:8px; align-items:flex-start">
+            <input type="text" id="input-create-another-team-name" placeholder="Team name" maxlength="60" style="margin-bottom:0" />
+            <button id="btn-create-another-team" class="btn btn-primary" style="width:auto; white-space:nowrap">Create</button>
+          </div>
+          <p id="create-another-team-error" class="error-message"></p>
+          <p id="create-another-team-success" class="success-message"></p>
         </div>
 
         <!-- Display name section -->
@@ -624,7 +654,8 @@
           <label for="perm-canViewMemberEmails" style="margin:0">View member emails</label>
         </div>
         <p id="member-permissions-error" class="error-message"></p>
-        <div class="pit-modal-actions" style="margin-top:20px">
+        <div class="pit-modal-actions" style="margin-top:20px; flex-wrap:wrap">
+          <button type="button" id="btn-member-perms-grant-all" class="btn btn-outline btn-grant-all">Grant All Permissions</button>
           <button type="button" id="btn-member-perms-cancel-inline" class="btn btn-outline">Cancel</button>
           <button type="button" id="btn-member-perms-save" class="btn btn-primary">Save</button>
         </div>
@@ -721,6 +752,10 @@
             Please transfer the captain role to another member (My Team tab)
             before deleting your account.
           </p>
+          <!-- One button per blocking team that isn't already the active team —
+               switches to it and jumps straight to the My Team tab so the
+               transfer is immediately actionable, not just named. -->
+          <div id="delete-account-blocked-actions" style="margin-top:8px"></div>
         </div>
 
         <div id="delete-account-form">

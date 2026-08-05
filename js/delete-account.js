@@ -53,6 +53,36 @@ function openDeleteAccountModal() {
         ? `You're the captain of "${names}", and other members are still on it. Please transfer the captain role to another member (My Team tab) before deleting your account.`
         : `You're the captain of these teams, and other members are still on them: ${names}. Please transfer the captain role for each one (My Team tab) before deleting your account.`;
     }
+
+    // One button per blocking team, including the currently active one —
+    // "My Team tab" was only actually actionable for whichever team happened
+    // to be active, so every OTHER team gets a direct switch-and-navigate
+    // button; the active team gets one too (worded differently, since no
+    // actual switch is needed — just the navigation).
+    const blockedActionsEl = document.getElementById('delete-account-blocked-actions');
+    if (blockedActionsEl) {
+      blockedActionsEl.innerHTML = '';
+      blockingTeams.forEach(t => {
+        const isActive = t.id === currentTeamId;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-small btn-outline';
+        btn.style.cssText = 'margin-top:8px; margin-right:8px;';
+        btn.textContent = isActive ? 'Go to "My Team" tab' : `Switch to "${t.name || 'Unnamed team'}" to transfer`;
+        btn.addEventListener('click', () => {
+          closeDeleteAccountModal();
+          if (isActive) {
+            // switchActiveTeam() already lands on the My Team tab itself —
+            // no switch needed here since we're already on this team.
+            if (typeof activateDashboardTab === 'function') activateDashboardTab('myteam');
+          } else if (typeof switchActiveTeam === 'function') {
+            switchActiveTeam(t.id);
+          }
+        });
+        blockedActionsEl.appendChild(btn);
+      });
+    }
+
     blockedEl.classList.remove('hidden');
     formEl.classList.add('hidden');
   } else {

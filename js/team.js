@@ -74,9 +74,19 @@ function resetDashboardOnEnterTeam() {
   }
 }
 
+// ====== Derive a join-code prefix from the team's own name — first word,
+// letters/digits only, uppercased, capped at 3 characters (e.g. "Magnesium"
+// -> "MAG"). Falls back to a fixed prefix for a name with no usable
+// characters (all symbols/emoji) or if somehow left blank. ======
+function joinCodePrefixFromTeamName(teamName) {
+  const firstWord = (teamName || '').trim().split(/\s+/)[0] || '';
+  const cleaned = firstWord.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  return cleaned.slice(0, 3) || 'TEAM';
+}
+
 // ====== Generate a random join code ======
-function generateJoinCode() {
-  const prefix = 'FE2O3';
+function generateJoinCode(teamName) {
+  const prefix = joinCodePrefixFromTeamName(teamName);
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I, O, 0, 1 to avoid confusion
   let suffix = '';
   for (let i = 0; i < 4; i++) {
@@ -167,7 +177,7 @@ $('btn-create-team').addEventListener('click', async () => {
 
   showLoading('Creating your team...');
   try {
-    const joinCode = generateJoinCode();
+    const joinCode = generateJoinCode(teamName);
 
     // Check if join code is unique via the public lookup collection (a plain
     // query against `teams` can't be used for this anymore now that team reads

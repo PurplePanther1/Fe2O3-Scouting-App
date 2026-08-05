@@ -294,47 +294,67 @@ async function gatherEventExportData(eventCode, teamId) {
 }
 
 // ====== Status message helper (mirrors the app's error/success paragraph convention) ======
-// Auto-clears after a few seconds, same convention as other status messages in the
-// app (e.g. bulk-delete status) — without this, a message like a cancelled Google
-// auth popup would sit in the DOM indefinitely, including reappearing stale the next
-// time the Team Detail modal (which hosts td-export-match-*) is reopened.
-const exportStatusTimers = {};
+// General-purpose, not export-specific — lives here because export was its
+// first user, but also used for e.g. the My Team tab's Join Another Team
+// status (see members.js). Auto-clears after a few seconds — without this, a
+// message like a cancelled Google auth popup would sit in the DOM
+// indefinitely, including reappearing stale the next time the Team Detail
+// modal (which hosts td-export-match-*) is reopened. Expects elements named
+// `${prefix}-error` and `${prefix}-success`.
+const statusMessageTimers = {};
 
-function setExportStatus(prefix, type, message) {
+function setStatusMessage(prefix, type, message) {
   const errEl = document.getElementById(prefix + '-error');
   const okEl = document.getElementById(prefix + '-success');
   if (errEl) errEl.textContent = type === 'error' ? message : '';
   if (okEl) okEl.textContent = type === 'success' ? message : '';
 
   const timerKey = `${prefix}-${type}`;
-  if (exportStatusTimers[timerKey]) {
-    clearTimeout(exportStatusTimers[timerKey]);
-    delete exportStatusTimers[timerKey];
+  if (statusMessageTimers[timerKey]) {
+    clearTimeout(statusMessageTimers[timerKey]);
+    delete statusMessageTimers[timerKey];
   }
   if (message) {
-    exportStatusTimers[timerKey] = setTimeout(() => {
+    statusMessageTimers[timerKey] = setTimeout(() => {
       const el = document.getElementById(`${prefix}-${type}`);
       if (el) el.textContent = '';
-      delete exportStatusTimers[timerKey];
+      delete statusMessageTimers[timerKey];
     }, 5000);
   }
 }
 
+// ====== Clear a status message immediately (no delay) — used when the
+// context it applied to changes (switching tabs/teams), not just on a timer. ======
+function clearStatusMessage(prefix) {
+  if (statusMessageTimers[`${prefix}-error`]) {
+    clearTimeout(statusMessageTimers[`${prefix}-error`]);
+    delete statusMessageTimers[`${prefix}-error`];
+  }
+  if (statusMessageTimers[`${prefix}-success`]) {
+    clearTimeout(statusMessageTimers[`${prefix}-success`]);
+    delete statusMessageTimers[`${prefix}-success`];
+  }
+  const errEl = document.getElementById(prefix + '-error');
+  const okEl = document.getElementById(prefix + '-success');
+  if (errEl) errEl.textContent = '';
+  if (okEl) okEl.textContent = '';
+}
+
 // ====== Export a single team's pit + match scouting data for the selected event ======
 async function handleExportTeamClick(statusPrefix) {
-  setExportStatus(statusPrefix, 'error', '');
-  setExportStatus(statusPrefix, 'success', '');
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
 
   const teamNumber = currentSelectedTeamNumber;
   const eventCode = selectedEvent?.code;
   const teamId = currentTeamData?.id;
 
   if (!teamNumber || !eventCode) {
-    setExportStatus(statusPrefix, 'error', 'Select a team and event first.');
+    setStatusMessage(statusPrefix, 'error', 'Select a team and event first.');
     return;
   }
   if (!teamId) {
-    setExportStatus(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
     return;
   }
 
@@ -352,33 +372,33 @@ async function handleExportTeamClick(statusPrefix) {
 
     hideLoading();
     if (pitDocs.length === 0 && matchDocs.length === 0) {
-      setExportStatus(statusPrefix, 'success', 'No scouting data found for this team yet — created an empty sheet.');
+      setStatusMessage(statusPrefix, 'success', 'No scouting data found for this team yet — created an empty sheet.');
     } else {
-      setExportStatus(statusPrefix, 'success', 'Export complete! Opening sheet...');
+      setStatusMessage(statusPrefix, 'success', 'Export complete! Opening sheet...');
     }
     window.open(url, '_blank');
   } catch (err) {
     hideLoading();
     console.error('Sheets export failed:', err);
-    setExportStatus(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
   }
 }
 
 // ====== Download a single team's pit + match scouting data as an .xlsx file ======
 async function handleExportTeamExcelClick(statusPrefix) {
-  setExportStatus(statusPrefix, 'error', '');
-  setExportStatus(statusPrefix, 'success', '');
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
 
   const teamNumber = currentSelectedTeamNumber;
   const eventCode = selectedEvent?.code;
   const teamId = currentTeamData?.id;
 
   if (!teamNumber || !eventCode) {
-    setExportStatus(statusPrefix, 'error', 'Select a team and event first.');
+    setStatusMessage(statusPrefix, 'error', 'Select a team and event first.');
     return;
   }
   if (!teamId) {
-    setExportStatus(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
     return;
   }
 
@@ -390,30 +410,30 @@ async function handleExportTeamExcelClick(statusPrefix) {
     downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
 
     hideLoading();
-    setExportStatus(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
+    setStatusMessage(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
       ? 'No scouting data found for this team yet — downloaded an empty workbook.'
       : 'Excel file downloaded!');
   } catch (err) {
     hideLoading();
     console.error('Excel export failed:', err);
-    setExportStatus(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
   }
 }
 
 // ====== Export every team's pit + match scouting data for the selected event ======
 async function handleExportEventClick(statusPrefix) {
-  setExportStatus(statusPrefix, 'error', '');
-  setExportStatus(statusPrefix, 'success', '');
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
 
   const eventCode = selectedEvent?.code;
   const teamId = currentTeamData?.id;
 
   if (!eventCode) {
-    setExportStatus(statusPrefix, 'error', 'Select an event first.');
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
     return;
   }
   if (!teamId) {
-    setExportStatus(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
     return;
   }
 
@@ -431,32 +451,32 @@ async function handleExportEventClick(statusPrefix) {
 
     hideLoading();
     if (pitDocs.length === 0 && matchDocs.length === 0) {
-      setExportStatus(statusPrefix, 'success', 'No scouting data found for this event yet — created an empty sheet.');
+      setStatusMessage(statusPrefix, 'success', 'No scouting data found for this event yet — created an empty sheet.');
     } else {
-      setExportStatus(statusPrefix, 'success', 'Export complete! Opening sheet...');
+      setStatusMessage(statusPrefix, 'success', 'Export complete! Opening sheet...');
     }
     window.open(url, '_blank');
   } catch (err) {
     hideLoading();
     console.error('Event sheets export failed:', err);
-    setExportStatus(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
   }
 }
 
 // ====== Download every team's pit + match scouting data for the event as one .xlsx file ======
 async function handleExportEventExcelClick(statusPrefix) {
-  setExportStatus(statusPrefix, 'error', '');
-  setExportStatus(statusPrefix, 'success', '');
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
 
   const eventCode = selectedEvent?.code;
   const teamId = currentTeamData?.id;
 
   if (!eventCode) {
-    setExportStatus(statusPrefix, 'error', 'Select an event first.');
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
     return;
   }
   if (!teamId) {
-    setExportStatus(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
     return;
   }
 
@@ -468,13 +488,13 @@ async function handleExportEventExcelClick(statusPrefix) {
     downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
 
     hideLoading();
-    setExportStatus(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
+    setStatusMessage(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
       ? 'No scouting data found for this event yet — downloaded an empty workbook.'
       : 'Excel file downloaded!');
   } catch (err) {
     hideLoading();
     console.error('Event Excel export failed:', err);
-    setExportStatus(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
   }
 }
 
