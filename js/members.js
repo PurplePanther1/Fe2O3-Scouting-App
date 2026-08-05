@@ -208,8 +208,8 @@ function buildMemberRow(uid, role, isCaptain, isSelf, info) {
   item.appendChild(infoEl);
   item.appendChild(badge);
 
-  // If current user is captain, show "Edit Permissions" and "Grant All
-  // Permissions" buttons for non-captain members
+  // If current user is captain, show "Edit Permissions" and a Grant All /
+  // Remove All split button for non-captain members
   if (isCaptain && role !== 'captain') {
     const editPermsBtn = document.createElement('button');
     editPermsBtn.className = 'btn btn-small btn-outline';
@@ -218,12 +218,32 @@ function buildMemberRow(uid, role, isCaptain, isSelf, info) {
     editPermsBtn.addEventListener('click', () => openMemberPermissionsModal(uid));
     item.appendChild(editPermsBtn);
 
-    const grantAllBtn = document.createElement('button');
-    grantAllBtn.className = 'btn btn-small btn-outline btn-grant-all';
-    grantAllBtn.style.marginLeft = '8px';
-    applyGrantAllButtonFill(grantAllBtn, currentTeamPermissions[uid]);
-    grantAllBtn.addEventListener('click', () => grantAllPermissions(uid, grantAllBtn));
-    item.appendChild(grantAllBtn);
+    // Same continuous-fill split button as the Edit Permissions modal's, but
+    // writing directly to Firestore on click (no modal/Save step) — same
+    // immediate-write behavior the old single "Grant All Permissions" button
+    // had. No .btn/.btn-outline class, so it sizes to its content here
+    // rather than stretching (that stretch behavior is scoped to
+    // .pit-modal-actions, which this row isn't part of).
+    const grantRemoveSplit = document.createElement('div');
+    grantRemoveSplit.className = 'perm-split-btn';
+    grantRemoveSplit.style.marginLeft = '8px';
+    applyGrantAllSplitFill(grantRemoveSplit, currentTeamPermissions[uid]);
+
+    const removeAllHalf = document.createElement('button');
+    removeAllHalf.type = 'button';
+    removeAllHalf.className = 'perm-split-btn-half';
+    removeAllHalf.textContent = 'Remove All';
+    removeAllHalf.addEventListener('click', () => setAllPermissionsForMember(uid, false, grantRemoveSplit));
+    grantRemoveSplit.appendChild(removeAllHalf);
+
+    const grantAllHalf = document.createElement('button');
+    grantAllHalf.type = 'button';
+    grantAllHalf.className = 'perm-split-btn-half';
+    grantAllHalf.textContent = 'Grant All';
+    grantAllHalf.addEventListener('click', () => setAllPermissionsForMember(uid, true, grantRemoveSplit));
+    grantRemoveSplit.appendChild(grantAllHalf);
+
+    item.appendChild(grantRemoveSplit);
   } else if (role === 'captain' && isCaptain) {
     const captainNote = document.createElement('div');
     captainNote.style.fontSize = '11px';
@@ -285,38 +305,39 @@ async function fetchMemberInfo(teamId, uid) {
 const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canBulkDelete', 'canPinEvents', 'canViewMemberEmails'];
 let memberPermissionsEditingUid = null;
 
-// ====== "Grant All Permissions" fill indicator — shared by the row button
-// (filled from the member's saved permissions, re-applied on every render)
-// and the modal button (filled from the modal's live checkbox state, so it
-// tracks ticks/unticks before Save is even pressed). ======
+// ====== Grant All / Remove All split-button fill indicator — shared by the
+// row split button (filled from the member's saved permissions, re-applied
+// on every render) and the modal's split button (filled from the modal's
+// live checkbox state, so it tracks ticks/unticks before Save is even
+// pressed). Applied to the CONTAINER (.perm-split-btn), not either half, so
+// the fill reads as one continuous bar under both labels. ======
 function grantAllFillPercent(permsObj) {
   const perms = permsObj || {};
   const grantedCount = MEMBER_PERMISSION_KEYS.filter(key => perms[key] === true).length;
   return Math.round((grantedCount / MEMBER_PERMISSION_KEYS.length) * 100);
 }
 
-function applyGrantAllButtonFill(btn, permsObj) {
-  if (!btn) return;
+function applyGrantAllSplitFill(containerEl, permsObj) {
+  if (!containerEl) return;
   const percent = grantAllFillPercent(permsObj);
   const maxed = percent === 100;
-  btn.classList.toggle('maxed', maxed);
-  btn.textContent = maxed ? '✓ Grant All Permissions' : 'Grant All Permissions';
-  btn.style.backgroundImage = maxed
+  containerEl.classList.toggle('maxed', maxed);
+  containerEl.style.backgroundImage = maxed
     ? 'none'
     : `linear-gradient(to right, var(--success) ${percent}%, transparent ${percent}%)`;
 }
 
 // Re-reads the modal's own checkboxes (rather than currentTeamPermissions)
-// so the button's fill tracks live edits before Save is pressed.
-function updateGrantAllModalButtonFill() {
-  const btn = document.getElementById('btn-member-perms-grant-all');
-  if (!btn) return;
+// so the split button's fill tracks live edits before Save is pressed.
+function updateGrantAllModalSplitFill() {
+  const container = document.getElementById('perm-grant-remove-split');
+  if (!container) return;
   const perms = {};
   MEMBER_PERMISSION_KEYS.forEach(key => {
     const checkbox = document.getElementById(`perm-${key}`);
     perms[key] = checkbox ? checkbox.checked : false;
   });
-  applyGrantAllButtonFill(btn, perms);
+  applyGrantAllSplitFill(container, perms);
 }
 
 function openMemberPermissionsModal(uid) {
@@ -327,7 +348,7 @@ function openMemberPermissionsModal(uid) {
     const checkbox = document.getElementById(`perm-${key}`);
     if (checkbox) checkbox.checked = userPerms[key] === true;
   });
-  updateGrantAllModalButtonFill();
+  updateGrantAllModalSplitFill();
 
   const errorEl = document.getElementById('member-permissions-error');
   if (errorEl) errorEl.textContent = '';
@@ -340,32 +361,36 @@ function closeMemberPermissionsModal() {
   document.getElementById('member-permissions-modal').classList.add('hidden');
 }
 
-// ====== "Grant All Permissions" inside the modal — checks every box for the
-// member currently being edited without saving; Save still has to be pressed
-// to persist it, same as ticking each box by hand. ======
-function checkAllMemberPermissionBoxes() {
+// ====== Grant All / Remove All split button inside the modal — sets every
+// box for the member currently being edited to the same value, without
+// saving; Save still has to be pressed to persist it, same as ticking each
+// box by hand. Remove All has no confirm dialog — low risk, since clicking
+// Grant All immediately undoes it and nothing is written until Save. ======
+function setAllMemberPermissionBoxes(value) {
   MEMBER_PERMISSION_KEYS.forEach(key => {
     const checkbox = document.getElementById(`perm-${key}`);
-    if (checkbox) checkbox.checked = true;
+    if (checkbox) checkbox.checked = value;
   });
   // Programmatic .checked assignment doesn't fire a 'change' event, so the
   // fill indicator needs an explicit refresh here.
-  updateGrantAllModalButtonFill();
+  updateGrantAllModalSplitFill();
 }
 
-// ====== "Grant All Permissions" row button — same end result as opening the
-// modal, checking every box, and saving, but in one click. Captain-only,
-// same as every other permission-editing control (openMemberPermissionsModal/
-// saveMemberPermissions above); the write itself is also captain-gated
-// server-side by the teams/{teamId} update rule. ======
-async function grantAllPermissions(uid, btn) {
+// ====== "Grant All Permissions" / "Remove All Permissions" row split button
+// — same end result as opening the modal, setting every box, and saving, but
+// in one click, writing directly like the checkboxes never needed a Save
+// step. Captain-only, same as every other permission-editing control
+// (openMemberPermissionsModal/saveMemberPermissions above); the write itself
+// is also captain-gated server-side by the teams/{teamId} update rule. No
+// confirm dialog on Remove All — clicking Grant All immediately undoes it. ======
+async function setAllPermissionsForMember(uid, value, containerEl) {
   if (!currentTeamId) return;
 
   const updates = {};
   const newPerms = {};
   MEMBER_PERMISSION_KEYS.forEach(key => {
-    updates[`permissions.${uid}.${key}`] = true;
-    newPerms[key] = true;
+    updates[`permissions.${uid}.${key}`] = value;
+    newPerms[key] = value;
   });
 
   try {
@@ -375,12 +400,12 @@ async function grantAllPermissions(uid, btn) {
       currentTeamData.permissions = currentTeamPermissions;
     }
     // The next live team-doc refresh will re-render this row (and its fill)
-    // from scratch anyway, but updating the clicked button directly gives
-    // instant feedback instead of waiting on that round trip.
-    applyGrantAllButtonFill(btn, currentTeamPermissions[uid]);
+    // from scratch anyway, but updating the clicked split button directly
+    // gives instant feedback instead of waiting on that round trip.
+    applyGrantAllSplitFill(containerEl, currentTeamPermissions[uid]);
   } catch (err) {
-    console.error('Failed to grant all permissions:', err);
-    alert('Failed to grant permissions. Check your connection and try again.');
+    console.error(`Failed to ${value ? 'grant' : 'remove'} all permissions:`, err);
+    alert(`Failed to ${value ? 'grant' : 'remove'} permissions. Check your connection and try again.`);
   }
 }
 
@@ -419,18 +444,20 @@ document.addEventListener('DOMContentLoaded', () => {
   const overlay = document.getElementById('member-permissions-overlay');
   const saveBtn = document.getElementById('btn-member-perms-save');
   const grantAllBtn = document.getElementById('btn-member-perms-grant-all');
+  const removeAllBtn = document.getElementById('btn-member-perms-remove-all');
 
   if (cancelBtn) cancelBtn.addEventListener('click', closeMemberPermissionsModal);
   if (cancelInlineBtn) cancelInlineBtn.addEventListener('click', closeMemberPermissionsModal);
   if (overlay) overlay.addEventListener('click', closeMemberPermissionsModal);
   if (saveBtn) saveBtn.addEventListener('click', saveMemberPermissions);
-  if (grantAllBtn) grantAllBtn.addEventListener('click', checkAllMemberPermissionBoxes);
+  if (grantAllBtn) grantAllBtn.addEventListener('click', () => setAllMemberPermissionBoxes(true));
+  if (removeAllBtn) removeAllBtn.addEventListener('click', () => setAllMemberPermissionBoxes(false));
 
-  // Keep the modal's Grant All button's fill in sync with the checkboxes as
-  // the captain ticks/unticks them, before Save is even pressed.
+  // Keep the modal's split-button fill in sync with the checkboxes as the
+  // captain ticks/unticks them, before Save is even pressed.
   MEMBER_PERMISSION_KEYS.forEach(key => {
     const checkbox = document.getElementById(`perm-${key}`);
-    if (checkbox) checkbox.addEventListener('change', updateGrantAllModalButtonFill);
+    if (checkbox) checkbox.addEventListener('change', updateGrantAllModalSplitFill);
   });
 });
 

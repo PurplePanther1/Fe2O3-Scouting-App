@@ -686,7 +686,10 @@
         </div>
         <p id="member-permissions-error" class="error-message"></p>
         <div class="pit-modal-actions" style="margin-top:20px; flex-wrap:wrap">
-          <button type="button" id="btn-member-perms-grant-all" class="btn btn-outline btn-grant-all">Grant All Permissions</button>
+          <div class="perm-split-btn" id="perm-grant-remove-split">
+            <button type="button" id="btn-member-perms-remove-all" class="perm-split-btn-half">Remove All</button>
+            <button type="button" id="btn-member-perms-grant-all" class="perm-split-btn-half">Grant All</button>
+          </div>
           <button type="button" id="btn-member-perms-cancel-inline" class="btn btn-outline">Cancel</button>
           <button type="button" id="btn-member-perms-save" class="btn btn-primary">Save</button>
         </div>

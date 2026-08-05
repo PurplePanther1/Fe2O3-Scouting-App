@@ -133,23 +133,77 @@ html, body {
   font-size: 0.85rem;
 }
 
-/* ====== Grant All Permissions button — fill proportional to how many of the
-   five permissions a member currently has (set via inline background-image,
-   a left-to-right green gradient, in JS). Transparent past the fill point
-   lets the normal .btn-outline background show through underneath. */
-.btn-grant-all {
-  /* Overrides .btn-outline's muted text color — that gray reads fine on the
-     transparent/unfilled portion but has poor contrast against the green
-     fill, so text stays white at every fill level, not just when maxed. */
-  color: #fff !important;
+/* ====== Grant All / Remove All split button — one bordered container, two
+   independently clickable/hoverable halves, with ONE continuous fill
+   spanning the whole container (proportional to how many of the five
+   permissions a member currently has — set via inline background-image, a
+   left-to-right green gradient, in JS) rather than each half filling on its
+   own. The divider between halves is the first half's own right border,
+   which — being the CHILD's border, not the container's — paints on top of
+   the container's background-image automatically, giving the "divider drawn
+   over the fill" look without any extra layering. Both halves are
+   background:transparent so the container's fill (or, unfilled, whatever's
+   behind it) shows through. Used both by the Edit Permissions modal's split
+   button and by each member-row's Grant/Remove All split button in the My
+   Team list — the row context relies on this NOT having a .btn/.btn-outline
+   class, so it sizes to its content instead of stretching full-width. */
+.perm-split-btn {
+  display: flex;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
   transition: background-image 0.2s;
 }
 
-.btn-grant-all.maxed {
+.perm-split-btn.maxed {
   background: var(--success) !important;
   background-image: none !important;
   border-color: var(--success) !important;
-  color: #fff !important;
+}
+
+/* Stretches to match Cancel/Save's width in the modal's action row. Flex
+   items default to min-width:auto (floored at their own content's intrinsic
+   width), which was overriding flex:1 and leaving this cramped/wrapping —
+   min-width:0 on the container AND its half-buttons removes that floor. */
+.pit-modal-actions .perm-split-btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.perm-split-btn-half {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.perm-split-btn-half:first-child {
+  border-right: 1px solid var(--border);
+}
+
+.perm-split-btn-half:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Edit Permissions modal specifically: Cancel/Save size to their own content
+   instead of sharing equal flex with the split button (which left "Grant
+   All"/"Remove All" cramped at an equal third) — the split button then takes
+   the freed-up space. Scoped by #member-permissions-modal so it doesn't
+   affect .pit-modal-actions in the other modals that reuse it (pit/match
+   forms, form builder), which still want their Cancel/Save at equal flex:1. */
+#member-permissions-modal .pit-modal-actions .btn {
+  flex: 0 0 auto;
+}
+
+#member-permissions-modal .pit-modal-actions .perm-split-btn {
+  flex: 2;
 }
 
 /* ====== Inputs ====== */
