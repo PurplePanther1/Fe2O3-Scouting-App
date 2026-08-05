@@ -513,21 +513,52 @@
         <div id="td-match-scouting-section" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
           <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px">
             <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted)">MATCH SCOUTING ENTRIES</p>
-            <button id="btn-add-match-entry" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Match</button>
+            <button id="td-add-match-entry" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Match</button>
           </div>
           <p class="help-text" id="td-match-count" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
-          <input type="text" id="input-match-entry-search" placeholder="Search by match #..." autocomplete="off" style="margin-bottom:8px;">
-          <div id="match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
-            <button id="btn-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
-            <button id="btn-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
-            <span id="match-bulk-delete-status" style="font-size:0.8rem;"></span>
+          <input type="text" id="td-match-entry-search" placeholder="Search by match #..." autocomplete="off" style="margin-bottom:8px;">
+          <div id="td-match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+            <button id="td-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
+            <button id="td-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
+            <span id="td-match-bulk-delete-status" style="font-size:0.8rem;"></span>
           </div>
           <div id="td-match-entries"></div>
         </div>
-        <button id="btn-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📤 Export Pit + Match Data</button>
+        <button id="td-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📤 Export Pit + Match Data</button>
         <p id="td-export-match-error" class="error-message"></p>
         <p id="td-export-match-success" class="success-message"></p>
         <p id="td-error" class="error-message"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Match Scouted Modal (Match Scouting tab: "View Matches Scouted") ======
+       Same Match Scouting Entries panel as the Team Detail modal above, reusing the
+       same rendering/handler functions (match-scout.js) via the 'msm-' ID prefix —
+       just this panel, with no team profile/awards/pit sections. ====== -->
+  <div id="match-scouted-modal" class="modal-overlay hidden">
+    <div id="match-scouted-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:600px">
+      <div class="modal-header">
+        <h3 id="match-scouted-modal-title">Matches Scouted</h3>
+        <button id="btn-match-scouted-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px; max-height:75vh; overflow-y:auto">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:8px">
+          <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted)">MATCH SCOUTING ENTRIES</p>
+          <button id="msm-add-match-entry" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Match</button>
+        </div>
+        <p class="help-text" id="msm-match-count" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
+        <input type="text" id="msm-match-entry-search" placeholder="Search by match #..." autocomplete="off" style="margin-bottom:8px;">
+        <div id="msm-match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap;">
+          <button id="msm-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
+          <button id="msm-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
+          <span id="msm-match-bulk-delete-status" style="font-size:0.8rem;"></span>
+        </div>
+        <div id="msm-match-entries"></div>
+        <button id="msm-export-team-match" class="btn btn-outline" style="margin-top:16px; width:100%; font-size:0.85rem;">📤 Export Match Data</button>
+        <p id="msm-export-match-error" class="error-message"></p>
+        <p id="msm-export-match-success" class="success-message"></p>
       </div>
     </div>
   </div>
@@ -833,6 +864,7 @@
   <script src="js/pit-scout.js"></script>
   <script src="js/match-scout.js"></script>
   <script src="js/team-info.js"></script>
+  <script src="js/match-scouted-modal.js"></script>
   <script src="js/form-builder.js"></script>
   <script src="js/app.js"></script>
   <script src="js/sheets-export.js"></script>

@@ -800,6 +800,22 @@ function renderMatchTeamList(teams) {
 
     btnGroup.appendChild(scoutBtn);
 
+    // View Matches Scouted button — opens a popup showing just this team's
+    // logged match entries (match-scouted-modal.js), reusing the same panel
+    // as the Team Information tab's Team Detail popup.
+    const viewScoutedBtn = document.createElement('button');
+    viewScoutedBtn.className = 'btn btn-small btn-outline';
+    viewScoutedBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
+    viewScoutedBtn.textContent = 'View Matches Scouted';
+    viewScoutedBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (selectedEvent?.code && typeof openMatchScoutedModal === 'function') {
+        openMatchScoutedModal(team.teamNumber, selectedEvent.code, team);
+      }
+    });
+
+    btnGroup.appendChild(viewScoutedBtn);
+
     item.appendChild(leftGroup);
     item.appendChild(btnGroup);
     container.appendChild(item);

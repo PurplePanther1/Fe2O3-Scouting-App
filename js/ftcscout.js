@@ -389,13 +389,12 @@ function renderTeamDetail(detail, teamNumber, prefix = 'td-') {
 }
 
 // ====== Add Match Entry button (in the Team Detail modal) ======
-const btnAddMatchEntry = document.getElementById('btn-add-match-entry');
+const btnAddMatchEntry = document.getElementById('td-add-match-entry');
 if (btnAddMatchEntry) {
   btnAddMatchEntry.addEventListener('click', () => {
-    const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
     const eventCode = selectedEvent?.code;
-    if (teamNum && eventCode && typeof openMatchScoutForm === 'function') {
-      openMatchScoutForm(teamNum, eventCode);
+    if (currentSelectedTeamNumber && eventCode && typeof openMatchScoutForm === 'function') {
+      openMatchScoutForm(currentSelectedTeamNumber, eventCode);
     }
   });
 }

@@ -38,32 +38,39 @@ async function findExistingMatchDoc(teamId, eventCode, matchNumber, teamNumber) 
   return { id: doc.id, ...doc.data() };
 }
 
-// Bulk-select state for the match entries list (captain / canEditOtherEntries only)
-let matchBulkSelectMode = false;
-let matchBulkSelectedEntryIds = new Set();
+// Bulk-select state for the match entries list (captain / canEditOtherEntries
+// only) — keyed by ID prefix ('td-' for the Team Information tab's Team
+// Detail modal, 'msm-' for the "View Matches Scouted" modal) so the two
+// modals never share select-mode or selections, even if both happen to be
+// showing different teams' entries at once.
+const matchBulkState = {
+  'td-': { mode: false, selectedIds: new Set() },
+  'msm-': { mode: false, selectedIds: new Set() }
+};
 
 // ====== Show/hide & label the match bulk-select toolbar based on permission and selection ======
-function updateMatchBulkSelectUI() {
-  const toggleBtn = document.getElementById('btn-match-bulk-select-toggle');
-  const deleteBtn = document.getElementById('btn-match-bulk-delete');
-  if (!toggleBtn || !deleteBtn) return;
+function updateMatchBulkSelectUI(prefix = 'td-') {
+  const state = matchBulkState[prefix];
+  const toggleBtn = document.getElementById(`${prefix}match-bulk-select-toggle`);
+  const deleteBtn = document.getElementById(`${prefix}match-bulk-delete`);
+  if (!toggleBtn || !deleteBtn || !state) return;
 
   const canBulkManage = (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false)
     && (typeof canUserBulkDelete === 'function' ? canUserBulkDelete() : false);
   if (!canBulkManage) {
     toggleBtn.classList.add('hidden');
     deleteBtn.classList.add('hidden');
-    matchBulkSelectMode = false;
-    matchBulkSelectedEntryIds.clear();
+    state.mode = false;
+    state.selectedIds.clear();
     return;
   }
 
   toggleBtn.classList.remove('hidden');
-  toggleBtn.textContent = matchBulkSelectMode ? 'Cancel Select' : 'Select';
+  toggleBtn.textContent = state.mode ? 'Cancel Select' : 'Select';
 
-  if (matchBulkSelectMode && matchBulkSelectedEntryIds.size > 0) {
+  if (state.mode && state.selectedIds.size > 0) {
     deleteBtn.classList.remove('hidden');
-    deleteBtn.textContent = `Delete Selected (${matchBulkSelectedEntryIds.size})`;
+    deleteBtn.textContent = `Delete Selected (${state.selectedIds.size})`;
   } else {
     deleteBtn.classList.add('hidden');
   }
@@ -268,9 +275,7 @@ async function saveMatchScoutForm() {
     if (typeof refreshMatchEntriesCache === 'function') {
       refreshMatchEntriesCache();
     }
-    if (typeof renderMatchListForTeam === 'function') {
-      renderMatchListForTeam(currentMatchEventCode, currentMatchTeamNumber);
-    }
+    refreshOpenMatchListPanels();
 
     setTimeout(() => {
       closeMatchScoutForm();
@@ -305,7 +310,7 @@ async function deleteMatchScoutData() {
     await db.collection('matchScouting').doc(currentMatchDocId).delete();
     hideLoading();
     refreshMatchEntriesCache();
-    renderMatchListForTeam(currentMatchEventCode, currentMatchTeamNumber);
+    refreshOpenMatchListPanels();
     successEl.textContent = 'Entry deleted.';
     setTimeout(() => {
       closeMatchScoutForm();
@@ -387,20 +392,22 @@ function refreshMatchEntriesCache() {
 }
 
 // ====== Render the match list for a team in the detail view ======
-// Search query for filtering the currently-displayed team's match entries by match number
-let currentMatchEntrySearchQuery = '';
+// Search query for filtering the currently-displayed team's match entries by
+// match number — keyed by ID prefix, same reasoning as matchBulkState above.
+const matchEntrySearchQuery = { 'td-': '', 'msm-': '' };
 
-function renderMatchListForTeam(eventCode, teamNumber) {
-  const container = document.getElementById('td-match-entries');
-  const countEl = document.getElementById('td-match-count');
-  if (!container) return;
+function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
+  const container = document.getElementById(`${prefix}match-entries`);
+  const countEl = document.getElementById(`${prefix}match-count`);
+  const bulkState = matchBulkState[prefix];
+  if (!container || !bulkState) return;
 
   const entries = getMatchEntriesForTeam(teamNumber, eventCode);
 
   // Sort by match number ascending (lowest at top)
   entries.sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
 
-  const query = currentMatchEntrySearchQuery.trim();
+  const query = (matchEntrySearchQuery[prefix] || '').trim();
   const filtered = query ? entries.filter(entry => String(entry.matchNumber).includes(query)) : entries;
 
   if (countEl) {
@@ -415,7 +422,7 @@ function renderMatchListForTeam(eventCode, teamNumber) {
     container.innerHTML = query
       ? '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No matches found for that search.</p>'
       : '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No matches logged yet.</p>';
-    updateMatchBulkSelectUI();
+    updateMatchBulkSelectUI(prefix);
     return;
   }
 
@@ -434,19 +441,19 @@ function renderMatchListForTeam(eventCode, teamNumber) {
     // Bulk-select checkbox — only in select mode. Toggle visibility is already
     // permission-gated (see updateMatchBulkSelectUI), so anyone who can see the
     // mode at all is allowed to bulk-delete any entry, same as canEditOrDeleteEntry().
-    if (matchBulkSelectMode) {
+    if (bulkState.mode) {
       const checkbox = document.createElement('input');
       checkbox.type = 'checkbox';
       checkbox.style.cssText = 'width:18px; height:18px; flex-shrink:0; cursor:pointer;';
-      checkbox.checked = matchBulkSelectedEntryIds.has(entry.id);
+      checkbox.checked = bulkState.selectedIds.has(entry.id);
       checkbox.addEventListener('change', (e) => {
         e.stopPropagation();
         if (checkbox.checked) {
-          matchBulkSelectedEntryIds.add(entry.id);
+          bulkState.selectedIds.add(entry.id);
         } else {
-          matchBulkSelectedEntryIds.delete(entry.id);
+          bulkState.selectedIds.delete(entry.id);
         }
-        updateMatchBulkSelectUI();
+        updateMatchBulkSelectUI(prefix);
       });
       numAndCheckbox.appendChild(checkbox);
     }
@@ -499,7 +506,24 @@ function renderMatchListForTeam(eventCode, teamNumber) {
     container.appendChild(item);
   });
 
-  updateMatchBulkSelectUI();
+  updateMatchBulkSelectUI(prefix);
+}
+
+// ====== Refresh whichever match-list panel(s) are actually open (Team Detail
+// modal's 'td-' panel, "View Matches Scouted" modal's 'msm-' panel, or both)
+// after data changes — a save, a delete, a bulk delete, or a live snapshot
+// update from anyone on the team. Each panel's own team/event state is only
+// ever non-null while that modal is open (see closeTeamDetailModal() /
+// closeMatchScoutedModal()), so this is safe to call unconditionally. ======
+function refreshOpenMatchListPanels() {
+  if (typeof renderMatchListForTeam !== 'function') return;
+
+  if (typeof currentSelectedTeamNumber !== 'undefined' && currentSelectedTeamNumber && selectedEvent?.code) {
+    renderMatchListForTeam(selectedEvent.code, currentSelectedTeamNumber, 'td-');
+  }
+  if (typeof currentMatchScoutedTeamNumber !== 'undefined' && currentMatchScoutedTeamNumber && currentMatchScoutedEventCode) {
+    renderMatchListForTeam(currentMatchScoutedEventCode, currentMatchScoutedTeamNumber, 'msm-');
+  }
 }
 
 // ====== Callback for match scouted state changes (set by first-api.js) ======
@@ -520,83 +544,86 @@ document.addEventListener('DOMContentLoaded', () => {
   // Delete button
   document.getElementById('match-delete-btn').addEventListener('click', deleteMatchScoutData);
 
-  // Set the scouted state change callback
+  // Set the scouted state change callback — refreshes whichever match-list
+  // panel(s) are actually open, not just the Team Detail modal's.
   if (typeof onMatchScoutedStateChanged !== 'undefined') {
-    onMatchScoutedStateChanged = () => {
-      // When match cache changes, re-render for currently selected team
-      const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
-      const eventCode = selectedEvent?.code;
-      if (teamNum && eventCode) {
-        renderMatchListForTeam(eventCode, teamNum);
-      }
-    };
+    onMatchScoutedStateChanged = refreshOpenMatchListPanels;
   }
 
-  // Search/filter match entries by match number
-  const matchEntrySearchInput = document.getElementById('input-match-entry-search');
-  if (matchEntrySearchInput) {
-    matchEntrySearchInput.addEventListener('input', (e) => {
-      currentMatchEntrySearchQuery = e.target.value;
-      const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
-      const eventCode = selectedEvent?.code;
-      if (teamNum && eventCode) {
-        renderMatchListForTeam(eventCode, teamNum);
-      }
-    });
-  }
-
-  // Match bulk-select toggle
-  const matchBulkToggleBtn = document.getElementById('btn-match-bulk-select-toggle');
-  if (matchBulkToggleBtn) {
-    matchBulkToggleBtn.addEventListener('click', () => {
-      matchBulkSelectMode = !matchBulkSelectMode;
-      matchBulkSelectedEntryIds.clear();
-      const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
-      const eventCode = selectedEvent?.code;
-      if (teamNum && eventCode) {
-        renderMatchListForTeam(eventCode, teamNum);
-      } else {
-        updateMatchBulkSelectUI();
-      }
-    });
-  }
-
-  // Match bulk delete
-  const matchBulkDeleteBtn = document.getElementById('btn-match-bulk-delete');
-  if (matchBulkDeleteBtn) {
-    matchBulkDeleteBtn.addEventListener('click', async () => {
-      const entryIds = [...matchBulkSelectedEntryIds];
-      if (entryIds.length === 0) return;
-      if (!confirm(`Delete ${entryIds.length} match scouting entr${entryIds.length === 1 ? 'y' : 'ies'}? This cannot be undone.`)) return;
-
-      showLoading('Deleting selected entries...');
-      let results = { succeeded: [], failed: [] };
-      try {
-        results = await bulkDeleteMatchScoutData(entryIds);
-      } finally {
-        hideLoading();
-      }
-
-      const statusEl = document.getElementById('match-bulk-delete-status');
-      if (statusEl) {
-        if (results.failed.length > 0) {
-          console.error('Bulk match delete: failed entry IDs:', results.failed);
-          statusEl.textContent = `Deleted ${results.succeeded.length} of ${entryIds.length} entries — ${results.failed.length} failed`;
-          statusEl.className = 'error-message';
-        } else {
-          statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
-          statusEl.className = 'success-message';
+  // Wires the search box, bulk-select toggle, and bulk delete for ONE
+  // match-list panel (identified by its ID prefix) to its own context
+  // resolver — so the Team Detail modal's 'td-' panel and the "View Matches
+  // Scouted" modal's 'msm-' panel each act on their own team/event and their
+  // own matchBulkState/matchEntrySearchQuery entry, independently.
+  function wireMatchListPanelControls(prefix, getContext) {
+    const searchInput = document.getElementById(`${prefix}match-entry-search`);
+    if (searchInput) {
+      searchInput.addEventListener('input', (e) => {
+        matchEntrySearchQuery[prefix] = e.target.value;
+        const { teamNumber, eventCode } = getContext();
+        if (teamNumber && eventCode) {
+          renderMatchListForTeam(eventCode, teamNumber, prefix);
         }
-        setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
-      }
+      });
+    }
 
-      matchBulkSelectMode = false;
-      matchBulkSelectedEntryIds.clear();
-      const teamNum = document.getElementById('td-team-number').textContent.replace('#', '');
-      const eventCode = selectedEvent?.code;
-      if (teamNum && eventCode) {
-        renderMatchListForTeam(eventCode, teamNum);
-      }
-    });
+    const toggleBtn = document.getElementById(`${prefix}match-bulk-select-toggle`);
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', () => {
+        const state = matchBulkState[prefix];
+        state.mode = !state.mode;
+        state.selectedIds.clear();
+        const { teamNumber, eventCode } = getContext();
+        if (teamNumber && eventCode) {
+          renderMatchListForTeam(eventCode, teamNumber, prefix);
+        } else {
+          updateMatchBulkSelectUI(prefix);
+        }
+      });
+    }
+
+    const deleteBtn = document.getElementById(`${prefix}match-bulk-delete`);
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', async () => {
+        const state = matchBulkState[prefix];
+        const entryIds = [...state.selectedIds];
+        if (entryIds.length === 0) return;
+        if (!confirm(`Delete ${entryIds.length} match scouting entr${entryIds.length === 1 ? 'y' : 'ies'}? This cannot be undone.`)) return;
+
+        showLoading('Deleting selected entries...');
+        let results = { succeeded: [], failed: [] };
+        try {
+          results = await bulkDeleteMatchScoutData(entryIds);
+        } finally {
+          hideLoading();
+        }
+
+        const statusEl = document.getElementById(`${prefix}match-bulk-delete-status`);
+        if (statusEl) {
+          if (results.failed.length > 0) {
+            console.error('Bulk match delete: failed entry IDs:', results.failed);
+            statusEl.textContent = `Deleted ${results.succeeded.length} of ${entryIds.length} entries — ${results.failed.length} failed`;
+            statusEl.className = 'error-message';
+          } else {
+            statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
+            statusEl.className = 'success-message';
+          }
+          setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
+        }
+
+        state.mode = false;
+        state.selectedIds.clear();
+        refreshOpenMatchListPanels();
+      });
+    }
   }
+
+  wireMatchListPanelControls('td-', () => ({
+    teamNumber: currentSelectedTeamNumber,
+    eventCode: selectedEvent?.code
+  }));
+  wireMatchListPanelControls('msm-', () => ({
+    teamNumber: typeof currentMatchScoutedTeamNumber !== 'undefined' ? currentMatchScoutedTeamNumber : null,
+    eventCode: typeof currentMatchScoutedEventCode !== 'undefined' ? currentMatchScoutedEventCode : null
+  }));
 });
