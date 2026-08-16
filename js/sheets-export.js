@@ -16,6 +16,20 @@ let gisTokenClient = null;
 let googleAccessToken = null;
 let googleAccessTokenExpiresAt = 0;
 
+// ====== Separate scope/token client, used ONLY by the "Export Whole Team
+// Data" flow (js/sheets-export.js's handleExportWholeTeamSheetsClick, wired
+// from the leave/delete-as-last-member flows). It needs Drive API access
+// (folder creation + moving created spreadsheets into them) that the rest of
+// this file's exports don't — kept entirely separate from gisTokenClient
+// above so every other export button's existing consent grant/scope is
+// unaffected by this addition. ======
+const GOOGLE_DRIVE_EXPORT_SCOPE = 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file';
+const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3/files';
+
+let gisWholeTeamTokenClient = null;
+let googleWholeTeamAccessToken = null;
+let googleWholeTeamAccessTokenExpiresAt = 0;
+
 // ====== Wait for the GIS script (loaded async in index.html) to be ready ======
 function ensureGisLoaded() {
   return new Promise((resolve, reject) => {
@@ -80,9 +94,57 @@ function getGoogleAccessToken() {
   });
 }
 
+// ====== Get a valid Google OAuth access token for the whole-team export
+// (spreadsheets + drive.file scope) — same shape as getGoogleAccessToken()
+// above, but its own token client/cache so it prompts for its own (broader)
+// consent independently of the shared one. ======
+function getGoogleWholeTeamAccessToken() {
+  return new Promise((resolve, reject) => {
+    if (!GOOGLE_SHEETS_CLIENT_ID || GOOGLE_SHEETS_CLIENT_ID.includes('YOUR_CLIENT_ID')) {
+      reject(new Error('Google Sheets export is not configured yet. Set GOOGLE_SHEETS_CLIENT_ID in js/sheets-export.js.'));
+      return;
+    }
+
+    if (googleWholeTeamAccessToken && Date.now() < googleWholeTeamAccessTokenExpiresAt - 60000) {
+      resolve(googleWholeTeamAccessToken);
+      return;
+    }
+
+    ensureGisLoaded().then(() => {
+      if (!gisWholeTeamTokenClient) {
+        gisWholeTeamTokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_SHEETS_CLIENT_ID,
+          scope: GOOGLE_DRIVE_EXPORT_SCOPE,
+          callback: () => {} // replaced per-request below
+        });
+      }
+
+      gisWholeTeamTokenClient.callback = (response) => {
+        if (response.error) {
+          reject(new Error(`Google authorization failed: ${response.error}`));
+          return;
+        }
+        googleWholeTeamAccessToken = response.access_token;
+        googleWholeTeamAccessTokenExpiresAt = Date.now() + (Number(response.expires_in) || 3600) * 1000;
+        resolve(googleWholeTeamAccessToken);
+      };
+      gisWholeTeamTokenClient.error_callback = (err) => {
+        reject(new Error(err?.message || 'Google authorization was cancelled.'));
+      };
+
+      gisWholeTeamTokenClient.requestAccessToken({ prompt: '' });
+    }).catch(reject);
+  });
+}
+
 // ====== Sheets API helpers ======
-async function sheetsApiFetch(url, options = {}) {
-  const token = await getGoogleAccessToken();
+// tokenGetter defaults to the shared spreadsheets-only token (getGoogleAccessToken)
+// used by every existing export button. The whole-team export (below) passes
+// getGoogleWholeTeamAccessToken instead, so its spreadsheets are created under
+// a token that also carries drive.file — required for the Drive move step to
+// see them — without touching any other caller's scope/consent.
+async function sheetsApiFetch(url, options = {}, tokenGetter = getGoogleAccessToken) {
+  const token = await tokenGetter();
   const resp = await fetch(url, {
     ...options,
     headers: {
@@ -98,21 +160,57 @@ async function sheetsApiFetch(url, options = {}) {
   return resp.json();
 }
 
-function createSpreadsheet(title, sheetTitles) {
+function createSpreadsheet(title, sheetTitles, tokenGetter) {
   const body = {
     properties: { title },
     sheets: sheetTitles.map((sheetTitle, i) => ({ properties: { sheetId: i, title: sheetTitle } }))
   };
-  return sheetsApiFetch(SHEETS_API_BASE, { method: 'POST', body: JSON.stringify(body) });
+  return sheetsApiFetch(SHEETS_API_BASE, { method: 'POST', body: JSON.stringify(body) }, tokenGetter);
 }
 
-function writeSheetValues(spreadsheetId, sheetTitle, rows) {
+function writeSheetValues(spreadsheetId, sheetTitle, rows, tokenGetter) {
   const range = `'${sheetTitle}'!A1`;
   const url = `${SHEETS_API_BASE}/${spreadsheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
   return sheetsApiFetch(url, {
     method: 'PUT',
     body: JSON.stringify({ range, majorDimension: 'ROWS', values: rows })
+  }, tokenGetter);
+}
+
+// ====== Drive API helpers — folder creation + moving a spreadsheet into a
+// folder. Only used by the whole-team export (always with
+// getGoogleWholeTeamAccessToken); nothing else in this file touches Drive. ======
+async function driveApiFetch(url, options = {}) {
+  const token = await getGoogleWholeTeamAccessToken();
+  const resp = await fetch(url, {
+    ...options,
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
   });
+  if (!resp.ok) {
+    const errBody = await resp.json().catch(() => ({}));
+    throw new Error(errBody?.error?.message || `Google Drive API error (${resp.status})`);
+  }
+  return resp.json();
+}
+
+function createDriveFolder(name, parentId) {
+  const body = {
+    name,
+    mimeType: 'application/vnd.google-apps.folder',
+    ...(parentId ? { parents: [parentId] } : {})
+  };
+  return driveApiFetch(`${DRIVE_API_BASE}?fields=id,webViewLink`, { method: 'POST', body: JSON.stringify(body) });
+}
+
+// Sheets API's spreadsheets.create always lands the new file in Drive root —
+// there's no parent-folder param on that endpoint — so every created
+// spreadsheet needs this extra move step to land in its event folder.
+function moveFileToFolder(fileId, folderId) {
+  return driveApiFetch(`${DRIVE_API_BASE}/${fileId}?addParents=${folderId}&removeParents=root&fields=id,parents`, { method: 'PATCH', body: JSON.stringify({}) });
 }
 
 // ====== Formatting helpers ======
@@ -215,17 +313,22 @@ async function fetchMatchDocsForEvent(eventCode, teamId) {
 }
 
 // ====== Create a spreadsheet with Pit Scouting + Match Scouting tabs and fill it ======
-async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs) {
-  const createResp = await createSpreadsheet(title, ['Pit Scouting', 'Match Scouting']);
+// Returns { spreadsheetId, spreadsheetUrl } — callers that only need the URL
+// (the original single-event/whole-event export buttons) destructure just
+// that; the whole-team export also needs spreadsheetId to move the file into
+// its event folder afterward. tokenGetter defaults to the shared token (see
+// sheetsApiFetch above); the whole-team export passes its own broader one.
+async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs, tokenGetter) {
+  const createResp = await createSpreadsheet(title, ['Pit Scouting', 'Match Scouting'], tokenGetter);
   const spreadsheetId = createResp.spreadsheetId;
 
   const pitRows = buildPitSheetRows(pitFields, pitDocs);
   const matchRows = buildMatchSheetRows(matchFields, matchDocs);
 
-  await writeSheetValues(spreadsheetId, 'Pit Scouting', pitRows);
-  await writeSheetValues(spreadsheetId, 'Match Scouting', matchRows);
+  await writeSheetValues(spreadsheetId, 'Pit Scouting', pitRows, tokenGetter);
+  await writeSheetValues(spreadsheetId, 'Match Scouting', matchRows, tokenGetter);
 
-  return createResp.spreadsheetUrl;
+  return { spreadsheetId, spreadsheetUrl: createResp.spreadsheetUrl };
 }
 
 // ====== Build & download an .xlsx workbook from the same row data used for the
@@ -243,6 +346,23 @@ function downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, mat
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
   XLSX.writeFile(wb, filename);
+}
+
+// ====== Build a 2-tab workbook as raw bytes (not a file download) — used by
+// the whole-team export to bundle one small workbook per event into a single
+// ZIP, rather than triggering a separate browser download for each. ======
+function buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs) {
+  if (typeof XLSX === 'undefined') {
+    throw new Error('Excel export library failed to load. Check your connection and try again.');
+  }
+
+  const pitRows = buildPitSheetRows(pitFields, pitDocs);
+  const matchRows = buildMatchSheetRows(matchFields, matchDocs);
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
+  return XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
 }
 
 // ====== Create a spreadsheet with just a Match Scouting tab — the "View
@@ -333,6 +453,51 @@ async function gatherEventExportData(eventCode, teamId) {
   return { pitFields, matchFields, pitDocs, matchDocs };
 }
 
+// ====== Gather EVERY pit/match scouting doc this team has ever recorded, for
+// ANY event — not just the currently selected one. Same unfiltered-by-event
+// teamId query deleteAllScoutingEntriesForTeam() (delete-account.js) already
+// uses when a team is deleted, which firestore.rules' teamId-pinned where()
+// clause already permits (no rule change needed). Grouped client-side by
+// eventCode. Used only by the "Export Whole Team Data" flow, right before a
+// team's data is permanently deleted (leaving/deleting as its last member). ======
+async function gatherFullTeamExportData(teamId) {
+  const [pitFields, matchFields] = await Promise.all([
+    loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
+    loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
+  ]);
+
+  const pitSnap = await withStep('Reading all pit scouting data',
+    () => db.collection('pitScouting').where('teamId', '==', teamId).get());
+  const matchSnap = await withStep('Reading all match scouting data',
+    () => db.collection('matchScouting').where('teamId', '==', teamId).get());
+
+  const byEvent = {}; // eventCode -> { pitDocs: [], matchDocs: [] }
+  const getBucket = (eventCode) => {
+    if (!byEvent[eventCode]) byEvent[eventCode] = { pitDocs: [], matchDocs: [] };
+    return byEvent[eventCode];
+  };
+
+  pitSnap.forEach(doc => {
+    const data = { id: doc.id, ...doc.data() };
+    if (!data.eventCode) return;
+    getBucket(data.eventCode).pitDocs.push(data);
+  });
+  matchSnap.forEach(doc => {
+    const data = { id: doc.id, ...doc.data() };
+    if (!data.eventCode) return;
+    getBucket(data.eventCode).matchDocs.push(data);
+  });
+
+  const eventCodes = Object.keys(byEvent).sort();
+  eventCodes.forEach(eventCode => {
+    const bucket = byEvent[eventCode];
+    bucket.pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+    bucket.matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
+  });
+
+  return { pitFields, matchFields, eventCodes, byEvent };
+}
+
 // ====== Status message helper (mirrors the app's error/success paragraph convention) ======
 // General-purpose, not export-specific — lives here because export was its
 // first user, but also used for e.g. the My Team tab's Join Another Team
@@ -407,7 +572,7 @@ async function handleExportTeamClick(statusPrefix) {
 
     showLoading('Creating Google Sheet...');
     const title = `Team ${teamNumber} Scouting — ${selectedEvent?.name || eventCode}`;
-    const url = await withStep('Creating/writing Google Sheet', () =>
+    const { spreadsheetUrl } = await withStep('Creating/writing Google Sheet', () =>
       exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs));
 
     hideLoading();
@@ -416,7 +581,7 @@ async function handleExportTeamClick(statusPrefix) {
     } else {
       setStatusMessage(statusPrefix, 'success', 'Export complete! Opening sheet...');
     }
-    window.open(url, '_blank');
+    window.open(spreadsheetUrl, '_blank');
   } catch (err) {
     hideLoading();
     console.error('Sheets export failed:', err);
@@ -568,7 +733,7 @@ async function handleExportEventClick(statusPrefix) {
 
     showLoading('Creating Google Sheet...');
     const title = `${selectedEvent?.name || eventCode} — All Teams Scouting Export`;
-    const url = await withStep('Creating/writing Google Sheet', () =>
+    const { spreadsheetUrl } = await withStep('Creating/writing Google Sheet', () =>
       exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs));
 
     hideLoading();
@@ -577,7 +742,7 @@ async function handleExportEventClick(statusPrefix) {
     } else {
       setStatusMessage(statusPrefix, 'success', 'Export complete! Opening sheet...');
     }
-    window.open(url, '_blank');
+    window.open(spreadsheetUrl, '_blank');
   } catch (err) {
     hideLoading();
     console.error('Event sheets export failed:', err);
@@ -618,6 +783,137 @@ async function handleExportEventExcelClick(statusPrefix) {
     console.error('Event Excel export failed:', err);
     setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
   }
+}
+
+// ====== Export a team's ENTIRE scouting history (every event, not just the
+// selected one) as a single ZIP of small per-event .xlsx workbooks. Used only
+// when leaving/deleting a team as its LAST remaining member, right before
+// that data is permanently deleted — see openWholeTeamExportChoice() below
+// for how teamId/teamName get bound in from the leave/delete-account flows. ======
+async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  if (typeof JSZip === 'undefined') {
+    setStatusMessage(statusPrefix, 'error', 'Zip export library failed to load. Check your connection and try again.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please try again.');
+    return;
+  }
+
+  showLoading('Gathering all scouting data...');
+  try {
+    const { pitFields, matchFields, eventCodes, byEvent } = await gatherFullTeamExportData(teamId);
+
+    if (eventCodes.length === 0) {
+      hideLoading();
+      setStatusMessage(statusPrefix, 'success', 'No scouting data found for this team — nothing to export.');
+      return;
+    }
+
+    showLoading('Building workbook files...');
+    const zip = new JSZip();
+    eventCodes.forEach(eventCode => {
+      const { pitDocs, matchDocs } = byEvent[eventCode];
+      const bytes = buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs);
+      zip.file(`${sanitizeFilename(eventCode)}.xlsx`, bytes);
+    });
+
+    showLoading('Creating ZIP file...');
+    const blob = await zip.generateAsync({ type: 'blob' });
+
+    const filename = sanitizeFilename(`${teamName || 'Team'} - Full Scouting History.zip`);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    hideLoading();
+    setStatusMessage(statusPrefix, 'success', `Downloaded! ${eventCodes.length} event(s) exported.`);
+  } catch (err) {
+    hideLoading();
+    console.error('Whole-team Excel export failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Export a team's ENTIRE scouting history to Google Drive, organized
+// as: team folder -> one subfolder per event-with-data -> one 2-tab
+// spreadsheet per subfolder. Uses getGoogleWholeTeamAccessToken (spreadsheets
+// + drive.file) since folder creation/moving needs Drive API access none of
+// this file's other exports request. Used only by the leave/delete-as-last-
+// member flow, right before the team's data is gone for good. ======
+async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please try again.');
+    return;
+  }
+
+  showLoading('Waiting for Google authorization...');
+  try {
+    await getGoogleWholeTeamAccessToken();
+
+    showLoading('Gathering all scouting data...');
+    const { pitFields, matchFields, eventCodes, byEvent } = await gatherFullTeamExportData(teamId);
+
+    if (eventCodes.length === 0) {
+      hideLoading();
+      setStatusMessage(statusPrefix, 'success', 'No scouting data found for this team — nothing to export.');
+      return;
+    }
+
+    const folderLabel = teamName || 'Team';
+
+    showLoading('Creating team folder in Google Drive...');
+    const rootFolder = await withStep('Creating Drive folder', () =>
+      createDriveFolder(`${folderLabel} — Full Scouting Export`));
+
+    for (const eventCode of eventCodes) {
+      showLoading(`Exporting event ${eventCode}...`);
+      const { pitDocs, matchDocs } = byEvent[eventCode];
+
+      const eventFolder = await withStep(`Creating folder for event ${eventCode}`, () =>
+        createDriveFolder(eventCode, rootFolder.id));
+
+      const created = await withStep(`Creating spreadsheet for event ${eventCode}`, () =>
+        exportToNewSpreadsheet(`${folderLabel} — ${eventCode}`, pitFields, pitDocs, matchFields, matchDocs, getGoogleWholeTeamAccessToken));
+
+      await withStep(`Moving spreadsheet for event ${eventCode} into its folder`, () =>
+        moveFileToFolder(created.spreadsheetId, eventFolder.id));
+    }
+
+    hideLoading();
+    setStatusMessage(statusPrefix, 'success', `Export complete! ${eventCodes.length} event(s) exported. Opening folder...`);
+    window.open(rootFolder.webViewLink, '_blank');
+  } catch (err) {
+    hideLoading();
+    console.error('Whole-team Sheets export failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Open the shared export-choice modal (Excel vs Sheets) for the
+// whole-team export, binding teamId/teamName in via closures — called from
+// the leave-team confirmation modal (members.js) and the delete-account
+// modal's sole-owner-team buttons (delete-account.js). statusPrefix must be
+// unique per caller (elements `${statusPrefix}-error`/`-success` must exist
+// in the DOM) since delete-account can show buttons for multiple teams at once. ======
+function openWholeTeamExportChoice(teamId, teamName, statusPrefix) {
+  openExportChoiceModal({
+    title: 'Export Whole Team Data',
+    statusPrefix,
+    excelHandler: (prefix) => handleExportWholeTeamExcelClick(teamId, teamName, prefix),
+    sheetsHandler: (prefix) => handleExportWholeTeamSheetsClick(teamId, teamName, prefix)
+  });
 }
 
 // ====== Export Choice Modal (Excel download vs Google Sheets) ======

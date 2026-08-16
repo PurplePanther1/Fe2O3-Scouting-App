@@ -742,16 +742,34 @@ async function leaveTeam() {
   }
 
   // The last remaining member is always its captain (see deleteEntireTeam()
-  // for why) — leaving in that case deletes the entire team and its data,
-  // not just this membership, so the confirm wording needs to say so.
+  // for why) — leaving in that case deletes the entire team and its data, not
+  // just this membership. That case gets a proper confirmation modal (below)
+  // with an "Export Whole Team Data" option, since a native confirm() dialog
+  // can't host a button — the export needs to happen, if at all, before this
+  // data is gone for good. The ordinary (non-last-member) case is low-risk
+  // (the user can rejoin with the join code) and keeps the simple native
+  // confirm() it already had.
   const isSoleMember = !!(currentTeamData && Array.isArray(currentTeamData.members) && currentTeamData.members.length === 1);
-  const confirmMessage = isSoleMember
-    ? "Leave this team? Since you're the last member, the ENTIRE team and all its data will be permanently deleted."
-    : 'Leave this team? You can rejoin later with the join code.';
-  if (!confirm(confirmMessage)) return;
 
-  const leftTeamId = currentTeamId;
-  const leftTeamData = currentTeamData;
+  if (isSoleMember) {
+    openLeaveTeamConfirmModal(currentTeamId, currentTeamData);
+    return;
+  }
+
+  if (!confirm('Leave this team? You can rejoin later with the join code.')) return;
+
+  await performLeaveTeam(false, currentTeamId, currentTeamData);
+}
+
+// ====== Actually leave/delete the team — shared by the non-sole-member path
+// above (after its native confirm()) and the sole-member confirmation
+// modal's "Leave & Delete Team" button (after the user has had the chance to
+// export). Split out from leaveTeam() so the sole-member case can defer this
+// until the user acts on the modal, rather than running synchronously right
+// after a confirm() call like the simple case does. ======
+async function performLeaveTeam(isSoleMember, leftTeamId, leftTeamData) {
+  const errorEl = document.getElementById('leave-team-error');
+  if (errorEl) errorEl.textContent = '';
 
   showLoading('Leaving team...');
   try {
@@ -816,6 +834,71 @@ async function leaveTeam() {
 
 const btnLeaveTeam = document.getElementById('btn-leave-team');
 if (btnLeaveTeam) btnLeaveTeam.addEventListener('click', leaveTeam);
+
+// ====== Leave Team confirmation modal (sole-member case only, opened by
+// leaveTeam() above) — lets the user export the team's full scouting history
+// (openWholeTeamExportChoice(), sheets-export.js) before choosing to actually
+// leave, which deletes the entire team and all its data. ======
+let pendingLeaveTeamId = null;
+let pendingLeaveTeamData = null;
+
+function openLeaveTeamConfirmModal(teamId, teamData) {
+  pendingLeaveTeamId = teamId;
+  pendingLeaveTeamData = teamData;
+
+  const messageEl = document.getElementById('leave-team-confirm-message');
+  if (messageEl) {
+    messageEl.textContent = `Leave "${teamData?.name || 'this team'}"? Since you're the last member, the ENTIRE team and all its data will be permanently deleted. Export it first if you want to keep a copy.`;
+  }
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('leave-team-confirm-export');
+
+  const modal = document.getElementById('leave-team-confirm-modal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeLeaveTeamConfirmModal() {
+  pendingLeaveTeamId = null;
+  pendingLeaveTeamData = null;
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('leave-team-confirm-export');
+  const modal = document.getElementById('leave-team-confirm-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const closeBtn = document.getElementById('btn-leave-team-confirm-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeLeaveTeamConfirmModal);
+
+  const cancelBtn = document.getElementById('btn-leave-team-confirm-cancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeLeaveTeamConfirmModal);
+
+  const overlay = document.getElementById('leave-team-confirm-modal-overlay');
+  if (overlay) overlay.addEventListener('click', closeLeaveTeamConfirmModal);
+
+  // Opens the shared export-choice modal (Excel vs Sheets) on top of this
+  // one — same nested-modal pattern the Team Detail popup already uses for
+  // its "Add/Edit Pit Scout" button. This modal stays open underneath so the
+  // user lands back on it (with the export status inline) once they're done.
+  const exportBtn = document.getElementById('btn-leave-team-confirm-export');
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      if (pendingLeaveTeamId && typeof openWholeTeamExportChoice === 'function') {
+        openWholeTeamExportChoice(pendingLeaveTeamId, pendingLeaveTeamData?.name, 'leave-team-confirm-export');
+      }
+    });
+  }
+
+  const proceedBtn = document.getElementById('btn-leave-team-confirm-proceed');
+  if (proceedBtn) {
+    proceedBtn.addEventListener('click', async () => {
+      const teamId = pendingLeaveTeamId;
+      const teamData = pendingLeaveTeamData;
+      closeLeaveTeamConfirmModal();
+      if (teamId) {
+        await performLeaveTeam(true, teamId, teamData);
+      }
+    });
+  }
+});
 
 // ====== Expose loadTeamMembers globally so auth.js can call it ======
 window.loadTeamMembers = loadTeamMembers;

@@ -805,6 +805,11 @@
                membership on them. Not blocking (unlike delete-account-blocked
                above), just a heads-up. -->
           <p class="error-message hidden" id="delete-account-sole-owner-warning" style="margin-bottom:16px"></p>
+          <!-- One "Export Whole Team Data" button + status line per sole-owner
+               team, built by openDeleteAccountModal() (delete-account.js) —
+               lets the user export a team's full scouting history before its
+               data is permanently deleted by this action. -->
+          <div id="delete-account-export-actions" style="margin-bottom:16px"></div>
           <div class="pit-field" id="delete-account-password-field">
             <label for="input-delete-account-password">Current Password</label>
             <div class="password-input-wrapper">
@@ -841,6 +846,29 @@
     </div>
   </div>
 
+  <!-- Leave Team confirmation modal — used only when the user is the LAST
+       remaining member (leaving deletes the whole team), so they get a
+       chance to export its full scouting history before that data is gone
+       for good. The non-last-member leave path still uses a plain confirm(),
+       unaffected by this modal. -->
+  <div id="leave-team-confirm-modal" class="modal-overlay hidden">
+    <div id="leave-team-confirm-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:400px">
+      <div class="modal-header">
+        <h3>Leave Team?</h3>
+        <button id="btn-leave-team-confirm-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px; display:flex; flex-direction:column; gap:12px">
+        <p class="help-text" id="leave-team-confirm-message"></p>
+        <button id="btn-leave-team-confirm-export" class="btn btn-outline">📦 Export Whole Team Data</button>
+        <p id="leave-team-confirm-export-error" class="error-message"></p>
+        <p id="leave-team-confirm-export-success" class="success-message"></p>
+        <button id="btn-leave-team-confirm-proceed" class="btn btn-primary">Leave &amp; Delete Team</button>
+        <button id="btn-leave-team-confirm-cancel" class="btn btn-outline">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Loading overlay -->
   <div id="loading-overlay" class="loading-overlay hidden">
     <div class="spinner"></div>
@@ -855,6 +883,8 @@
   <script src="https://accounts.google.com/gsi/client" async defer></script>
   <!-- SheetJS (for client-side .xlsx generation — Excel export option) -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <!-- JSZip (bundles one .xlsx per event into a single ZIP — "Export Whole Team Data") -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="js/firebase-config.js"></script>
   <script src="js/auth.js"></script>
   <script src="js/team.js"></script>

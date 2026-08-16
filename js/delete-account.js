@@ -107,6 +107,44 @@ function openDeleteAccountModal() {
       }
     }
 
+    // One "Export Whole Team Data" button + status line per sole-owner team —
+    // lets the user export each team's FULL scouting history (every event,
+    // via openWholeTeamExportChoice(), sheets-export.js) before that account
+    // deletion permanently destroys it. Rebuilt fresh every time the modal
+    // opens, same as delete-account-blocked-actions above.
+    const exportActionsEl = document.getElementById('delete-account-export-actions');
+    if (exportActionsEl) {
+      exportActionsEl.innerHTML = '';
+      soleOwnerTeams.forEach(t => {
+        const statusPrefix = `delete-account-export-${t.id}`;
+        const wrapper = document.createElement('div');
+        wrapper.style.cssText = 'margin-bottom:10px;';
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn btn-small btn-outline';
+        btn.style.cssText = 'width:100%;';
+        btn.textContent = `📦 Export "${t.name || 'Unnamed team'}" Whole Team Data`;
+        btn.addEventListener('click', () => {
+          if (typeof openWholeTeamExportChoice === 'function') {
+            openWholeTeamExportChoice(t.id, t.name, statusPrefix);
+          }
+        });
+
+        const errorEl = document.createElement('p');
+        errorEl.className = 'error-message';
+        errorEl.id = `${statusPrefix}-error`;
+        const successEl = document.createElement('p');
+        successEl.className = 'success-message';
+        successEl.id = `${statusPrefix}-success`;
+
+        wrapper.appendChild(btn);
+        wrapper.appendChild(errorEl);
+        wrapper.appendChild(successEl);
+        exportActionsEl.appendChild(wrapper);
+      });
+    }
+
     const hasPasswordProvider = !!(currentUser.providerData &&
       currentUser.providerData.some(p => p.providerId === 'password'));
     document.getElementById('delete-account-password-field').classList.toggle('hidden', !hasPasswordProvider);

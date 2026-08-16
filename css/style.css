@@ -776,6 +776,17 @@ input[type="password"]::placeholder {
   z-index: 1001;
 }
 
+/* The Excel/Sheets export-choice modal can be opened from within several other
+   modals (Team Detail's "Export Pit + Match Data", "View Matches Scouted"'s
+   "Export Match Data", the Leave Team confirmation modal, and Delete Account's
+   per-team export buttons) — all of which sit at the base z-index (1000). Same
+   fix as #pit-modal/#match-modal above: without this, equal z-index left it to
+   DOM order, which put it visibly/interactively BEHIND whichever of those
+   modals was already open. */
+#export-choice-modal {
+  z-index: 1001;
+}
+
 .modal-overlay-bg {
   position: absolute;
   inset: 0;
