@@ -8,6 +8,12 @@ const FTC_PROXY_BASE = 'https://fe2o3-ftc-proxy.fe2o3-scouting.workers.dev';
 let selectedEvent = null;
 let isSearching = false;
 let debounceTimer = null;
+// Separate from debounceTimer above (which only drives suggestion rendering,
+// 150ms) — persists in-progress search text (session-state.js) per team even
+// when the user never actually selects/clears an event, so switching teams
+// and back doesn't lose an unsubmitted query. Longer delay since writing to
+// sessionStorage on every keystroke would be wasteful.
+let searchSaveDebounceTimer = null;
 
 // ====== In-memory event cache (keyed by season) ======
 const eventCache = {};
@@ -255,10 +261,15 @@ function renderSuggestions(events) {
     item.appendChild(codeEl);
 
     item.addEventListener('click', () => {
+      // Set BEFORE clearSelectedEvent()/selectEvent() — both trigger
+      // synchronous saveSessionState() calls (directly, and via
+      // selectEvent()'s own activateScoutingSubTab() side effect), which
+      // would otherwise capture the box's pre-autocomplete raw typed text
+      // instead of this event's resolved name.
+      document.getElementById('input-event-search').value = evt.name;
       clearSelectedEvent();
       selectEvent(evt);
       hideSuggestions();
-      document.getElementById('input-event-search').value = evt.name;
     });
 
     dropdown.appendChild(item);
@@ -1021,8 +1032,40 @@ if (btnDeselectEvent) {
   });
 }
 
+// ====== Compute and render suggestions for whatever's currently in the
+// search box (client-side, no API calls) — shared by the debounced `input`
+// listener below and the immediate `focus` listener, so both stay in sync
+// rather than duplicating the same filter/cache-check/render logic. ======
+function updateSuggestionsForCurrentQuery() {
+  const query = document.getElementById('input-event-search').value.trim();
+  if (!query) {
+    hideSuggestions();
+    return;
+  }
+
+  const season = getSelectedSeason();
+  const allEvents = eventCache[season];
+  if (!allEvents) {
+    // Cache not loaded yet — don't show suggestions, just wait for search
+    hideSuggestions();
+    return;
+  }
+
+  const matches = filterEvents(allEvents, query).slice(0, 8);
+  renderSuggestions(matches);
+}
+
 // ====== Live Autocomplete (client-side, no API calls) ======
 document.getElementById('input-event-search').addEventListener('input', () => {
+  // Persists whatever's typed (session-state.js, per active team) once typing
+  // settles — independent of the suggestion-rendering debounce below, and
+  // scheduled before the empty-query early return so clearing the box back
+  // to empty gets saved too, not just non-empty queries.
+  if (searchSaveDebounceTimer) clearTimeout(searchSaveDebounceTimer);
+  searchSaveDebounceTimer = setTimeout(() => {
+    if (typeof saveSessionState === 'function') saveSessionState();
+  }, 400);
+
   if (debounceTimer) clearTimeout(debounceTimer);
 
   const query = document.getElementById('input-event-search').value.trim();
@@ -1031,18 +1074,16 @@ document.getElementById('input-event-search').addEventListener('input', () => {
     return;
   }
 
-  debounceTimer = setTimeout(() => {
-    const season = getSelectedSeason();
-    const allEvents = eventCache[season];
-    if (!allEvents) {
-      // Cache not loaded yet — don't show suggestions, just wait for search
-      hideSuggestions();
-      return;
-    }
+  debounceTimer = setTimeout(updateSuggestionsForCurrentQuery, 150); // 150ms debounce — fast since it's local
+});
 
-    const matches = filterEvents(allEvents, query).slice(0, 8);
-    renderSuggestions(matches);
-  }, 150); // 150ms debounce — fast since it's local
+// ====== Show suggestions immediately on focus if the box already has text
+// (e.g. just restored on refresh/team-switch) — without this, suggestions
+// only ever appeared once the user typed something, even though the box
+// could already be non-empty the moment they click/tab into it. No debounce
+// needed here — a focus is a single discrete action, not per-keystroke. ======
+document.getElementById('input-event-search').addEventListener('focus', () => {
+  updateSuggestionsForCurrentQuery();
 });
 
 // ====== Hide suggestions on blur / Escape ======

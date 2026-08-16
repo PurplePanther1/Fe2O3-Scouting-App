@@ -212,6 +212,14 @@ async function selfLeaveTeam(teamId, uid) {
   updates[`permissions.${uid}`] = firebase.firestore.FieldValue.delete();
   await db.collection('teams').doc(teamId).update(updates);
 
+  // This team's saved event/search state (session-state.js) shouldn't
+  // outlive this person's membership — rejoining later (same teamId, since
+  // leaving doesn't delete/recreate the team doc) should be a fresh start,
+  // not a restore of whatever was active before they left.
+  if (typeof clearTeamSessionState === 'function') {
+    clearTeamSessionState(teamId);
+  }
+
   // Clean up this team's copy of the departing user's email alongside their
   // membership — teams/{teamId}/memberContacts/{uid} only exists so this
   // team's captain/permitted teammates can see it, and shouldn't outlive
@@ -259,6 +267,13 @@ async function deleteAllScoutingEntriesForTeam(teamId) {
 // as selfLeaveTeam(). ======
 async function deleteEntireTeam(teamId, uid, teamData) {
   await deleteAllScoutingEntriesForTeam(teamId);
+
+  // Tidiness, not correctness — this teamId can never be rejoined once the
+  // team doc itself is gone (below), but there's no reason to leave its
+  // saved event/search state (session-state.js) orphaned in sessionStorage.
+  if (typeof clearTeamSessionState === 'function') {
+    clearTeamSessionState(teamId);
+  }
 
   // formConfig docs may not exist if the team never customized either form —
   // deleting a doc that doesn't exist is a harmless no-op.

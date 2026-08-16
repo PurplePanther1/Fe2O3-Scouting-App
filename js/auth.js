@@ -907,6 +907,13 @@ async function signOut() {
     if (typeof clearSessionState === 'function') {
       clearSessionState();
     }
+    // clearSelectedEvent() deliberately leaves the search box's typed text
+    // alone (callers like doSearch() need it to survive their own call to
+    // clearSelectedEvent() while showing that same query's results), so
+    // sign-out has to clear it explicitly here — otherwise the next login in
+    // this same tab would see whatever the previous account had typed.
+    const eventSearchInput = $('input-event-search');
+    if (eventSearchInput) eventSearchInput.value = '';
     // In case sign-out happened from the standalone My Account view (reached
     // from the Join/Create Team screen) — don't leave screen-main stuck
     // hiding its dashboard header/tabs for whoever logs in next.
@@ -1290,6 +1297,19 @@ function switchActiveTeam(teamId) {
   // very shortly re-confirm/refresh this with the live doc anyway.
   currentTeamData = team;
   currentTeamId = teamId;
+
+  // Event/search state is scoped per team (session-state.js) — restore
+  // whatever THIS team last had (or clear to empty if it's never had one),
+  // now that currentTeamId already points at it. Deliberately not awaited:
+  // switchActiveTeam() isn't async, and selectEvent()/clearSelectedEvent()
+  // (which this calls into) already set the selectedEvent global and
+  // re-subscribe watchPitScoutStatus()/watchMatchScoutStatus() themselves as
+  // part of their own synchronous prefix / internal logic — no separate
+  // re-subscription step is needed here for that anymore.
+  if (typeof restorePerTeamEventState === 'function') {
+    restorePerTeamEventState();
+  }
+
   $('main-team-name').textContent = team.name || 'Your Team';
   if (team.joinCode && typeof showJoinCodeOnDashboard === 'function') {
     showJoinCodeOnDashboard(team.joinCode);
@@ -1316,24 +1336,6 @@ function switchActiveTeam(teamId) {
   // switch-to-a-remaining-team branch — from one place.
   if (typeof activateDashboardTab === 'function') {
     activateDashboardTab('myteam');
-  }
-
-  // The one genuinely new case multi-team support introduces: "the active
-  // team changed but the selected event didn't." watchPitScoutStatus()/
-  // watchMatchScoutStatus() (pit-scout.js/match-scout.js) close over
-  // currentTeamData.id at subscription time and never re-read it — until
-  // now, that was fine, because a team never changed out from under a
-  // selected event. Re-subscribing them here (now that currentTeamData
-  // already points at the new team, set above) refreshes everything they
-  // drive: scouted-state checkmarks on the team list, and the match count
-  // on a currently open team detail modal.
-  if (selectedEvent?.code) {
-    if (typeof watchPitScoutStatus === 'function') {
-      watchPitScoutStatus(selectedEvent.code);
-    }
-    if (typeof watchMatchScoutStatus === 'function') {
-      watchMatchScoutStatus(selectedEvent.code);
-    }
   }
 }
 
