@@ -36,6 +36,16 @@ async function ensureUserProfile(user) {
   const contactRef = ref.collection('private').doc('contact');
   let profile;
 
+  // Independent of the profile read/write below — user.email is already
+  // known synchronously from the auth object, so this doesn't need to block
+  // ensureUserProfile()'s return (or callers awaiting it) at all.
+  contactRef.set({
+    email: user.email || '',
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }, { merge: true }).catch(err => {
+    console.warn('Failed to sync private contact doc:', err);
+  });
+
   try {
     const doc = await ref.get();
     if (doc.exists) {
@@ -56,15 +66,6 @@ async function ensureUserProfile(user) {
   } catch (err) {
     console.warn('Failed to load/create user profile:', err);
     profile = { displayName: user.displayName || '', photoURL: user.photoURL || null };
-  }
-
-  try {
-    await contactRef.set({
-      email: user.email || '',
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    }, { merge: true });
-  } catch (err) {
-    console.warn('Failed to sync private contact doc:', err);
   }
 
   currentUserProfile = {
@@ -987,20 +988,28 @@ async function handleAuthenticatedUser(user) {
   // Reaching this function always means we're past the verify-email gate
   // (manually, via auto-poll, or because the account was already verified).
   stopVerifyEmailPolling();
-  await ensureUserProfile(user);
-  const displayName = getCurrentUserDisplayName();
-  renderAccountInfo();
 
-  // Update user info in team screen
-  $('user-avatar').src = user.photoURL || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(displayName);
-  $('user-avatar').alt = displayName;
-  $('user-name').textContent = displayName;
+  // Shown immediately, before any network calls — previously this didn't
+  // appear until after ensureUserProfile() had already resolved, leaving a
+  // real network round trip where the screen looked signed-out instead of
+  // loading.
+  showLoading('Signing you in...');
 
-  // Check if user belongs to a team
-  showLoading('Looking up your team...');
   try {
-    const teams = await getUserTeams(user.uid);
-    hideLoading();
+    // ensureUserProfile()'s profile read and getUserTeams() don't depend on
+    // each other's result, so run them concurrently instead of back to back.
+    const [, teams] = await Promise.all([
+      ensureUserProfile(user),
+      getUserTeams(user.uid)
+    ]);
+    const displayName = getCurrentUserDisplayName();
+    renderAccountInfo();
+
+    // Update user info in team screen
+    $('user-avatar').src = user.photoURL || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(displayName);
+    $('user-avatar').alt = displayName;
+    $('user-name').textContent = displayName;
+
     if (teams.length > 0) {
       // Existing users who haven't explicitly confirmed a display name yet must
       // do so before reaching the dashboard — same blocking pattern as the
@@ -1009,6 +1018,7 @@ async function handleAuthenticatedUser(user) {
       // Brand-new users without a team yet are prompted inline on the create/join
       // screen instead (see the branch below), not here.
       if (!currentUserProfile || !currentUserProfile.displayNameConfirmed) {
+        hideLoading();
         const nameInput = document.getElementById('input-set-display-name');
         if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
         showScreen('screen-set-display-name');
@@ -1018,9 +1028,12 @@ async function handleAuthenticatedUser(user) {
       // Keep this user's per-team email copy fresh for EVERY team they
       // belong to, not just whichever one is shown below — a captain on a
       // different team than the one displayed here still needs to see an
-      // up-to-date email if/when they view it.
+      // up-to-date email if/when they view it. Fire-and-forget: pure
+      // denormalization bookkeeping that nothing in this render path reads
+      // back, and ensureMemberContact() already swallows its own errors —
+      // so it shouldn't hold up the dashboard appearing.
       const myEmail = (currentUserProfile && currentUserProfile.email) || user.email || '';
-      await Promise.all(teams.map(t => ensureMemberContact(t.id, user.uid, myEmail)));
+      Promise.all(teams.map(t => ensureMemberContact(t.id, user.uid, myEmail)));
 
       // Full list of every team this user belongs to (multi-team support) —
       // the Stage 3 switcher UI will read this directly; for now the
@@ -1041,7 +1054,10 @@ async function handleAuthenticatedUser(user) {
 
       const myRole = (team.roles && team.roles[user.uid]) || 'member';
       if (myRole === 'captain') {
-        await ensureJoinCodeDoc(team.id, team.joinCode);
+        // Legacy backfill for teams created before joinCodes existed —
+        // nothing in this render path depends on it, and it already
+        // swallows its own errors — fire-and-forget.
+        ensureJoinCodeDoc(team.id, team.joinCode);
       }
 
       $('main-team-name').textContent = team.name || 'Your Team';
@@ -1073,13 +1089,16 @@ async function handleAuthenticatedUser(user) {
       // refresh (sessionStorage — cleared when the tab/browser closes, so a
       // brand-new session still starts clean), or fall back to the same
       // default a fresh page load starts on (Scouting → Team Information, no
-      // event). Runs after showScreen so the dashboard appears immediately;
-      // any event reload uses the same loading overlay a manual event
-      // selection already does.
+      // event). Runs after showScreen so the dashboard is already in the DOM,
+      // but the loading overlay (hidden below, once this settles) stays up
+      // for it too, so the dashboard's un-restored default state never
+      // flashes on screen before it settles into the real one.
       if (typeof restoreOrDefaultSessionState === 'function') {
-        restoreOrDefaultSessionState().catch(err => {
+        try {
+          await restoreOrDefaultSessionState();
+        } catch (err) {
           console.error('Failed to restore session state:', err);
-        });
+        }
       } else {
         if (typeof window.activateDashboardTab === 'function') {
           window.activateDashboardTab('scouting');
@@ -1088,7 +1107,9 @@ async function handleAuthenticatedUser(user) {
           window.activateScoutingSubTab('info');
         }
       }
+      hideLoading();
     } else {
+      hideLoading();
       clearErrors();
       // Always shown — pre-filled with whatever name is already known (Google or
       // a prior save), if any, but the user must still press Create/Join to

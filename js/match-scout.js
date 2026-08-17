@@ -109,6 +109,13 @@ async function openMatchScoutForm(teamNumber, eventCode) {
   // Show modal
   document.getElementById('match-modal').classList.remove('hidden');
 
+  // Clear synchronously, before any await below — otherwise whatever entry
+  // was rendered here last stays visible (wrong team/match data, or a stale
+  // "existing data loaded" state) for however long the form-config fetch
+  // takes, instead of never appearing at all.
+  document.getElementById('match-dynamic-fields').innerHTML = '';
+  currentMatchFormController = null;
+
   // Get field configuration and render dynamic form
   const teamId = currentTeamData?.id;
   if (!teamId) {
@@ -143,6 +150,12 @@ async function openMatchScoutEdit(docId, existingData) {
   document.getElementById('match-delete-btn').classList.remove('hidden');
 
   document.getElementById('match-modal').classList.remove('hidden');
+
+  // Clear synchronously, before any await below — otherwise whatever entry
+  // was rendered here last (a different match/team) stays visible for
+  // however long the form-config fetch takes, instead of never appearing.
+  document.getElementById('match-dynamic-fields').innerHTML = '';
+  currentMatchFormController = null;
 
   const teamId = currentTeamData?.id;
   if (!teamId) return;

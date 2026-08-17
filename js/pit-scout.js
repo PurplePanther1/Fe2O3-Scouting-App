@@ -56,6 +56,12 @@ async function openPitScoutForm(teamNumber, eventCode) {
   // Show modal
   document.getElementById('pit-modal').classList.remove('hidden');
 
+  // Clear synchronously, before any await below — otherwise whatever team
+  // was rendered here last stays visible for however long the form-config/
+  // existing-data fetches take, instead of never appearing at all.
+  document.getElementById('pit-dynamic-fields').innerHTML = '';
+  currentFormController = null;
+
   // Get field configuration and render dynamic form
   const teamId = currentTeamData?.id;
   if (!teamId) {
@@ -66,7 +72,7 @@ async function openPitScoutForm(teamNumber, eventCode) {
   try {
     const fields = await loadFormConfig(teamId);
     const container = document.getElementById('pit-dynamic-fields');
-    
+
     // Load existing data for this team
     const existingData = await loadExistingPitData(teamId, eventCode, teamNumber);
     
