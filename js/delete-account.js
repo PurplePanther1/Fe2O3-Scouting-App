@@ -50,25 +50,27 @@ function openDeleteAccountModal() {
     if (blockedMessageEl) {
       const names = blockingTeams.map(t => t.name || 'Unnamed team').join(', ');
       blockedMessageEl.textContent = blockingTeams.length === 1
-        ? `You're the captain of "${names}", and other members are still on it. Please transfer the captain role to another member (My Team tab) before deleting your account.`
-        : `You're the captain of these teams, and other members are still on them: ${names}. Please transfer the captain role for each one (My Team tab) before deleting your account.`;
+        ? `You're the captain of "${names}", and other members are still on it. Please transfer the captain role to another member before deleting your account.`
+        : `You're the captain of these teams, and other members are still on them: ${names}. Please transfer the captain role for each one before deleting your account.`;
     }
 
-    // One button per blocking team, including the currently active one —
-    // "My Team tab" was only actually actionable for whichever team happened
-    // to be active, so every OTHER team gets a direct switch-and-navigate
-    // button; the active team gets one too (worded differently, since no
-    // actual switch is needed — just the navigation).
+    // One button per blocking team, including the currently active one — same
+    // uniform label for every button regardless of whether that team happens
+    // to be active right now (isActive only changes what the click does: the
+    // active team just needs the tab switch, since switchActiveTeam() isn't
+    // needed/possible for the team already active; every other team also
+    // switches teams first).
     const blockedActionsEl = document.getElementById('delete-account-blocked-actions');
     if (blockedActionsEl) {
       blockedActionsEl.innerHTML = '';
       blockingTeams.forEach(t => {
         const isActive = t.id === currentTeamId;
+        const teamName = t.name || 'Unnamed team';
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'btn btn-small btn-outline';
         btn.style.cssText = 'margin-top:8px; margin-right:8px;';
-        btn.textContent = isActive ? 'Go to "My Team" tab' : `Switch to "${t.name || 'Unnamed team'}" to transfer`;
+        btn.textContent = `Switch to "${teamName}'s" "My Team" tab to transfer`;
         btn.addEventListener('click', () => {
           closeDeleteAccountModal();
           if (isActive) {
@@ -95,8 +97,42 @@ function openDeleteAccountModal() {
     // not a block: nothing prevents them from proceeding.
     const soleOwnerWarningEl = document.getElementById('delete-account-sole-owner-warning');
     const soleOwnerTeams = teamsToCheck.filter(t => t && Array.isArray(t.members) && t.members.length === 1);
+    // The one case where the main paragraph and the box below used to say
+    // almost the same thing twice, back to back — exactly one team total,
+    // and it's the sole-owned one. Every other combination keeps two
+    // paragraphs on purpose: with multiple sole-owned teams the box adds the
+    // actual names the main paragraph doesn't list, and in the mixed case
+    // (some shared, some sole-owned) each paragraph is a true statement about
+    // a different team, not a restatement of the same one.
+    const isSingleSoleTeam = teamsToCheck.length === 1 && soleOwnerTeams.length === 1;
+
+    // The main paragraph's "entries remain, credited to Deleted User" claim is
+    // only true for teams the user shares with others (anonymizeOwnScoutingEntries()
+    // + selfLeaveTeam()) — for a team they're the sole member of, deleteEntireTeam()
+    // wipes that team's data entirely instead, same condition the sole-owner
+    // warning below already checks.
+    const mainWarningEl = document.getElementById('delete-account-main-warning');
+    if (mainWarningEl) {
+      if (soleOwnerTeams.length === 0) {
+        mainWarningEl.textContent = 'This permanently deletes your account and cannot be undone. Your existing scouting entries will remain, credited to "Deleted User" instead of your name — but you\'ll be removed from your team and signed out.';
+      } else if (isSingleSoleTeam) {
+        // Kept deliberately short — the combined message (account + team +
+        // data + export reminder) lives in the sole-owner box below instead,
+        // styled after the Leave Team modal's equivalent single-message case.
+        mainWarningEl.textContent = 'This permanently deletes your account and cannot be undone.';
+      } else if (soleOwnerTeams.length === teamsToCheck.length) {
+        mainWarningEl.textContent = 'This permanently deletes your account and cannot be undone. Since you\'re the only member of every team you belong to, ALL of their data — including every scouting entry — will be permanently deleted along with them, not anonymized or kept.';
+      } else {
+        mainWarningEl.textContent = 'This permanently deletes your account and cannot be undone. For teams you share with others, your existing scouting entries will remain, credited to "Deleted User" instead of your name. For team(s) you\'re the only member of (see below), ALL of that team\'s data — including every scouting entry — is permanently deleted instead. You\'ll be removed from your team(s) and signed out.';
+      }
+    }
+
     if (soleOwnerWarningEl) {
-      if (soleOwnerTeams.length > 0) {
+      if (isSingleSoleTeam) {
+        const name = soleOwnerTeams[0].name || 'Unnamed team';
+        soleOwnerWarningEl.textContent = `Since you're the last member of "${name}", deleting your account will also permanently delete the ENTIRE team and all its data. Export it first if you want to keep a copy.`;
+        soleOwnerWarningEl.classList.remove('hidden');
+      } else if (soleOwnerTeams.length > 0) {
         const names = soleOwnerTeams.map(t => t.name || 'Unnamed team').join(', ');
         soleOwnerWarningEl.textContent = soleOwnerTeams.length === 1
           ? `You're the only member of "${names}" — deleting your account will permanently delete this ENTIRE team and all its scouting data, not just your own membership.`

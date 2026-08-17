@@ -266,6 +266,9 @@
           <!-- Team list for Match Scouting -->
           <div style="margin-top:10px">
             <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (MATCH)</h3>
+            <button id="btn-export-event-match" class="btn btn-outline btn-small" style="margin-bottom:10px; width:100%">📤 Export All Match Data</button>
+            <p id="event-export-match-error" class="error-message"></p>
+            <p id="event-export-match-success" class="success-message"></p>
             <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
               <input type="text" id="input-team-search-match" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
               <select id="select-team-sort-match" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
@@ -284,6 +287,9 @@
           <!-- Team list for Pit Scouting -->
           <div style="margin-top:10px">
             <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (PIT)</h3>
+            <button id="btn-export-event-pit" class="btn btn-outline btn-small" style="margin-bottom:10px; width:100%">📤 Export All Pit Data</button>
+            <p id="event-export-pit-error" class="error-message"></p>
+            <p id="event-export-pit-success" class="success-message"></p>
             <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
               <input type="text" id="input-team-search-pit" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
               <select id="select-team-sort-pit" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
@@ -384,6 +390,17 @@
           <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">MATCH SCOUTING FORM</h3>
           <p class="help-text">Configure what fields appear on the match scouting form.</p>
           <button id="btn-open-match-form-builder" class="btn btn-primary">Edit Match Scouting Form</button>
+        </div>
+
+        <!-- Export team data — standalone entry point, always visible (not
+             gated on leaving/deleting as the last member like the Leave
+             Team/Delete Account "Export Whole Team Data" flow it reuses). -->
+        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">EXPORT TEAM DATA</h3>
+          <p class="help-text" style="margin-bottom:12px">Export this team's full scouting history — every event, both pit and match data.</p>
+          <button id="btn-myteam-export" class="btn btn-outline" style="width:100%">📦 Export Team Data</button>
+          <p id="myteam-export-error" class="error-message"></p>
+          <p id="myteam-export-success" class="success-message"></p>
         </div>
 
         <!-- Leave team -->
@@ -793,7 +810,7 @@
         </div>
 
         <div id="delete-account-form">
-          <p class="help-text" style="margin-bottom:16px">
+          <p class="help-text" id="delete-account-main-warning" style="margin-bottom:16px">
             This permanently deletes your account and cannot be undone. Your
             existing scouting entries will remain, credited to "Deleted User"
             instead of your name — but you'll be removed from your team and

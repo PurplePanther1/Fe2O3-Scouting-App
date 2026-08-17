@@ -256,14 +256,53 @@ function buildSheetRows(fields, docs, fixedColumns) {
 }
 
 function buildPitSheetRows(fields, docs) {
-  return buildSheetRows(fields, docs, [{ header: 'Team Number', key: 'teamNumber' }]);
+  return buildSheetRows(fields, docs, [
+    { header: 'Team Name', key: 'teamName' },
+    { header: 'Team Number', key: 'teamNumber' }
+  ]);
 }
 
 function buildMatchSheetRows(fields, docs) {
   return buildSheetRows(fields, docs, [
+    { header: 'Team Name', key: 'teamName' },
     { header: 'Team Number', key: 'teamNumber' },
     { header: 'Match Number', key: 'matchNumber' }
   ]);
+}
+
+// ====== Build a {teamNumber: name} map for one event, from the same
+// Firestore-cached roster (events/{eventCode}) getCachedEvent() (first-api.js)
+// already reads for event selection — not scoped to the currently selected
+// event, so it works for any event, including ones from a team's export
+// history that aren't the active one. Returns {} (not an error) if the event
+// isn't cached, so a missing/old event just leaves the Team Name column blank
+// for its rows rather than failing the export. ======
+async function getEventTeamNameMap(eventCode) {
+  const map = {};
+  try {
+    if (typeof getCachedEvent !== 'function') return map;
+    const cached = await getCachedEvent(eventCode);
+    const ftcTeams = cached?.ftcTeams || [];
+    ftcTeams.forEach(t => {
+      const num = t?.teamNumber;
+      if (num === undefined || num === null) return;
+      map[Number(num)] = t.name || t.nameShort || t.nameFull || t.schoolName || '';
+    });
+  } catch (err) {
+    console.warn(`Failed to load team names for event ${eventCode}:`, err);
+  }
+  return map;
+}
+
+// ====== Attach .teamName to each doc (in place) using a {teamNumber: name}
+// map built by getEventTeamNameMap() — neither pit nor match scouting docs
+// store a team name themselves (only teamNumber), so every export path needs
+// this before building sheet rows. Returns docs for convenient chaining. ======
+function attachTeamNames(docs, nameMap) {
+  docs.forEach(doc => {
+    doc.teamName = nameMap[Number(doc.teamNumber)] || '';
+  });
+  return docs;
 }
 
 // ====== Read-only form config loaders ======
@@ -392,9 +431,44 @@ function downloadMatchOnlyWorkbook(filename, matchFields, matchDocs) {
   XLSX.writeFile(wb, filename);
 }
 
+// ====== Create a spreadsheet with just a Pit Scouting tab — pit-only
+// counterpart to exportMatchOnlyToNewSpreadsheet() above, used by the Pit
+// Scouting tab's "Export All Pit Data" button and per-row export button. ======
+async function exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs) {
+  const createResp = await createSpreadsheet(title, ['Pit Scouting']);
+  const spreadsheetId = createResp.spreadsheetId;
+
+  const pitRows = buildPitSheetRows(pitFields, pitDocs);
+  await writeSheetValues(spreadsheetId, 'Pit Scouting', pitRows);
+
+  return createResp.spreadsheetUrl;
+}
+
+// ====== Build & download a single-tab .xlsx workbook — pit-only counterpart
+// to downloadMatchOnlyWorkbook() above. ======
+function downloadPitOnlyWorkbook(filename, pitFields, pitDocs) {
+  if (typeof XLSX === 'undefined') {
+    throw new Error('Excel export library failed to load. Check your connection and try again.');
+  }
+
+  const pitRows = buildPitSheetRows(pitFields, pitDocs);
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
+  XLSX.writeFile(wb, filename);
+}
+
 // ====== Filesystem-safe filename (team/event names can contain characters like / or :) ======
 function sanitizeFilename(name) {
   return String(name).replace(/[\\/:*?"<>|]/g, '-');
+}
+
+// ====== "Team {number} - {name}" (or just "Team {number}" if no name
+// resolved, e.g. an uncached event) — shared by every single-team export's
+// filename AND its matching Sheets title, so both consistently show the name
+// alongside the bare number rather than just the number. ======
+function teamLabel(teamNumber, teamName) {
+  return teamName ? `Team ${teamNumber} - ${teamName}` : `Team ${teamNumber}`;
 }
 
 // ====== Gather a single team's pit + match scouting data for the selected event ======
@@ -417,6 +491,10 @@ async function gatherTeamExportData(teamNumber, eventCode, teamId) {
     .filter(d => Number(d.teamNumber) === Number(teamNumber))
     .sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
 
+  const nameMap = await getEventTeamNameMap(eventCode);
+  attachTeamNames(pitDocs, nameMap);
+  attachTeamNames(matchDocs, nameMap);
+
   return { pitFields, matchFields, pitDocs, matchDocs };
 }
 
@@ -430,7 +508,23 @@ async function gatherTeamMatchExportData(teamNumber, eventCode, teamId) {
     .filter(d => Number(d.teamNumber) === Number(teamNumber))
     .sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
 
+  attachTeamNames(matchDocs, await getEventTeamNameMap(eventCode));
+
   return { matchFields, matchDocs };
+}
+
+// ====== Gather a single team's PIT-ONLY scouting data (no match) for the
+// selected event — used by the Pit Scouting tab's per-row export button. ======
+async function gatherTeamPitOnlyExportData(teamNumber, eventCode, teamId) {
+  const pitFields = await loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS);
+
+  const pitEntry = await withStep('Reading pit scouting data', () =>
+    findExistingPitDoc(teamId, eventCode, teamNumber));
+  const pitDocs = pitEntry ? [pitEntry] : [];
+
+  attachTeamNames(pitDocs, await getEventTeamNameMap(eventCode));
+
+  return { pitFields, pitDocs };
 }
 
 // ====== Gather every team's pit + match scouting data for the selected event ======
@@ -450,7 +544,40 @@ async function gatherEventExportData(eventCode, teamId) {
   const matchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode, teamId));
   matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
 
+  const nameMap = await getEventTeamNameMap(eventCode);
+  attachTeamNames(pitDocs, nameMap);
+  attachTeamNames(matchDocs, nameMap);
+
   return { pitFields, matchFields, pitDocs, matchDocs };
+}
+
+// ====== Gather every team's PIT-ONLY scouting data for the selected event —
+// used by the Pit Scouting tab's "Export All Pit Data" button. ======
+async function gatherEventPitOnlyExportData(eventCode, teamId) {
+  const pitFields = await loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS);
+
+  const pitSnap = await withStep('Reading pit scouting data',
+    () => db.collection('pitScouting').where('eventCode', '==', eventCode).where('teamId', '==', teamId).get());
+  const pitDocs = [];
+  pitSnap.forEach(doc => pitDocs.push({ id: doc.id, ...doc.data() }));
+  pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+
+  attachTeamNames(pitDocs, await getEventTeamNameMap(eventCode));
+
+  return { pitFields, pitDocs };
+}
+
+// ====== Gather every team's MATCH-ONLY scouting data for the selected event —
+// used by the Match Scouting tab's "Export All Match Data" button. ======
+async function gatherEventMatchOnlyExportData(eventCode, teamId) {
+  const matchFields = await loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS);
+
+  const matchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode, teamId));
+  matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
+
+  attachTeamNames(matchDocs, await getEventTeamNameMap(eventCode));
+
+  return { matchFields, matchDocs };
 }
 
 // ====== Gather EVERY pit/match scouting doc this team has ever recorded, for
@@ -489,11 +616,18 @@ async function gatherFullTeamExportData(teamId) {
   });
 
   const eventCodes = Object.keys(byEvent).sort();
-  eventCodes.forEach(eventCode => {
+  // A for..of (not forEach) since each event's team-name lookup is async, and
+  // different events can have different rosters — one map per event, not one
+  // shared map, unlike the single-event gather functions above.
+  for (const eventCode of eventCodes) {
     const bucket = byEvent[eventCode];
     bucket.pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
     bucket.matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
-  });
+
+    const nameMap = await getEventTeamNameMap(eventCode);
+    attachTeamNames(bucket.pitDocs, nameMap);
+    attachTeamNames(bucket.matchDocs, nameMap);
+  }
 
   return { pitFields, matchFields, eventCodes, byEvent };
 }
@@ -545,6 +679,35 @@ function clearStatusMessage(prefix) {
   if (okEl) okEl.textContent = '';
 }
 
+// ====== Gather data and check for emptiness BEFORE showing the Excel/Sheets
+// choice modal at all. Without this, clicking an export button with no data
+// still opened the format-choice modal, and picking Sheets went all the way
+// through the Google OAuth prompt before finally reporting "no data found" —
+// both now short-circuit into an inline message here instead. Every export
+// entry point's own handleXClick()/handleXExcelClick() still gathers its own
+// data again once actually invoked (kept deliberately unchanged/self-
+// contained) — this only decides whether the modal opens at all, at the cost
+// of one extra (small, already-permitted) read when there IS data. Returns
+// true if the modal should proceed to open, false if it already showed the
+// empty-state message (or an error) and the caller should stop. ======
+async function precheckExportData(statusPrefix, gatherFn, isEmptyFn, emptyMessage) {
+  showLoading('Checking for scouting data...');
+  try {
+    const result = await gatherFn();
+    hideLoading();
+    if (isEmptyFn(result)) {
+      setStatusMessage(statusPrefix, 'success', emptyMessage);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    hideLoading();
+    console.error('Export precheck failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Failed to check for scouting data. Please try again.');
+    return false;
+  }
+}
+
 // ====== Export a single team's pit + match scouting data for the selected event ======
 async function handleExportTeamClick(statusPrefix) {
   setStatusMessage(statusPrefix, 'error', '');
@@ -571,7 +734,8 @@ async function handleExportTeamClick(statusPrefix) {
     const { pitFields, matchFields, pitDocs, matchDocs } = await gatherTeamExportData(teamNumber, eventCode, teamId);
 
     showLoading('Creating Google Sheet...');
-    const title = `Team ${teamNumber} Scouting — ${selectedEvent?.name || eventCode}`;
+    const teamName = pitDocs[0]?.teamName || matchDocs[0]?.teamName || '';
+    const title = `${teamLabel(teamNumber, teamName)} Scouting — ${selectedEvent?.name || eventCode}`;
     const { spreadsheetUrl } = await withStep('Creating/writing Google Sheet', () =>
       exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs));
 
@@ -611,7 +775,8 @@ async function handleExportTeamExcelClick(statusPrefix) {
   try {
     const { pitFields, matchFields, pitDocs, matchDocs } = await gatherTeamExportData(teamNumber, eventCode, teamId);
 
-    const filename = sanitizeFilename(`Team ${teamNumber} Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
+    const teamName = pitDocs[0]?.teamName || matchDocs[0]?.teamName || '';
+    const filename = sanitizeFilename(`${teamLabel(teamNumber, teamName)} Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
     downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
 
     hideLoading();
@@ -654,7 +819,7 @@ async function handleExportTeamMatchOnlyClick(statusPrefix) {
     const { matchFields, matchDocs } = await gatherTeamMatchExportData(teamNumber, eventCode, teamId);
 
     showLoading('Creating Google Sheet...');
-    const title = `Team ${teamNumber} Match Scouting — ${selectedEvent?.name || eventCode}`;
+    const title = `${teamLabel(teamNumber, matchDocs[0]?.teamName || '')} Match Scouting — ${selectedEvent?.name || eventCode}`;
     const url = await withStep('Creating/writing Google Sheet', () =>
       exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs));
 
@@ -693,7 +858,7 @@ async function handleExportTeamMatchOnlyExcelClick(statusPrefix) {
   try {
     const { matchFields, matchDocs } = await gatherTeamMatchExportData(teamNumber, eventCode, teamId);
 
-    const filename = sanitizeFilename(`Team ${teamNumber} Match Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
+    const filename = sanitizeFilename(`${teamLabel(teamNumber, matchDocs[0]?.teamName || '')} Match Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
     downloadMatchOnlyWorkbook(filename, matchFields, matchDocs);
 
     hideLoading();
@@ -705,6 +870,108 @@ async function handleExportTeamMatchOnlyExcelClick(statusPrefix) {
     console.error('Match-only Excel export failed:', err);
     setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
   }
+}
+
+// ====== Export one team's PIT-ONLY entry — used by the Pit Scouting tab's
+// per-row export button. Unlike handleExportTeamMatchOnlyClick() above (which
+// reads currentMatchScoutedTeamNumber/EventCode, set when the "View Matches
+// Scouted" modal opens), there's no modal here to hold "currently showing"
+// state — many rows can exist at once — so teamNumber/eventCode/teamId are
+// passed explicitly instead. ======
+async function handleExportTeamPitOnlyClick(teamNumber, eventCode, teamId, statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  if (!teamNumber || !eventCode || !teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Select a team and event first.');
+    return;
+  }
+
+  showLoading('Waiting for Google authorization...');
+  try {
+    await getGoogleAccessToken();
+
+    showLoading('Gathering scouting data...');
+    const { pitFields, pitDocs } = await gatherTeamPitOnlyExportData(teamNumber, eventCode, teamId);
+
+    showLoading('Creating Google Sheet...');
+    const title = `${teamLabel(teamNumber, pitDocs[0]?.teamName || '')} Pit Data — ${selectedEvent?.name || eventCode}`;
+    const url = await withStep('Creating/writing Google Sheet', () =>
+      exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs));
+
+    hideLoading();
+    // Includes the team number in the message since this status line is
+    // shared with the tab's "Export All Pit Data" button (event-export-pit),
+    // away from whichever row was actually clicked.
+    setStatusMessage(statusPrefix, 'success', pitDocs.length === 0
+      ? `No pit scouting data found for Team #${teamNumber} yet — created an empty sheet.`
+      : `Export complete for Team #${teamNumber}! Opening sheet...`);
+    window.open(url, '_blank');
+  } catch (err) {
+    hideLoading();
+    console.error('Team pit-only sheets export failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Download one team's PIT-ONLY entry as an .xlsx file — Excel
+// counterpart to handleExportTeamPitOnlyClick() above. ======
+async function handleExportTeamPitOnlyExcelClick(teamNumber, eventCode, teamId, statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  if (!teamNumber || !eventCode || !teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Select a team and event first.');
+    return;
+  }
+
+  showLoading('Gathering scouting data...');
+  try {
+    const { pitFields, pitDocs } = await gatherTeamPitOnlyExportData(teamNumber, eventCode, teamId);
+
+    const filename = sanitizeFilename(`${teamLabel(teamNumber, pitDocs[0]?.teamName || '')} Pit Data - ${selectedEvent?.name || eventCode}.xlsx`);
+    downloadPitOnlyWorkbook(filename, pitFields, pitDocs);
+
+    hideLoading();
+    setStatusMessage(statusPrefix, 'success', pitDocs.length === 0
+      ? `No pit scouting data found for Team #${teamNumber} yet — downloaded an empty workbook.`
+      : `Excel file downloaded for Team #${teamNumber}!`);
+  } catch (err) {
+    hideLoading();
+    console.error('Team pit-only Excel export failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Open the shared export-choice modal for a single team's pit-only
+// export, binding teamNumber/eventCode/teamId in via closures — called from
+// the Pit Scouting tab row's export button (first-api.js), same closure
+// pattern as openWholeTeamExportChoice() below. Prechecks for data first
+// (precheckExportData()) so an unscouted team shows the inline "nothing
+// found" message immediately, with no format-choice popup at all. ======
+async function openTeamPitExportChoice(teamNumber, eventCode, teamId, statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  if (!teamNumber || !eventCode || !teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Select a team and event first.');
+    return;
+  }
+
+  const hasData = await precheckExportData(
+    statusPrefix,
+    () => gatherTeamPitOnlyExportData(teamNumber, eventCode, teamId),
+    (r) => r.pitDocs.length === 0,
+    `No pit scouting data found for Team #${teamNumber} yet.`
+  );
+  if (!hasData) return;
+
+  openExportChoiceModal({
+    title: `Export Pit Data — Team #${teamNumber}`,
+    statusPrefix,
+    excelHandler: (prefix) => handleExportTeamPitOnlyExcelClick(teamNumber, eventCode, teamId, prefix),
+    sheetsHandler: (prefix) => handleExportTeamPitOnlyClick(teamNumber, eventCode, teamId, prefix)
+  });
 }
 
 // ====== Export every team's pit + match scouting data for the selected event ======
@@ -781,6 +1048,162 @@ async function handleExportEventExcelClick(statusPrefix) {
   } catch (err) {
     hideLoading();
     console.error('Event Excel export failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Export every team's PIT-ONLY scouting data for the selected event —
+// used by the Pit Scouting tab's "Export All Pit Data" button. ======
+async function handleExportEventPitOnlyClick(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  showLoading('Waiting for Google authorization...');
+  try {
+    await getGoogleAccessToken();
+
+    showLoading('Gathering scouting data...');
+    const { pitFields, pitDocs } = await gatherEventPitOnlyExportData(eventCode, teamId);
+
+    showLoading('Creating Google Sheet...');
+    const title = `${selectedEvent?.name || eventCode} — All Teams Pit Data`;
+    const url = await withStep('Creating/writing Google Sheet', () =>
+      exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs));
+
+    hideLoading();
+    setStatusMessage(statusPrefix, 'success', pitDocs.length === 0
+      ? 'No pit scouting data found for this event yet — created an empty sheet.'
+      : 'Export complete! Opening sheet...');
+    window.open(url, '_blank');
+  } catch (err) {
+    hideLoading();
+    console.error('Event pit-only sheets export failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Download every team's PIT-ONLY scouting data for the event as one
+// .xlsx file — Excel counterpart to handleExportEventPitOnlyClick() above. ======
+async function handleExportEventPitOnlyExcelClick(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  showLoading('Gathering scouting data...');
+  try {
+    const { pitFields, pitDocs } = await gatherEventPitOnlyExportData(eventCode, teamId);
+
+    const filename = sanitizeFilename(`${selectedEvent?.name || eventCode} - All Teams Pit Data.xlsx`);
+    downloadPitOnlyWorkbook(filename, pitFields, pitDocs);
+
+    hideLoading();
+    setStatusMessage(statusPrefix, 'success', pitDocs.length === 0
+      ? 'No pit scouting data found for this event yet — downloaded an empty workbook.'
+      : 'Excel file downloaded!');
+  } catch (err) {
+    hideLoading();
+    console.error('Event pit-only Excel export failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Export every team's MATCH-ONLY scouting data for the selected event —
+// used by the Match Scouting tab's "Export All Match Data" button. ======
+async function handleExportEventMatchOnlyClick(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  showLoading('Waiting for Google authorization...');
+  try {
+    await getGoogleAccessToken();
+
+    showLoading('Gathering scouting data...');
+    const { matchFields, matchDocs } = await gatherEventMatchOnlyExportData(eventCode, teamId);
+
+    showLoading('Creating Google Sheet...');
+    const title = `${selectedEvent?.name || eventCode} — All Teams Match Data`;
+    const url = await withStep('Creating/writing Google Sheet', () =>
+      exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs));
+
+    hideLoading();
+    setStatusMessage(statusPrefix, 'success', matchDocs.length === 0
+      ? 'No match scouting data found for this event yet — created an empty sheet.'
+      : 'Export complete! Opening sheet...');
+    window.open(url, '_blank');
+  } catch (err) {
+    hideLoading();
+    console.error('Event match-only sheets export failed:', err);
+    setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
+  }
+}
+
+// ====== Download every team's MATCH-ONLY scouting data for the event as one
+// .xlsx file — Excel counterpart to handleExportEventMatchOnlyClick() above. ======
+async function handleExportEventMatchOnlyExcelClick(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  showLoading('Gathering scouting data...');
+  try {
+    const { matchFields, matchDocs } = await gatherEventMatchOnlyExportData(eventCode, teamId);
+
+    const filename = sanitizeFilename(`${selectedEvent?.name || eventCode} - All Teams Match Data.xlsx`);
+    downloadMatchOnlyWorkbook(filename, matchFields, matchDocs);
+
+    hideLoading();
+    setStatusMessage(statusPrefix, 'success', matchDocs.length === 0
+      ? 'No match scouting data found for this event yet — downloaded an empty workbook.'
+      : 'Excel file downloaded!');
+  } catch (err) {
+    hideLoading();
+    console.error('Event match-only Excel export failed:', err);
     setStatusMessage(statusPrefix, 'error', err.message || 'Export failed. Please try again.');
   }
 }
@@ -907,12 +1330,204 @@ async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix) 
 // modal's sole-owner-team buttons (delete-account.js). statusPrefix must be
 // unique per caller (elements `${statusPrefix}-error`/`-success` must exist
 // in the DOM) since delete-account can show buttons for multiple teams at once. ======
-function openWholeTeamExportChoice(teamId, teamName, statusPrefix) {
+async function openWholeTeamExportChoice(teamId, teamName, statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please try again.');
+    return;
+  }
+
+  const hasData = await precheckExportData(
+    statusPrefix,
+    () => gatherFullTeamExportData(teamId),
+    (r) => r.eventCodes.length === 0,
+    'No scouting data found for this team — nothing to export.'
+  );
+  if (!hasData) return;
+
   openExportChoiceModal({
     title: 'Export Whole Team Data',
     statusPrefix,
     excelHandler: (prefix) => handleExportWholeTeamExcelClick(teamId, teamName, prefix),
     sheetsHandler: (prefix) => handleExportWholeTeamSheetsClick(teamId, teamName, prefix)
+  });
+}
+
+// ====== Open the shared export-choice modal for a single team's pit + match
+// export (Team Detail's "Export Pit + Match Data" button) — prechecks for
+// data first via precheckExportData(). ======
+async function openTeamExportChoice(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const teamNumber = currentSelectedTeamNumber;
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!teamNumber || !eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select a team and event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  const hasData = await precheckExportData(
+    statusPrefix,
+    () => gatherTeamExportData(teamNumber, eventCode, teamId),
+    (r) => r.pitDocs.length === 0 && r.matchDocs.length === 0,
+    'No scouting data found for this team yet.'
+  );
+  if (!hasData) return;
+
+  openExportChoiceModal({
+    title: 'Export Pit + Match Data',
+    statusPrefix,
+    sheetsHandler: handleExportTeamClick,
+    excelHandler: handleExportTeamExcelClick
+  });
+}
+
+// ====== Open the shared export-choice modal for "View Matches Scouted"'s
+// match-only export — prechecks for data first via precheckExportData(). ======
+async function openTeamMatchOnlyExportChoice(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const teamNumber = currentMatchScoutedTeamNumber;
+  const eventCode = currentMatchScoutedEventCode;
+  const teamId = currentTeamData?.id;
+
+  if (!teamNumber || !eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select a team and event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  const hasData = await precheckExportData(
+    statusPrefix,
+    () => gatherTeamMatchExportData(teamNumber, eventCode, teamId),
+    (r) => r.matchDocs.length === 0,
+    'No match scouting data found for this team yet.'
+  );
+  if (!hasData) return;
+
+  openExportChoiceModal({
+    title: 'Export Match Data',
+    statusPrefix,
+    sheetsHandler: handleExportTeamMatchOnlyClick,
+    excelHandler: handleExportTeamMatchOnlyExcelClick
+  });
+}
+
+// ====== Open the shared export-choice modal for the event-wide pit + match
+// export (Scouting tab's "Export Pit + Match Data (All Teams)" button) —
+// prechecks for data first via precheckExportData(). ======
+async function openEventExportChoice(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  const hasData = await precheckExportData(
+    statusPrefix,
+    () => gatherEventExportData(eventCode, teamId),
+    (r) => r.pitDocs.length === 0 && r.matchDocs.length === 0,
+    'No scouting data found for this event yet.'
+  );
+  if (!hasData) return;
+
+  openExportChoiceModal({
+    title: 'Export Pit + Match Data',
+    statusPrefix,
+    sheetsHandler: handleExportEventClick,
+    excelHandler: handleExportEventExcelClick
+  });
+}
+
+// ====== Open the shared export-choice modal for the Pit Scouting tab's
+// "Export All Pit Data" button (event-wide, pit-only) — prechecks for data
+// first via precheckExportData(). ======
+async function openEventPitExportChoice(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  const hasData = await precheckExportData(
+    statusPrefix,
+    () => gatherEventPitOnlyExportData(eventCode, teamId),
+    (r) => r.pitDocs.length === 0,
+    'No pit scouting data found for this event yet.'
+  );
+  if (!hasData) return;
+
+  openExportChoiceModal({
+    title: 'Export Pit Data',
+    statusPrefix,
+    sheetsHandler: handleExportEventPitOnlyClick,
+    excelHandler: handleExportEventPitOnlyExcelClick
+  });
+}
+
+// ====== Open the shared export-choice modal for the Match Scouting tab's
+// "Export All Match Data" button (event-wide, match-only) — prechecks for
+// data first via precheckExportData(). ======
+async function openEventMatchOnlyExportChoice(statusPrefix) {
+  setStatusMessage(statusPrefix, 'error', '');
+  setStatusMessage(statusPrefix, 'success', '');
+
+  const eventCode = selectedEvent?.code;
+  const teamId = currentTeamData?.id;
+
+  if (!eventCode) {
+    setStatusMessage(statusPrefix, 'error', 'Select an event first.');
+    return;
+  }
+  if (!teamId) {
+    setStatusMessage(statusPrefix, 'error', 'Team data not loaded. Please rejoin your team.');
+    return;
+  }
+
+  const hasData = await precheckExportData(
+    statusPrefix,
+    () => gatherEventMatchOnlyExportData(eventCode, teamId),
+    (r) => r.matchDocs.length === 0,
+    'No match scouting data found for this event yet.'
+  );
+  if (!hasData) return;
+
+  openExportChoiceModal({
+    title: 'Export Match Data',
+    statusPrefix,
+    sheetsHandler: handleExportEventMatchOnlyClick,
+    excelHandler: handleExportEventMatchOnlyExcelClick
   });
 }
 
@@ -941,39 +1556,45 @@ function closeExportChoiceModal() {
 document.addEventListener('DOMContentLoaded', () => {
   const btnMatch = document.getElementById('td-export-team-match');
   if (btnMatch) {
-    btnMatch.addEventListener('click', () => {
-      openExportChoiceModal({
-        title: 'Export Pit + Match Data',
-        statusPrefix: 'td-export-match',
-        sheetsHandler: handleExportTeamClick,
-        excelHandler: handleExportTeamExcelClick
-      });
-    });
+    btnMatch.addEventListener('click', () => openTeamExportChoice('td-export-match'));
   }
 
   // "View Matches Scouted" modal's export button — match entries only, no
   // pit-scouting sheet/tab, for whichever team that modal currently shows.
   const btnMsmMatch = document.getElementById('msm-export-team-match');
   if (btnMsmMatch) {
-    btnMsmMatch.addEventListener('click', () => {
-      openExportChoiceModal({
-        title: 'Export Match Data',
-        statusPrefix: 'msm-export-match',
-        sheetsHandler: handleExportTeamMatchOnlyClick,
-        excelHandler: handleExportTeamMatchOnlyExcelClick
-      });
-    });
+    btnMsmMatch.addEventListener('click', () => openTeamMatchOnlyExportChoice('msm-export-match'));
   }
 
   const btnEvent = document.getElementById('btn-export-event-sheets');
   if (btnEvent) {
-    btnEvent.addEventListener('click', () => {
-      openExportChoiceModal({
-        title: 'Export Pit + Match Data',
-        statusPrefix: 'event-export',
-        sheetsHandler: handleExportEventClick,
-        excelHandler: handleExportEventExcelClick
-      });
+    btnEvent.addEventListener('click', () => openEventExportChoice('event-export'));
+  }
+
+  // Pit Scouting tab's "Export All Pit Data" button — event-wide, pit-only.
+  const btnEventPit = document.getElementById('btn-export-event-pit');
+  if (btnEventPit) {
+    btnEventPit.addEventListener('click', () => openEventPitExportChoice('event-export-pit'));
+  }
+
+  // Match Scouting tab's "Export All Match Data" button — event-wide, match-only.
+  const btnEventMatch = document.getElementById('btn-export-event-match');
+  if (btnEventMatch) {
+    btnEventMatch.addEventListener('click', () => openEventMatchOnlyExportChoice('event-export-match'));
+  }
+
+  // My Team tab's standalone "Export Team Data" button — reuses the exact
+  // same whole-team-history gather/export flow as the Leave Team/Delete
+  // Account "Export Whole Team Data" buttons (openWholeTeamExportChoice(),
+  // which already prechecks for data), just without any leave/delete
+  // confirmation wrapped around it — visible any time, not gated on being
+  // the team's last member.
+  const btnMyTeamExport = document.getElementById('btn-myteam-export');
+  if (btnMyTeamExport) {
+    btnMyTeamExport.addEventListener('click', () => {
+      if (typeof openWholeTeamExportChoice === 'function') {
+        openWholeTeamExportChoice(currentTeamId, currentTeamData?.name, 'myteam-export');
+      }
     });
   }
 

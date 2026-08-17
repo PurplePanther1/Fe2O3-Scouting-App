@@ -971,6 +971,30 @@ function renderPitTeamList(teams) {
 
     btnGroup.appendChild(scoutBtn);
 
+    // Export this team's single pit entry — no "view" modal (unlike Match
+    // Scouting's "View Matches Scouted"), since pit scouting is one entry per
+    // team, not a list; the existing scoutBtn above already shows/edits it.
+    // Opens the shared export-choice modal directly via
+    // openTeamPitExportChoice() (sheets-export.js), reusing the same
+    // single-team pit-only gather/export functions "Export All Pit Data"
+    // uses — always shown (not conditional on scouted status), consistent
+    // with how export buttons elsewhere just report "nothing found" rather
+    // than disappearing.
+    const exportBtn = document.createElement('button');
+    exportBtn.className = 'btn btn-small btn-outline';
+    exportBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
+    exportBtn.textContent = '📤';
+    exportBtn.title = 'Export Pit Data';
+    exportBtn.setAttribute('aria-label', 'Export Pit Data');
+    exportBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (selectedEvent?.code && currentTeamData?.id && typeof openTeamPitExportChoice === 'function') {
+        openTeamPitExportChoice(team.teamNumber, selectedEvent.code, currentTeamData.id, 'event-export-pit');
+      }
+    });
+
+    btnGroup.appendChild(exportBtn);
+
     topRow.appendChild(leftGroup);
     topRow.appendChild(btnGroup);
     item.appendChild(topRow);
