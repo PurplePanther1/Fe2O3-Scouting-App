@@ -277,6 +277,11 @@
                 <option value="opr">Sort: OPR (high-low)</option>
               </select>
             </div>
+            <div id="match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+              <button id="btn-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
+              <button id="btn-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
+              <span id="match-bulk-delete-status" style="font-size:0.8rem;"></span>
+            </div>
             <p class="help-text" id="team-list-status-match">Select an event above to load teams.</p>
             <div id="team-list-match" class="team-list"></div>
           </div>
@@ -521,7 +526,10 @@
         <div id="td-pit-data-section" style="margin-top:20px; border-top:1px solid var(--border); padding-top:16px">
           <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px">
             <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted); margin-bottom:0">PIT SCOUTING DATA</p>
-            <button id="btn-team-info-pit-scout" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Pit Scout</button>
+            <div style="display:flex; gap:6px;">
+              <button id="btn-team-info-pit-scout" class="btn btn-small btn-primary" style="font-size:0.75rem">+ Add Pit Scout</button>
+              <button id="btn-team-info-pit-delete" class="btn btn-small hidden" style="font-size:0.75rem; background:var(--error); color:#fff; border-color:var(--error);">Delete</button>
+            </div>
           </div>
           <p class="help-text" id="td-pit-data-status" style="font-size:0.8rem; margin-bottom:8px">Loading...</p>
           <div id="td-pit-data-list"></div>

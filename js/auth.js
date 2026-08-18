@@ -133,6 +133,12 @@ function refreshActiveTeamData(teamId, teamData) {
   if (typeof updatePermissionUI === 'function') {
     updatePermissionUI();
   }
+  if (typeof updatePitBulkSelectUI === 'function') {
+    updatePitBulkSelectUI();
+  }
+  if (typeof updateMatchTeamBulkSelectUI === 'function') {
+    updateMatchTeamBulkSelectUI();
+  }
   if (typeof updatePinButtonUI === 'function') {
     updatePinButtonUI();
   }

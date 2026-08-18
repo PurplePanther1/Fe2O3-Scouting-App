@@ -104,6 +104,7 @@ async function renderPitDataForTeam(teamNumber, eventCode) {
   const container = document.getElementById('td-pit-data-list');
   const status = document.getElementById('td-pit-data-status');
   const scoutBtn = document.getElementById('btn-team-info-pit-scout');
+  const deleteBtn = document.getElementById('btn-team-info-pit-delete');
   if (!container || !status) return;
 
   container.innerHTML = '';
@@ -112,6 +113,13 @@ async function renderPitDataForTeam(teamNumber, eventCode) {
   const entry = typeof getPitScoutedEntry === 'function' ? getPitScoutedEntry(teamNumber, eventCode) : null;
 
   if (scoutBtn) scoutBtn.textContent = entry ? '✓ Edit Pit Scout' : '+ Add Pit Scout';
+
+  // Only shown when there's something to delete AND this user is actually
+  // permitted to (own entry, captain, or canEditOtherEntries) — same rule
+  // firestore.rules enforces, checked here up front so the button never
+  // appears only to fail.
+  const canDelete = !!entry && (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries(entry) : false);
+  if (deleteBtn) deleteBtn.classList.toggle('hidden', !canDelete);
 
   if (!entry) {
     status.textContent = 'This team has not been pit scouted yet.';
@@ -172,6 +180,39 @@ document.addEventListener('DOMContentLoaded', () => {
     pitScoutBtn.addEventListener('click', () => {
       if (currentSelectedTeamNumber && selectedEvent?.code && typeof openPitScoutForm === 'function') {
         openPitScoutForm(currentSelectedTeamNumber, selectedEvent.code);
+      }
+    });
+  }
+
+  // Delete Pit Scout — one-click delete without opening the edit form first.
+  // Only ever visible (see renderPitDataForTeam()) when this user is
+  // actually permitted to delete this specific entry.
+  const pitDeleteBtn = document.getElementById('btn-team-info-pit-delete');
+  if (pitDeleteBtn) {
+    pitDeleteBtn.addEventListener('click', async () => {
+      const teamNumber = currentSelectedTeamNumber;
+      const eventCode = selectedEvent?.code;
+      const teamId = currentTeamData?.id;
+      if (!teamNumber || !eventCode || !teamId) return;
+
+      if (!confirm(`Delete pit scouting data for Team #${teamNumber}? This cannot be undone.`)) return;
+
+      showLoading('Deleting...');
+      try {
+        if (typeof deletePitScoutEntry === 'function') {
+          await deletePitScoutEntry(teamId, eventCode, teamNumber);
+        }
+      } catch (err) {
+        console.error('Failed to delete pit scouting data:', err);
+        alert(err.code === 'permission-denied'
+          ? 'Permission denied: you do not have permission to delete this entry.'
+          : 'Failed to delete. Please check your connection and try again.');
+      } finally {
+        hideLoading();
+      }
+
+      if (currentSelectedTeamNumber === teamNumber) {
+        renderPitDataForTeam(teamNumber, eventCode);
       }
     });
   }

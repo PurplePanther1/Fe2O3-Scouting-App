@@ -200,6 +200,24 @@ async function savePitScoutForm() {
   }
 }
 
+// ====== Core delete logic: resolve the real doc, delete it, and clean up
+// caches/UI — shared by the edit form's own Delete button (below, which
+// reads its state from whatever form is currently open) and the Team Detail
+// popup's standalone Delete button (team-info.js), which already has the
+// team/event/team-number on hand and doesn't need the form open at all. ======
+async function deletePitScoutEntry(teamId, eventCode, teamNumber) {
+  // Resolve the real doc id (regardless of which ID era it was saved
+  // under) rather than guessing — same reasoning as savePitScoutForm().
+  const existing = await findExistingPitDoc(teamId, eventCode, teamNumber);
+  if (existing) {
+    await db.collection('pitScouting').doc(existing.id).delete();
+  }
+  const cacheKey = `${eventCode}_${teamNumber}`;
+  scoutedTeamsCache.delete(cacheKey);
+  pitScoutedEntriesCache.delete(cacheKey);
+  refreshTeamListScoutedState();
+}
+
 // ====== Delete pit scouting data ======
 async function deletePitScoutData() {
   const errorEl = document.getElementById('pit-modal-error');
@@ -215,21 +233,12 @@ async function deletePitScoutData() {
     return;
   }
 
-  if (!confirm(`Delete pit scouting data for Team #${currentPitTeamNumber}?`)) return;
+  if (!confirm(`Delete pit scouting data for Team #${currentPitTeamNumber}? This cannot be undone.`)) return;
 
   showLoading('Deleting...');
   try {
-    // Resolve the real doc id (regardless of which ID era it was saved
-    // under) rather than guessing — same reasoning as savePitScoutForm().
-    const existing = await findExistingPitDoc(teamId, currentPitEventCode, currentPitTeamNumber);
-    if (existing) {
-      await db.collection('pitScouting').doc(existing.id).delete();
-    }
+    await deletePitScoutEntry(teamId, currentPitEventCode, currentPitTeamNumber);
     hideLoading();
-    const cacheKey = `${currentPitEventCode}_${currentPitTeamNumber}`;
-    scoutedTeamsCache.delete(cacheKey);
-    pitScoutedEntriesCache.delete(cacheKey);
-    refreshTeamListScoutedState();
     successEl.textContent = 'Data deleted.';
     setTimeout(() => {
       closePitScoutForm();

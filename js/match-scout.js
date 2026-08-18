@@ -316,7 +316,7 @@ async function deleteMatchScoutData() {
 
   if (!currentMatchDocId) return;
 
-  if (!confirm(`Delete this match scouting entry?`)) return;
+  if (!confirm(`Delete this match scouting entry for Team #${currentMatchTeamNumber}? This cannot be undone.`)) return;
 
   showLoading('Deleting...');
   try {
@@ -396,6 +396,29 @@ function watchMatchScoutStatus(eventCode) {
 function getMatchEntriesForTeam(teamNumber, eventCode) {
   const key = `${eventCode}_${teamNumber}`;
   return matchEntriesCache[key] || [];
+}
+
+// ====== Refresh match count on existing team list items ======
+// Mirrors refreshTeamListScoutedState() (pit-scout.js) — an incremental DOM
+// patch over the already-rendered #team-list-match rows on save/delete/live
+// update, no full re-render. Unlike pit's binary scouted/unscouted, a team
+// can have any number of match entries, so this shows a count badge rather
+// than toggling a checkmark/row tint.
+function refreshMatchTeamListCounts() {
+  const eventCode = selectedEvent?.code;
+  if (!eventCode) return;
+
+  document.querySelectorAll('#team-list-match .team-item').forEach(item => {
+    const teamNum = item.dataset.teamNumber;
+    if (!teamNum) return;
+    const count = getMatchEntriesForTeam(teamNum, eventCode).length;
+
+    const badge = item.querySelector('.match-count-badge');
+    if (badge) {
+      badge.textContent = String(count);
+      badge.classList.toggle('hidden', count === 0);
+    }
+  });
 }
 
 // ====== Refresh match entries cache callback ======
@@ -558,9 +581,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('match-delete-btn').addEventListener('click', deleteMatchScoutData);
 
   // Set the scouted state change callback — refreshes whichever match-list
-  // panel(s) are actually open, not just the Team Detail modal's.
+  // panel(s) are actually open (not just the Team Detail modal's), plus the
+  // Match Scouting tab's own team-list counts.
   if (typeof onMatchScoutedStateChanged !== 'undefined') {
-    onMatchScoutedStateChanged = refreshOpenMatchListPanels;
+    onMatchScoutedStateChanged = () => {
+      refreshOpenMatchListPanels();
+      if (typeof refreshMatchTeamListCounts === 'function') refreshMatchTeamListCounts();
+    };
   }
 
   // Wires the search box, bulk-select toggle, and bulk delete for ONE

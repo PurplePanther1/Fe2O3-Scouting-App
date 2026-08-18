@@ -557,6 +557,41 @@ function updatePitBulkSelectUI() {
   }
 }
 
+// Bulk-select state for the Match tab (captain / canEditOtherEntries only —
+// see updateMatchTeamBulkSelectUI). Selection is by TEAM NUMBER, not doc id
+// — unlike pit (one entry per team), a team can have many match entries, so
+// deleting a selected team means deleting ALL of its entries at once
+// (gathered via getMatchEntriesForTeam() at delete time).
+let matchBulkSelectMode = false;
+let matchBulkSelectedTeamNumbers = new Set();
+
+// ====== Show/hide & label the match bulk-select toolbar based on permission and selection ======
+function updateMatchTeamBulkSelectUI() {
+  const toggleBtn = document.getElementById('btn-match-bulk-select-toggle');
+  const deleteBtn = document.getElementById('btn-match-bulk-delete');
+  if (!toggleBtn || !deleteBtn) return;
+
+  const canBulkManage = (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false)
+    && (typeof canUserBulkDelete === 'function' ? canUserBulkDelete() : false);
+  if (!canBulkManage) {
+    toggleBtn.classList.add('hidden');
+    deleteBtn.classList.add('hidden');
+    matchBulkSelectMode = false;
+    matchBulkSelectedTeamNumbers.clear();
+    return;
+  }
+
+  toggleBtn.classList.remove('hidden');
+  toggleBtn.textContent = matchBulkSelectMode ? 'Cancel Select' : 'Select';
+
+  if (matchBulkSelectMode && matchBulkSelectedTeamNumbers.size > 0) {
+    deleteBtn.classList.remove('hidden');
+    deleteBtn.textContent = `Delete Selected (${matchBulkSelectedTeamNumbers.size})`;
+  } else {
+    deleteBtn.classList.add('hidden');
+  }
+}
+
 // ====== Sort a team list per the shared sort mode (number is the default, matching prior behavior) ======
 function sortTeams(teams) {
   const sorted = [...teams];
@@ -664,6 +699,72 @@ document.addEventListener('DOMContentLoaded', () => {
       if (currentEventTeams && currentEventTeams.length > 0) {
         renderPitTeamList(currentEventTeams);
         applyTeamSearchFilter(currentTeamSearchQuery);
+      }
+    });
+  }
+
+  // Match bulk-select toggle
+  const matchBulkToggleBtn = document.getElementById('btn-match-bulk-select-toggle');
+  if (matchBulkToggleBtn) {
+    matchBulkToggleBtn.addEventListener('click', () => {
+      matchBulkSelectMode = !matchBulkSelectMode;
+      matchBulkSelectedTeamNumbers.clear();
+      if (currentEventTeams && currentEventTeams.length > 0) {
+        renderMatchTeamList(currentEventTeams);
+        applyTeamSearchFilter(currentTeamSearchQuery);
+      } else {
+        updateMatchTeamBulkSelectUI();
+      }
+    });
+  }
+
+  // Match bulk delete — deletes ALL match entries for every selected team
+  // (not one doc per team, since match has many entries per team).
+  const matchBulkDeleteBtn = document.getElementById('btn-match-bulk-delete');
+  if (matchBulkDeleteBtn) {
+    matchBulkDeleteBtn.addEventListener('click', async () => {
+      const teamNumbers = [...matchBulkSelectedTeamNumbers];
+      if (teamNumbers.length === 0) return;
+
+      const eventCode = selectedEvent?.code;
+      const allEntryIds = (eventCode && typeof getMatchEntriesForTeam === 'function')
+        ? teamNumbers.flatMap(tn => getMatchEntriesForTeam(tn, eventCode).map(e => e.id))
+        : [];
+      if (allEntryIds.length === 0) return;
+
+      if (!confirm(`Delete ALL match scouting entries for ${teamNumbers.length} team(s)? This will remove ${allEntryIds.length} total entr${allEntryIds.length === 1 ? 'y' : 'ies'}. This cannot be undone.`)) return;
+
+      showLoading('Deleting selected entries...');
+      let results = { succeeded: [], failed: [] };
+      try {
+        if (typeof bulkDeleteMatchScoutData === 'function') {
+          results = await bulkDeleteMatchScoutData(allEntryIds);
+        }
+      } finally {
+        hideLoading();
+      }
+
+      const statusEl = document.getElementById('match-bulk-delete-status');
+      if (statusEl) {
+        if (results.failed.length > 0) {
+          console.error('Bulk match delete: failed doc IDs:', results.failed);
+          statusEl.textContent = `Deleted ${results.succeeded.length} of ${allEntryIds.length} entries — ${results.failed.length} failed`;
+          statusEl.className = 'error-message';
+        } else {
+          statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
+          statusEl.className = 'success-message';
+        }
+        setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
+      }
+
+      matchBulkSelectMode = false;
+      matchBulkSelectedTeamNumbers.clear();
+      if (currentEventTeams && currentEventTeams.length > 0) {
+        renderMatchTeamList(currentEventTeams);
+        applyTeamSearchFilter(currentTeamSearchQuery);
+      }
+      if (typeof refreshMatchTeamListCounts === 'function') {
+        refreshMatchTeamListCounts();
       }
     });
   }
@@ -811,11 +912,23 @@ function renderMatchTeamList(teams) {
 
     btnGroup.appendChild(scoutBtn);
 
+    // Match entry count badge — hidden (via .hidden) when 0, filled in by
+    // refreshMatchTeamListCounts() below (initial render) and on every live
+    // update thereafter. Separate element rather than folded into the
+    // button's own text so the count reads as its own distinct signal.
+    const matchCountBadge = document.createElement('span');
+    matchCountBadge.className = 'match-count-badge hidden';
+    matchCountBadge.textContent = '0';
+    btnGroup.appendChild(matchCountBadge);
+
     // View Matches Scouted button — opens a popup showing just this team's
     // logged match entries (match-scouted-modal.js), reusing the same panel
     // as the Team Information tab's Team Detail popup.
     const viewScoutedBtn = document.createElement('button');
-    viewScoutedBtn.className = 'btn btn-small btn-outline';
+    // btn-view-matches-scouted is a style-neutral hook (no CSS rule targets it) —
+    // it just gives refreshMatchTeamListCounts() a stable selector to find this
+    // exact button, same reasoning as pit's btn-pit-quick-scout hook.
+    viewScoutedBtn.className = 'btn btn-small btn-outline btn-view-matches-scouted';
     viewScoutedBtn.style.cssText = 'width: auto; padding: 4px 8px; font-size: 0.8rem;';
     viewScoutedBtn.textContent = 'View Matches Scouted';
     viewScoutedBtn.addEventListener('click', (e) => {
@@ -827,10 +940,39 @@ function renderMatchTeamList(teams) {
 
     btnGroup.appendChild(viewScoutedBtn);
 
+    // Bulk-select checkbox — only in select mode, and only for teams that
+    // have at least one match entry (nothing to delete otherwise). Keyed by
+    // team number, not doc id — see matchBulkSelectedTeamNumbers comment.
+    const teamHasMatchEntries = (selectedEvent?.code && typeof getMatchEntriesForTeam === 'function')
+      ? getMatchEntriesForTeam(team.teamNumber, selectedEvent.code).length > 0
+      : false;
+    if (matchBulkSelectMode && teamHasMatchEntries) {
+      const teamKey = String(team.teamNumber);
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.style.cssText = 'width:18px; height:18px; flex-shrink:0; cursor:pointer;';
+      checkbox.checked = matchBulkSelectedTeamNumbers.has(teamKey);
+      checkbox.addEventListener('change', (e) => {
+        e.stopPropagation();
+        if (checkbox.checked) {
+          matchBulkSelectedTeamNumbers.add(teamKey);
+        } else {
+          matchBulkSelectedTeamNumbers.delete(teamKey);
+        }
+        updateMatchTeamBulkSelectUI();
+      });
+      leftGroup.insertBefore(checkbox, leftGroup.firstChild);
+    }
+
     item.appendChild(leftGroup);
     item.appendChild(btnGroup);
     container.appendChild(item);
   });
+
+  if (typeof refreshMatchTeamListCounts === 'function') {
+    refreshMatchTeamListCounts();
+  }
+  updateMatchTeamBulkSelectUI();
   console.timeEnd('[Timing] renderMatchTeamList');
 }
 
