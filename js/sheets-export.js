@@ -536,7 +536,7 @@ async function gatherEventExportData(eventCode, teamId) {
   ]);
 
   const pitSnap = await withStep('Reading pit scouting data',
-    () => db.collection('pitScouting').where('eventCode', '==', eventCode).where('teamId', '==', teamId).get());
+    () => db.collection('teams').doc(teamId).collection('pitScouting').where('eventCode', '==', eventCode).get());
   const pitDocs = [];
   pitSnap.forEach(doc => pitDocs.push({ id: doc.id, ...doc.data() }));
   pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
@@ -557,7 +557,7 @@ async function gatherEventPitOnlyExportData(eventCode, teamId) {
   const pitFields = await loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS);
 
   const pitSnap = await withStep('Reading pit scouting data',
-    () => db.collection('pitScouting').where('eventCode', '==', eventCode).where('teamId', '==', teamId).get());
+    () => db.collection('teams').doc(teamId).collection('pitScouting').where('eventCode', '==', eventCode).get());
   const pitDocs = [];
   pitSnap.forEach(doc => pitDocs.push({ id: doc.id, ...doc.data() }));
   pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
@@ -582,11 +582,13 @@ async function gatherEventMatchOnlyExportData(eventCode, teamId) {
 
 // ====== Gather EVERY pit/match scouting doc this team has ever recorded, for
 // ANY event — not just the currently selected one. Same unfiltered-by-event
-// teamId query deleteAllScoutingEntriesForTeam() (delete-account.js) already
-// uses when a team is deleted, which firestore.rules' teamId-pinned where()
-// clause already permits (no rule change needed). Grouped client-side by
-// eventCode. Used only by the "Export Whole Team Data" flow, right before a
-// team's data is permanently deleted (leaving/deleting as its last member). ======
+// query deleteAllScoutingEntriesForTeam() (delete-account.js) already uses
+// when a team is deleted — an unfiltered read of the teams/{teamId}/pitScouting
+// subcollection for pit, and the same teamId-pinned where() clause as before
+// for the still-flat matchScouting (which firestore.rules' rule already
+// permits — no rule change needed there). Grouped client-side by eventCode.
+// Used only by the "Export Whole Team Data" flow, right before a team's data
+// is permanently deleted (leaving/deleting as its last member). ======
 async function gatherFullTeamExportData(teamId) {
   const [pitFields, matchFields] = await Promise.all([
     loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
@@ -594,7 +596,7 @@ async function gatherFullTeamExportData(teamId) {
   ]);
 
   const pitSnap = await withStep('Reading all pit scouting data',
-    () => db.collection('pitScouting').where('teamId', '==', teamId).get());
+    () => db.collection('teams').doc(teamId).collection('pitScouting').get());
   const matchSnap = await withStep('Reading all match scouting data',
     () => db.collection('matchScouting').where('teamId', '==', teamId).get());
 

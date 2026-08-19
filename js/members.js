@@ -1216,19 +1216,24 @@ document.addEventListener('DOMContentLoaded', () => {
 // version: a failure on one document is logged and skipped rather than
 // aborting the rest. ======
 async function anonymizeKickedMembersScoutingEntries(teamId, targetUid) {
-  const collections = ['pitScouting', 'matchScouting'];
   const fieldPairs = [
     { queryField: 'scoutedBy', nameField: 'scoutedByName' },
     { queryField: 'lastEditedBy', nameField: 'lastEditedByName' }
   ];
 
-  for (const collectionName of collections) {
+  // pitScouting is now a teams/{teamId}/pitScouting subcollection, scoped by
+  // path — no teamId where() clause needed. matchScouting is still the flat
+  // top-level collection and still needs one — see anonymizeOwnScoutingEntries()
+  // (delete-account.js) for the fuller reasoning, same pattern here.
+  const collections = [
+    { name: 'pitScouting', baseQuery: db.collection('teams').doc(teamId).collection('pitScouting') },
+    { name: 'matchScouting', baseQuery: db.collection('matchScouting').where('teamId', '==', teamId) }
+  ];
+
+  for (const { name, baseQuery } of collections) {
     for (const { queryField, nameField } of fieldPairs) {
       try {
-        const snap = await db.collection(collectionName)
-          .where('teamId', '==', teamId)
-          .where(queryField, '==', targetUid)
-          .get();
+        const snap = await baseQuery.where(queryField, '==', targetUid).get();
 
         const refs = [];
         snap.forEach(doc => refs.push(doc.ref));
@@ -1237,11 +1242,11 @@ async function anonymizeKickedMembersScoutingEntries(teamId, targetUid) {
           try {
             await ref.update({ [nameField]: 'Deleted User' });
           } catch (err) {
-            console.warn(`Failed to anonymize ${nameField} on ${collectionName}/${ref.id}:`, err);
+            console.warn(`Failed to anonymize ${nameField} on ${name}/${ref.id}:`, err);
           }
         }
       } catch (err) {
-        console.warn(`Failed to query ${collectionName} by ${queryField} for kicked-member anonymization:`, err);
+        console.warn(`Failed to query ${name} by ${queryField} for kicked-member anonymization:`, err);
       }
     }
   }

@@ -239,6 +239,30 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([request.auth.uid]);
       }
 
+      // Nested pit-scouting subcollection — lives alongside the flat
+      // /pitScouting/{documentId} collection below during the data-reorg
+      // migration; both rule sets are active at once so existing flat docs
+      // keep working while newly-migrated docs read/write here. teamId comes
+      // from the path itself now, not resource.data.teamId, so every
+      // permission function below is called with the trusted path segment —
+      // no dependency on a client-supplied field, and no null-resource
+      // special case is needed for that reason. The resource == null branch
+      // on read is kept anyway, purely for parity with the flat collection's
+      // rule (a nonexistent doc leaks nothing either way, so this is a no-op
+      // change in practice, not a tightening or loosening of access).
+      match /pitScouting/{documentId} {
+        allow read: if resource == null || isTeamMember(teamId);
+        allow create: if isAuth() && isTeamMember(teamId);
+        allow update: if isAuth() && (
+          (canEditOrDeleteEntry(teamId, resource.data)
+            && request.resource.data.scoutedBy == resource.data.scoutedBy)
+          || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
+          || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
+          || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
+        );
+        allow delete: if isAuth() && canEditOrDeleteEntry(teamId, resource.data);
+      }
+
       // Per-team copy of a member's email — lets THIS team's captain (or a
       // teammate granted canViewMemberEmails) see it, scoped to this team
       // specifically. Replaces the old userTeams-based cross-user pointer

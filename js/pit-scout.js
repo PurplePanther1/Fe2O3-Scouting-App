@@ -1,12 +1,17 @@
 // ====== Pit Scouting Form ======
-// Data stored in Firestore collection "pitScouting"
+// Data stored in Firestore at teams/{teamId}/pitScouting/{docId} (moved from
+// the flat top-level "pitScouting" collection as part of the data reorg —
+// matchScouting is still flat and unaffected by this move).
 // Document ID: `${teamId}_${eventCode}_${teamNumber}` — teamId (the SCOUTING
 // team's own Firestore team ID) is included specifically so two different
 // scouting teams can never collide on the same document by both happening to
-// scout the same real-world target team at the same event. Older entries
-// (saved before this existed) used `${eventCode}_${teamNumber}` — those are
-// left as-is (see findExistingPitDoc() below, which finds either era by
-// querying data fields rather than guessing an ID) rather than migrated.
+// scout the same real-world target team at the same event. Now that the
+// collection itself is scoped per-team by its path, this prefix is redundant
+// for new docs, but kept for ID-format continuity with pre-migration data.
+// Older entries (saved before this existed) used `${eventCode}_${teamNumber}`
+// — those are left as-is (see findExistingPitDoc() below, which finds either
+// era by querying data fields rather than guessing an ID) rather than
+// migrated.
 // Fields: eventCode, teamNumber, teamId, plus dynamic fields from formConfig,
 //         scoutedBy (uid), scoutedByName, scoutedAt, updatedAt
 
@@ -31,8 +36,7 @@ let currentFormController = null; // returned by renderDynamicForm
 // can never even attempt to touch a DIFFERENT team's doc that happens to
 // share the old, unscoped ID format. Returns { id, ...data } or null. ======
 async function findExistingPitDoc(teamId, eventCode, teamNumber) {
-  const snap = await db.collection('pitScouting')
-    .where('teamId', '==', teamId)
+  const snap = await db.collection('teams').doc(teamId).collection('pitScouting')
     .where('eventCode', '==', eventCode)
     .where('teamNumber', '==', Number(teamNumber))
     .limit(1)
@@ -173,7 +177,7 @@ async function savePitScoutForm() {
       payload.lastEditedByTimestamp = Date.now();
     }
 
-    await db.collection('pitScouting').doc(docId).set(payload, { merge: true });
+    await db.collection('teams').doc(teamId).collection('pitScouting').doc(docId).set(payload, { merge: true });
 
     hideLoading();
     successEl.textContent = 'Pit scouting data saved!';
@@ -210,7 +214,7 @@ async function deletePitScoutEntry(teamId, eventCode, teamNumber) {
   // under) rather than guessing — same reasoning as savePitScoutForm().
   const existing = await findExistingPitDoc(teamId, eventCode, teamNumber);
   if (existing) {
-    await db.collection('pitScouting').doc(existing.id).delete();
+    await db.collection('teams').doc(teamId).collection('pitScouting').doc(existing.id).delete();
   }
   const cacheKey = `${eventCode}_${teamNumber}`;
   scoutedTeamsCache.delete(cacheKey);
@@ -262,15 +266,21 @@ async function deletePitScoutData() {
 }
 
 // ====== Bulk-delete pit scouting entries by real doc id ======
-// Each delete goes through the same db.collection('pitScouting').doc(id).delete() call
+// Each delete goes through the same teams/{teamId}/pitScouting doc(id).delete() call
 // as the single-entry path above, so Firestore rules (canEditOrDeleteEntry) enforce
 // permission per-document exactly as they already do — this is a UI convenience for
-// issuing several deletes at once, not a separate/bypassed code path.
+// issuing several deletes at once, not a separate/bypassed code path. Reads teamId
+// from currentTeamData (like save/delete above) since callers only ever operate on
+// the current team's own bulk-selected entries.
 async function bulkDeletePitScoutData(docIds) {
   const results = { succeeded: [], failed: [] };
+  const teamId = currentTeamData?.id;
+  if (!teamId) {
+    return { succeeded: [], failed: [...docIds] };
+  }
   for (const docId of docIds) {
     try {
-      await db.collection('pitScouting').doc(docId).delete();
+      await db.collection('teams').doc(teamId).collection('pitScouting').doc(docId).delete();
       // pitScoutedEntriesCache is keyed by data (eventCode_teamNumber), not
       // the real doc id we have here — find which cache key holds this doc
       // to clean it up optimistically (the live listener will also catch up
@@ -321,20 +331,20 @@ function watchPitScoutStatus(eventCode) {
   scoutedTeamsCache.clear();
   pitScoutedEntriesCache.clear();
 
-  if (!eventCode) {
-    // No event selected — clear and notify
+  const teamId = currentTeamData?.id;
+  if (!eventCode || !teamId) {
+    // No event selected, or team data not loaded yet — clear and notify
     if (typeof onScoutedStateChanged === 'function') {
       onScoutedStateChanged();
     }
     return;
   }
 
-  // Listen for our own team's pit scouting docs at this event code (explicitly scoped
-  // to our team — other teams' entries for the same real-world event are a separate,
-  // rules-enforced dataset now, this filter is just the matching client-side intent)
-  pitScoutUnsubscribe = db.collection('pitScouting')
+  // Listen for our own team's pit scouting docs at this event code — scoped
+  // by the teams/{teamId}/pitScouting subcollection path itself now, not a
+  // teamId where() clause.
+  pitScoutUnsubscribe = db.collection('teams').doc(teamId).collection('pitScouting')
     .where('eventCode', '==', eventCode)
-    .where('teamId', '==', currentTeamData?.id || null)
     .onSnapshot((snapshot) => {
       scoutedTeamsCache.clear();
       pitScoutedEntriesCache.clear();

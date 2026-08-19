@@ -202,23 +202,27 @@ function closeDeleteAccountModal() {
 // document (e.g. a permission that changed since an old edit) is logged and
 // skipped rather than aborting the rest. ======
 async function anonymizeOwnScoutingEntries(teamId, uid) {
-  const collections = ['pitScouting', 'matchScouting'];
   const fieldPairs = [
     { queryField: 'scoutedBy', nameField: 'scoutedByName' },
     { queryField: 'lastEditedBy', nameField: 'lastEditedByName' }
   ];
 
-  for (const collectionName of collections) {
+  // pitScouting is now a teams/{teamId}/pitScouting subcollection, scoped by
+  // path — no teamId where() clause needed. matchScouting is still the flat
+  // top-level collection, so it still needs one: teamId is included alongside
+  // the uid filter for the same reason the Sheets export queries do —
+  // Firestore can only validate a list query against a rule that does
+  // get(resource.data.teamId) when teamId is pinned to a single value by an
+  // exact-match where() clause.
+  const collections = [
+    { name: 'pitScouting', baseQuery: db.collection('teams').doc(teamId).collection('pitScouting') },
+    { name: 'matchScouting', baseQuery: db.collection('matchScouting').where('teamId', '==', teamId) }
+  ];
+
+  for (const { name, baseQuery } of collections) {
     for (const { queryField, nameField } of fieldPairs) {
       try {
-        // teamId is included alongside the uid filter for the same reason the
-        // Sheets export queries do — Firestore can only validate a list query
-        // against a rule that does get(resource.data.teamId) when teamId is
-        // pinned to a single value by an exact-match where() clause.
-        const snap = await db.collection(collectionName)
-          .where('teamId', '==', teamId)
-          .where(queryField, '==', uid)
-          .get();
+        const snap = await baseQuery.where(queryField, '==', uid).get();
 
         const refs = [];
         snap.forEach(doc => refs.push(doc.ref));
@@ -227,11 +231,11 @@ async function anonymizeOwnScoutingEntries(teamId, uid) {
           try {
             await ref.update({ [nameField]: 'Deleted User' });
           } catch (err) {
-            console.warn(`Failed to anonymize ${nameField} on ${collectionName}/${ref.id}:`, err);
+            console.warn(`Failed to anonymize ${nameField} on ${name}/${ref.id}:`, err);
           }
         }
       } catch (err) {
-        console.warn(`Failed to query ${collectionName} by ${queryField} for anonymization:`, err);
+        console.warn(`Failed to query ${name} by ${queryField} for anonymization:`, err);
       }
     }
   }
@@ -273,20 +277,26 @@ async function selfLeaveTeam(teamId, uid) {
 // them. Best-effort per document, same style: a failure on one entry is
 // logged and skipped rather than aborting the rest. ======
 async function deleteAllScoutingEntriesForTeam(teamId) {
-  const collections = ['pitScouting', 'matchScouting'];
+  // pitScouting: teams/{teamId}/pitScouting subcollection, scoped by path.
+  // matchScouting: still the flat top-level collection, still needs the
+  // teamId where() clause.
+  const collections = [
+    { name: 'pitScouting', query: db.collection('teams').doc(teamId).collection('pitScouting') },
+    { name: 'matchScouting', query: db.collection('matchScouting').where('teamId', '==', teamId) }
+  ];
 
-  for (const collectionName of collections) {
+  for (const { name, query } of collections) {
     try {
-      const snap = await db.collection(collectionName).where('teamId', '==', teamId).get();
+      const snap = await query.get();
       for (const doc of snap.docs) {
         try {
           await doc.ref.delete();
         } catch (err) {
-          console.warn(`Failed to delete ${collectionName}/${doc.id}:`, err);
+          console.warn(`Failed to delete ${name}/${doc.id}:`, err);
         }
       }
     } catch (err) {
-      console.warn(`Failed to query ${collectionName} for team deletion:`, err);
+      console.warn(`Failed to query ${name} for team deletion:`, err);
     }
   }
 }
