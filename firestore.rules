@@ -57,6 +57,77 @@ service cloud.firestore {
       );
     }
 
+    // Narrow carve-out for a member with ONLY canKickMembers (no captain, no
+    // canEditOtherEntries — those two already pass canEditOrDeleteEntry()
+    // above regardless of the target's current membership, so this only ever
+    // matters for the canKickMembers-only case): may still anonymize a
+    // single field — scoutedByName or lastEditedByName — on an entry whose
+    // relevant uid (scoutedBy or lastEditedBy, matching whichever field is
+    // being touched, passed in as uidField/nameField) is no longer a member
+    // of this team. Checked as two independent calls (one per field) rather
+    // than one combined branch, since an entry's departed scouter and its
+    // still-present last-editor can be different people. hasOnly([nameField])
+    // guarantees nothing else — including scoutedBy/lastEditedBy themselves —
+    // changes, and the new value must be the literal 'Deleted User' string
+    // already used everywhere else this happens, never arbitrary text.
+    function canAnonymizeDepartedField(teamId, before, after, uidField, nameField) {
+      return isAuth()
+        && teamId != null
+        && exists(/databases/$(database)/documents/teams/$(teamId))
+        && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null
+        && request.auth.uid in get(/databases/$(database)/documents/teams/$(teamId)).data.permissions
+        && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid].canKickMembers == true
+        && !get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([before[uidField]])
+        && after.diff(before).affectedKeys().hasOnly([nameField])
+        && after[nameField] == 'Deleted User';
+    }
+
+    // Narrow carve-out for a still-current member anonymizing their OWN
+    // lastEditedByName — entry.lastEditedBy == request.auth.uid — even on
+    // an entry they didn't originally scout (entry.scoutedBy belongs to
+    // someone else). canEditOrDeleteEntry()'s self-branch only covers
+    // entry.scoutedBy == request.auth.uid, which doesn't help here: a
+    // member can be the most recent editor of a teammate's entry without
+    // being its original scouter, and without holding canEditOtherEntries.
+    // This is what lets anonymizeOwnScoutingEntries() (used by both Leave
+    // Team and Delete Account) fully anonymize every entry this uid
+    // touched, not just the ones they originally scouted. No team-doc
+    // lookup needed — unlike canAnonymizeDepartedField(), this is a
+    // currently-active member writing their own attribution, not a kicker
+    // cleaning up someone else's, so there's no membership/permission
+    // condition to check, only the diff shape.
+    function canAnonymizeOwnLastEdit(before, after) {
+      return isAuth()
+        && before.lastEditedBy == request.auth.uid
+        && after.diff(before).affectedKeys().hasOnly(['lastEditedByName'])
+        && after.lastEditedByName == 'Deleted User';
+    }
+
+    // A valid "kick" diff shape: exactly one member (never the caller — that's
+    // self-leave's job — and never the captain, who can't be kicked) is removed
+    // from members, and — if present — only that removed member's own entries
+    // from roles/permissions. The target uid isn't a rule parameter, so it's
+    // derived from the diff itself via removeAll(), then re-verified against
+    // every other field so a kick can't be smuggled alongside an unrelated
+    // members change (e.g. adding someone else in the same write). Caller's
+    // permission to kick AT ALL (captain or canKickMembers) is checked
+    // separately at each call site, same layering as canEditOrDeleteEntry()
+    // being combined with other conditions where it's used.
+    function isValidKickDiff(before, after) {
+      let removed = before.members.removeAll(after.members);
+      return removed.size() == 1
+        && removed[0] != request.auth.uid
+        && !(removed[0] in before.roles && before.roles[removed[0]] == 'captain')
+        && after.members == before.members.removeAll(removed)
+        && after.diff(before).affectedKeys().hasOnly(['members', 'roles', 'permissions'])
+        && (!after.diff(before).affectedKeys().hasAny(['roles'])
+            || (!(removed[0] in after.roles)
+                && before.roles.diff(after.roles).affectedKeys().hasOnly([removed[0]])))
+        && (!after.diff(before).affectedKeys().hasAny(['permissions'])
+            || (!(removed[0] in after.permissions)
+                && before.permissions.diff(after.permissions).affectedKeys().hasOnly([removed[0]])));
+    }
+
     match /teams/{teamId} {
       // Only real members can read the full document. resource.data is already the
       // document being evaluated, so no get()/isTeamMember() (and no dependency on
@@ -70,8 +141,14 @@ service cloud.firestore {
 
       allow update: if isAuth() && (
         // An existing member updating the team (captain required to touch
-        // roles/permissions/name/joinCode; pinnedEvents may also be touched by a
-        // member with permissions[uid].canPinEvents == true)
+        // roles/permissions/name/joinCode/members; pinnedEvents may also be
+        // touched by a member with permissions[uid].canPinEvents == true).
+        // `members` is included here as defense in depth even though captain
+        // has no *current* legitimate reason to touch it via this branch —
+        // join/self-leave/kick each have their own dedicated branch below —
+        // without this it was unguarded here entirely: any member could
+        // rewrite `members` to anything, as long as the same write didn't
+        // also touch roles/permissions/name/joinCode.
         (
           resource.data.members.hasAny([request.auth.uid])
           // Guarded with an `in` presence check before indexing into roles —
@@ -79,7 +156,7 @@ service cloud.firestore {
           // rules (unlike plain dot-field access, which returns null), and a
           // plain member who never had roles.{uid} written would otherwise
           // throw here instead of cleanly failing the captain check.
-          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode'])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode', 'members'])
               || (request.auth.uid in resource.data.roles && resource.data.roles[request.auth.uid] == 'captain'))
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['pinnedEvents'])
               || resource.data.roles[request.auth.uid] == 'captain'
@@ -118,6 +195,22 @@ service cloud.firestore {
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['permissions'])
               || (!(request.auth.uid in request.resource.data.permissions)
                   && resource.data.permissions.diff(request.resource.data.permissions).affectedKeys().hasOnly([request.auth.uid])))
+        )
+        ||
+        // Kick: a captain, or a member with permissions[uid].canKickMembers ==
+        // true, removes exactly one OTHER current member — never themselves
+        // (self-leave's branch above handles that) and never the captain (who
+        // can't be kicked). isValidKickDiff() enforces the diff shape; this
+        // just gates who's allowed to invoke it at all.
+        (
+          resource.data.members.hasAny([request.auth.uid])
+          && (
+            (request.auth.uid in resource.data.roles && resource.data.roles[request.auth.uid] == 'captain')
+            || (resource.data.permissions != null
+                && request.auth.uid in resource.data.permissions
+                && resource.data.permissions[request.auth.uid].canKickMembers == true)
+          )
+          && isValidKickDiff(resource.data, request.resource.data)
         )
       );
 
@@ -175,7 +268,26 @@ service cloud.firestore {
         allow write: if isAuth() && request.auth.uid == uid
           && exists(/databases/$(database)/documents/teams/$(teamId))
           && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([uid]);
-        allow delete: if isAuth() && request.auth.uid == uid;
+        // Self-delete (leaving) is unconditional. A captain or canKickMembers-
+        // permitted teammate may also delete someone ELSE's contact doc — this
+        // is what lets kickMember() clean up the kicked member's copy, which
+        // that member's own client isn't around to do (unlike selfLeaveTeam(),
+        // which runs on the leaving member's own client and can delete its own
+        // doc under the self-delete clause above).
+        allow delete: if isAuth() && (
+          request.auth.uid == uid
+          || (
+            exists(/databases/$(database)/documents/teams/$(teamId))
+            && (
+              isCaptain(get(/databases/$(database)/documents/teams/$(teamId)).data)
+              || (
+                get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null
+                && request.auth.uid in get(/databases/$(database)/documents/teams/$(teamId)).data.permissions
+                && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid].canKickMembers == true
+              )
+            )
+          )
+        );
       }
     }
 
@@ -240,18 +352,26 @@ service cloud.firestore {
       // instead of being denied outright.
       allow read: if resource == null || isTeamMember(resource.data.teamId);
       allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
-      allow update: if isAuth()
-        && canEditOrDeleteEntry(resource.data.teamId, resource.data)
-        && request.resource.data.scoutedBy == resource.data.scoutedBy;
+      allow update: if isAuth() && (
+        (canEditOrDeleteEntry(resource.data.teamId, resource.data)
+          && request.resource.data.scoutedBy == resource.data.scoutedBy)
+        || canAnonymizeDepartedField(resource.data.teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
+        || canAnonymizeDepartedField(resource.data.teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
+        || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
+      );
       allow delete: if isAuth() && canEditOrDeleteEntry(resource.data.teamId, resource.data);
     }
 
     match /matchScouting/{documentId} {
       allow read: if resource == null || isTeamMember(resource.data.teamId);
       allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
-      allow update: if isAuth()
-        && canEditOrDeleteEntry(resource.data.teamId, resource.data)
-        && request.resource.data.scoutedBy == resource.data.scoutedBy;
+      allow update: if isAuth() && (
+        (canEditOrDeleteEntry(resource.data.teamId, resource.data)
+          && request.resource.data.scoutedBy == resource.data.scoutedBy)
+        || canAnonymizeDepartedField(resource.data.teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
+        || canAnonymizeDepartedField(resource.data.teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
+        || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
+      );
       allow delete: if isAuth() && canEditOrDeleteEntry(resource.data.teamId, resource.data);
     }
   }

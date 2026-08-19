@@ -263,6 +263,36 @@ function buildMemberRow(uid, role, isCaptain, isSelf, info) {
     item.appendChild(makeCaptainBtn);
   }
 
+  // "Kick" — gated on canUserKickMembers() (captain OR the canKickMembers
+  // permission), not on isCaptain like the block above, since this can be
+  // granted to any member. Never shown on your own row or the captain's row
+  // (the captain can't be kicked — also enforced server-side).
+  if (!isSelf && role !== 'captain' && (typeof canUserKickMembers === 'function' ? canUserKickMembers() : false)) {
+    const kickBtn = document.createElement('button');
+    kickBtn.className = 'btn btn-small btn-outline';
+    kickBtn.style.cssText = 'margin-left:8px; color:var(--error); border-color:var(--error);';
+    kickBtn.textContent = 'Kick';
+    kickBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      kickMember(uid);
+    });
+    item.appendChild(kickBtn);
+  }
+
+  // "My Permissions" — explicit button on your own row, the only way to
+  // open it (no row-click trigger).
+  if (isSelf) {
+    const myPermsBtn = document.createElement('button');
+    myPermsBtn.className = 'btn btn-small btn-outline';
+    myPermsBtn.style.marginLeft = '12px';
+    myPermsBtn.textContent = 'My Permissions';
+    myPermsBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (typeof openMyPermissionsModal === 'function') openMyPermissionsModal();
+    });
+    item.appendChild(myPermsBtn);
+  }
+
   return { el: item, nameEl, emailEl, avatarEl: avatar };
 }
 
@@ -302,7 +332,19 @@ async function fetchMemberInfo(teamId, uid) {
 }
 
 // ====== Edit Permissions Modal ======
-const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canBulkDelete', 'canPinEvents', 'canViewMemberEmails'];
+const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canBulkDelete', 'canPinEvents', 'canViewMemberEmails', 'canKickMembers'];
+
+// Human-readable labels, matching the Edit Permissions modal's checkbox
+// labels exactly — reused by the read-only "My Permissions" modal (below)
+// so the two never drift apart.
+const MEMBER_PERMISSION_LABELS = {
+  canEditTemplates: 'Edit templates',
+  canEditOtherEntries: "Edit others' entries",
+  canBulkDelete: 'Bulk-delete entries',
+  canPinEvents: 'Pin/unpin events',
+  canViewMemberEmails: 'View member emails',
+  canKickMembers: 'Kick members'
+};
 let memberPermissionsEditingUid = null;
 
 // ====== Grant All / Remove All split-button fill indicator — shared by the
@@ -405,7 +447,12 @@ async function setAllPermissionsForMember(uid, value, containerEl) {
     applyGrantAllSplitFill(containerEl, currentTeamPermissions[uid]);
   } catch (err) {
     console.error(`Failed to ${value ? 'grant' : 'remove'} all permissions:`, err);
-    alert(`Failed to ${value ? 'grant' : 'remove'} permissions. Check your connection and try again.`);
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({
+        title: 'Update Failed',
+        message: `Failed to ${value ? 'grant' : 'remove'} permissions. Check your connection and try again.`
+      });
+    }
   }
 }
 
@@ -497,39 +544,50 @@ document.getElementById('btn-save-display-name').addEventListener('click', async
 });
 
 // ====== Transfer captaincy to another member ======
-async function transferCaptaincy(newCaptainUid) {
-  if (!currentTeamId || !currentUser) return;
+function transferCaptaincy(newCaptainUid) {
+  if (!currentTeamId || !currentUser || typeof showConfirmModal !== 'function') return;
 
-  if (!confirm(`Transfer captain role to this member? You will become a regular member.`)) return;
+  showConfirmModal({
+    title: 'Transfer Captain Role?',
+    message: 'Transfer captain role to this member? You will become a regular member.',
+    confirmLabel: 'Transfer',
+    danger: true,
+    onConfirm: async () => {
+      showLoading('Transferring captain role...');
+      try {
+        // Update roles map: old captain becomes member, new captain becomes captain.
+        // Both also get every permission granted explicitly — otherwise whoever
+        // ends up depending on the permissions map (the demoted former captain now,
+        // or the new captain if they're demoted later) would land on an effectively
+        // empty one, since captains never previously needed a permissions entry.
+        // Built from MEMBER_PERMISSION_KEYS (defined above) rather than listed out
+        // by hand, so a future new permission can't be missed here again the way
+        // canViewMemberEmails was.
+        const fullPermissions = {};
+        MEMBER_PERMISSION_KEYS.forEach(key => { fullPermissions[key] = true; });
+        const updates = {};
+        updates[`roles.${currentUser.uid}`] = 'member';
+        updates[`roles.${newCaptainUid}`] = 'captain';
+        updates[`permissions.${currentUser.uid}`] = fullPermissions;
+        updates[`permissions.${newCaptainUid}`] = fullPermissions;
 
-  showLoading('Transferring captain role...');
-  try {
-    // Update roles map: old captain becomes member, new captain becomes captain.
-    // Both also get every permission granted explicitly — otherwise whoever
-    // ends up depending on the permissions map (the demoted former captain now,
-    // or the new captain if they're demoted later) would land on an effectively
-    // empty one, since captains never previously needed a permissions entry.
-    // Built from MEMBER_PERMISSION_KEYS (defined above) rather than listed out
-    // by hand, so a future new permission can't be missed here again the way
-    // canViewMemberEmails was.
-    const fullPermissions = {};
-    MEMBER_PERMISSION_KEYS.forEach(key => { fullPermissions[key] = true; });
-    const updates = {};
-    updates[`roles.${currentUser.uid}`] = 'member';
-    updates[`roles.${newCaptainUid}`] = 'captain';
-    updates[`permissions.${currentUser.uid}`] = fullPermissions;
-    updates[`permissions.${newCaptainUid}`] = fullPermissions;
+        await db.collection('teams').doc(currentTeamId).update(updates);
 
-    await db.collection('teams').doc(currentTeamId).update(updates);
-
-    hideLoading();
-    // No manual reload needed — the live team doc listener (watchTeamDoc in auth.js)
-    // picks up this update and refreshes currentTeamData / the member list for us.
-  } catch (err) {
-    hideLoading();
-    console.error('Transfer captaincy error:', err);
-    alert('Failed to transfer captain role. Check your connection and try again.');
-  }
+        hideLoading();
+        // No manual reload needed — the live team doc listener (watchTeamDoc in auth.js)
+        // picks up this update and refreshes currentTeamData / the member list for us.
+      } catch (err) {
+        hideLoading();
+        console.error('Transfer captaincy error:', err);
+        if (typeof showNoticeModal === 'function') {
+          showNoticeModal({
+            title: 'Transfer Failed',
+            message: 'Failed to transfer captain role. Check your connection and try again.'
+          });
+        }
+      }
+    }
+  });
 }
 
 // ====== Join Another Team (My Team tab) — distinct from the initial
@@ -587,6 +645,15 @@ async function joinAnotherTeam() {
       members: firebase.firestore.FieldValue.arrayUnion(currentUser.uid)
     });
 
+    // A genuine (re)join is always a fresh start for this team's saved
+    // event/search state — see team.js's initial join flow for the fuller
+    // reasoning (this matters most for a team you were previously KICKED
+    // from, since that leave-time clear can only ever run on the kicked
+    // member's own client, never the kicker's).
+    if (typeof clearTeamSessionState === 'function') {
+      clearTeamSessionState(teamId);
+    }
+
     const joinedSnap = await teamRef.get();
     const fullTeamData = { id: teamId, ...joinedSnap.data() };
 
@@ -609,6 +676,7 @@ async function joinAnotherTeam() {
     // snapshot). Without this the switcher stayed hidden until either of those
     // eventually fired, which in practice could look like it needed a refresh.
     if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
 
     hideLoading();
 
@@ -617,9 +685,13 @@ async function joinAnotherTeam() {
     // of activateDashboardTab()'s centralized clearing, so setting the
     // message after that (not before) is what keeps it from being wiped out
     // by the very switch this join triggers. The input field itself doesn't
-    // need clearing here either, for the same reason.
+    // need clearing here either, for the same reason. Awaited — switchActiveTeam()
+    // is async now (it awaits restoring the new team's own event/search
+    // state before its own activateDashboardTab() call), so without
+    // awaiting it here, setStatus() below could still run before that
+    // clearing happens and get wiped out by it arriving late.
     if (typeof switchActiveTeam === 'function') {
-      switchActiveTeam(teamId);
+      await switchActiveTeam(teamId);
     }
     setStatus('success', `Joined "${fullTeamData.name || 'the team'}"!`);
   } catch (err) {
@@ -698,15 +770,17 @@ async function createAnotherTeam() {
     }
     if (typeof watchMyTeams === 'function') watchMyTeams();
     if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
 
     hideLoading();
 
     // Switch first, THEN show the success message — same reasoning as
     // joinAnotherTeam(): switching triggers activateDashboardTab()'s
     // centralized clearing, so setting the message after avoids it being
-    // wiped out by the very switch this creation triggers.
+    // wiped out by the very switch this creation triggers. Awaited for the
+    // same reason as joinAnotherTeam() — switchActiveTeam() is async now.
     if (typeof switchActiveTeam === 'function') {
-      switchActiveTeam(teamRef.id);
+      await switchActiveTeam(teamRef.id);
     }
     setStatus('success', `Created "${fullTeamData.name || 'the team'}"!`);
   } catch (err) {
@@ -743,12 +817,11 @@ async function leaveTeam() {
 
   // The last remaining member is always its captain (see deleteEntireTeam()
   // for why) — leaving in that case deletes the entire team and its data, not
-  // just this membership. That case gets a proper confirmation modal (below)
-  // with an "Export Whole Team Data" option, since a native confirm() dialog
-  // can't host a button — the export needs to happen, if at all, before this
-  // data is gone for good. The ordinary (non-last-member) case is low-risk
-  // (the user can rejoin with the join code) and keeps the simple native
-  // confirm() it already had.
+  // just this membership. That case gets its own dedicated confirmation modal
+  // (below) with an "Export Whole Team Data" option, since the export needs
+  // its own button — the ordinary (non-last-member) case is low-risk (the
+  // user can rejoin with the join code) and just uses the plain generic
+  // confirm modal below instead of a dedicated one.
   const isSoleMember = !!(currentTeamData && Array.isArray(currentTeamData.members) && currentTeamData.members.length === 1);
 
   if (isSoleMember) {
@@ -756,17 +829,22 @@ async function leaveTeam() {
     return;
   }
 
-  if (!confirm('Leave this team? You can rejoin later with the join code.')) return;
-
-  await performLeaveTeam(false, currentTeamId, currentTeamData);
+  const teamId = currentTeamId;
+  const teamData = currentTeamData;
+  showConfirmModal({
+    title: 'Leave Team?',
+    message: 'Leave this team? You can rejoin later with the join code.',
+    confirmLabel: 'Leave Team',
+    danger: true,
+    onConfirm: () => performLeaveTeam(false, teamId, teamData)
+  });
 }
 
-// ====== Actually leave/delete the team — shared by the non-sole-member path
-// above (after its native confirm()) and the sole-member confirmation
-// modal's "Leave & Delete Team" button (after the user has had the chance to
-// export). Split out from leaveTeam() so the sole-member case can defer this
-// until the user acts on the modal, rather than running synchronously right
-// after a confirm() call like the simple case does. ======
+// ====== Actually leave/delete the team — shared by the non-sole-member
+// path above (its generic confirm modal's onConfirm) and the sole-member
+// confirmation modal's "Leave & Delete Team" button (after the user has
+// had the chance to export). Split out from leaveTeam() so the sole-member
+// case can defer this until the user acts on the modal. ======
 async function performLeaveTeam(isSoleMember, leftTeamId, leftTeamData) {
   const errorEl = document.getElementById('leave-team-error');
   if (errorEl) errorEl.textContent = '';
@@ -784,51 +862,155 @@ async function performLeaveTeam(isSoleMember, leftTeamId, leftTeamData) {
       if (typeof deleteEntireTeam === 'function') {
         await deleteEntireTeam(leftTeamId, currentUser.uid, leftTeamData);
       }
-    } else if (typeof selfLeaveTeam === 'function') {
-      await selfLeaveTeam(leftTeamId, currentUser.uid);
+    } else {
+      // Same anonymization confirmDeleteAccount() already does for a shared
+      // team, and for the same reason it has to run BEFORE the self-leave
+      // write below: the query inside it needs isTeamMember(teamId) to still
+      // be true for this user, which stops being the case the instant
+      // selfLeaveTeam() removes them from `members`.
+      if (typeof anonymizeOwnScoutingEntries === 'function') {
+        await anonymizeOwnScoutingEntries(leftTeamId, currentUser.uid);
+      }
+      // Mark this team as an expected self-removal right before the write
+      // that triggers it — see markExpectedSelfRemoval()'s docblock. The
+      // sole-member (deleteEntireTeam()) branch above doesn't need this: a
+      // deleted team doc makes watchMyTeams()'s listener see doc.exists ===
+      // false (its normal success path, already a silent no-notice no-op),
+      // never a permission-denied error.
+      markExpectedSelfRemoval(leftTeamId);
+      if (typeof selfLeaveTeam === 'function') {
+        await selfLeaveTeam(leftTeamId, currentUser.uid);
+      }
     }
-
-    // Remove the left team from myTeams (multi-team support) — both branches
-    // below depend on this already reflecting the team we just left.
-    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
-      myTeams = myTeams.filter(t => t.id !== leftTeamId);
-    }
-    // The set of teams changed — rebuild the per-team live listeners
-    // (watchMyTeams(), auth.js): drops the one for the team just left.
-    if (typeof watchMyTeams === 'function') watchMyTeams();
-    // Same reasoning as joinAnotherTeam()/createAnotherTeam(): render off the
-    // myTeams array synchronously rather than waiting on watchMyTeams()'s
-    // async listeners, so the switcher hides/updates immediately.
-    if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
 
     hideLoading();
-
-    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.length > 0) {
-      // Still a member of at least one other team — switch to it instead of
-      // landing on the "no team" screen, which would be wrong here; leaving
-      // one team doesn't mean the account has no team anymore.
-      if (typeof switchActiveTeam === 'function') {
-        switchActiveTeam(myTeams[0].id);
-      }
-    } else {
-      // Genuinely their last team. Reset team-related state and land back on
-      // the Join/Create screen — same shape as handleAuthenticatedUser()'s
-      // "no team" branch. currentTeamId/currentTeamData/myTeams are reset by
-      // showScreen() itself below.
-      currentTeamRoles = {};
-      currentTeamPermissions = {};
-      if (typeof clearSelectedEvent === 'function') clearSelectedEvent();
-      if (typeof clearSessionState === 'function') clearSessionState();
-
-      const nameInput = document.getElementById('input-screen-team-display-name');
-      if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
-
-      showScreen('screen-team');
-    }
+    navigateAwayFromRemovedTeam(leftTeamId);
   } catch (err) {
     hideLoading();
     console.error('Leave team error:', err);
     if (errorEl) errorEl.textContent = 'Failed to leave team. Please try again.';
+  }
+}
+
+// ====== Shared post-removal navigation — used both when THIS client just
+// performed the leave (performLeaveTeam(), above) and when this client
+// discovers its active team was removed by someone else (a kick, detected
+// reactively via handleRemovedFromTeam() below). Removes the team from
+// myTeams, rebuilds the per-team live listeners, and lands on another team
+// (if any remain) or the Join/Create screen — identical either way, since
+// the end state ("no longer on this team") is the same regardless of who
+// initiated the removal. Also persists the updated known-team-id set
+// (offlineReconciliation, below) — this is what keeps a self-initiated
+// Leave Team from misfiring as a "mystery removal" notice the next time
+// this device opens the app. ======
+function navigateAwayFromRemovedTeam(removedTeamId) {
+  // Both branches below depend on this already reflecting the team just left.
+  if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+    myTeams = myTeams.filter(t => t.id !== removedTeamId);
+  }
+  // The set of teams changed — rebuild the per-team live listeners
+  // (watchMyTeams(), auth.js): drops the one for the team just left.
+  if (typeof watchMyTeams === 'function') watchMyTeams();
+  // Same reasoning as joinAnotherTeam()/createAnotherTeam(): render off the
+  // myTeams array synchronously rather than waiting on watchMyTeams()'s
+  // async listeners, so the switcher hides/updates immediately.
+  if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+  if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
+
+  if (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.length > 0) {
+    // Still a member of at least one other team — switch to it instead of
+    // landing on the "no team" screen, which would be wrong here; leaving
+    // one team doesn't mean the account has no team anymore.
+    if (typeof switchActiveTeam === 'function') {
+      switchActiveTeam(myTeams[0].id);
+    }
+  } else {
+    // Genuinely their last team. Reset team-related state and land back on
+    // the Join/Create screen — same shape as handleAuthenticatedUser()'s
+    // "no team" branch. currentTeamId/currentTeamData/myTeams are reset by
+    // showScreen() itself below.
+    currentTeamRoles = {};
+    currentTeamPermissions = {};
+    if (typeof clearSelectedEvent === 'function') clearSelectedEvent();
+    if (typeof clearSessionState === 'function') clearSessionState();
+
+    const nameInput = document.getElementById('input-screen-team-display-name');
+    if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
+
+    showScreen('screen-team');
+  }
+}
+
+// ====== Teams this client is ABOUT to self-initiate removal from
+// (performLeaveTeam(), below) — checked by handleRemovedFromTeam() so it
+// can tell "I already know about this one, I'm handling it myself" apart
+// from a genuinely externally-triggered kick. selfLeaveTeam()'s write
+// removes this uid from `members` exactly the same way a kick does, so
+// watchMyTeams()'s per-team listener sees the identical permission-denied
+// error either way — there's no way to tell them apart from the listener's
+// side alone, only from client-side knowledge of which one this is.
+// Cleared as soon as it's consumed; also auto-expires as a safety net in
+// case the expected error never actually arrives (e.g. the listener had
+// already been torn down for some other reason), so a stale entry can
+// never linger and wrongly suppress a real, later kick notice if this
+// teamId is ever reused (left, then genuinely kicked after rejoining). ======
+const expectedSelfRemovalTeamIds = new Set();
+
+function markExpectedSelfRemoval(teamId) {
+  expectedSelfRemovalTeamIds.add(teamId);
+  setTimeout(() => expectedSelfRemovalTeamIds.delete(teamId), 10000);
+}
+
+// ====== React to being removed from a team by someone else (a kick) —
+// called from watchMyTeams()'s per-team onSnapshot error callback (auth.js)
+// when it fires 'permission-denied', which is what happens the instant this
+// uid is no longer in that team's `members`: the read rule stops passing,
+// Firestore terminates the listener rather than retrying it, and no final
+// "you're out" snapshot is ever delivered. watchMyTeams() has a listener on
+// EVERY team this user belongs to (not just the active one), so this single
+// handler covers both cases:
+//   - the removed team IS the active one: tear down its listeners, navigate
+//     away FIRST (navigateAwayFromRemovedTeam()), THEN show the notice on
+//     the new screen — never alert() before navigating, which left the user
+//     staring at the old team's screen until they dismissed it.
+//   - the removed team is a BACKGROUND one: just drop it from myTeams/the
+//     switcher and show the same notice, without navigating — the user
+//     isn't looking at it, so there's nothing to navigate away from. ======
+function handleRemovedFromTeam(teamId) {
+  if (expectedSelfRemovalTeamIds.has(teamId)) {
+    expectedSelfRemovalTeamIds.delete(teamId);
+    return;
+  }
+
+  const teamEntry = (typeof myTeams !== 'undefined' && Array.isArray(myTeams))
+    ? myTeams.find(t => t.id === teamId)
+    : null;
+  const teamName = (teamEntry && teamEntry.name) || 'this team';
+
+  if (currentTeamId === teamId) {
+    if (typeof watchTeamDoc === 'function') watchTeamDoc(null);
+    if (typeof watchPitScoutStatus === 'function') watchPitScoutStatus(null);
+    if (typeof watchMatchScoutStatus === 'function') watchMatchScoutStatus(null);
+
+    navigateAwayFromRemovedTeam(teamId);
+  } else {
+    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+      myTeams = myTeams.filter(t => t.id !== teamId);
+    }
+    if (typeof watchMyTeams === 'function') watchMyTeams();
+    if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
+  }
+
+  // Unlike the offline reconciliation notice (handleAuthenticatedUser(),
+  // auth.js), this one knows for certain it wasn't a self-leave on this
+  // device — it only ever fires from a live listener catching an
+  // EXTERNALLY-triggered removal, so it can say "removed" plainly instead
+  // of hedging with neutral wording. Queued (not shown directly) so
+  // rapid-succession removals from multiple teams consolidate into one
+  // message instead of clobbering each other — see queueRemovedTeamNotice().
+  if (typeof queueRemovedTeamNotice === 'function') {
+    queueRemovedTeamNotice(teamName);
   }
 }
 
@@ -898,6 +1080,303 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+});
+
+// ====== Generic confirmation modal — replaces native confirm() for
+// team-membership actions (Leave Team's plain case, Kick Member). Only one
+// confirmation is ever pending at a time (matches confirm()'s own inherently
+// blocking, one-at-a-time nature); the pending action is captured directly
+// in the closure passed as onConfirm, so no extra pendingXId/pendingXData
+// module state is needed the way the sole-member leave-team modal above has. ======
+let pendingGenericConfirmCallback = null;
+
+function showConfirmModal({ title, message, confirmLabel, danger, hideCancel, onConfirm }) {
+  const titleEl = document.getElementById('generic-confirm-title');
+  const messageEl = document.getElementById('generic-confirm-message');
+  const proceedBtn = document.getElementById('btn-generic-confirm-proceed');
+  const cancelBtn = document.getElementById('btn-generic-confirm-cancel');
+  if (titleEl) titleEl.textContent = title || 'Confirm';
+  if (messageEl) messageEl.textContent = message || '';
+  if (proceedBtn) {
+    proceedBtn.textContent = confirmLabel || 'Confirm';
+    proceedBtn.style.cssText = danger ? 'background:var(--error); color:#fff; border-color:var(--error);' : '';
+  }
+  // Reset every call, not just when true — otherwise a hideCancel:true call
+  // would leave Cancel hidden for the NEXT (normal) confirm too, since this
+  // modal's markup is shared/reused rather than rebuilt per call.
+  if (cancelBtn) cancelBtn.classList.toggle('hidden', !!hideCancel);
+  pendingGenericConfirmCallback = typeof onConfirm === 'function' ? onConfirm : null;
+
+  const modal = document.getElementById('generic-confirm-modal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+// ====== Pure-notice variant of the modal above — same styling, just OK/
+// close with no Cancel (there's nothing to cancel, only to acknowledge).
+// Used for the "removed from team" notices (handleRemovedFromTeam(),
+// below) instead of alert(), which blocks on whatever screen was showing
+// at the moment it fired rather than the screen the user's been navigated
+// to by the time they see it. ======
+function showNoticeModal({ title, message }) {
+  showConfirmModal({ title, message, confirmLabel: 'OK', hideCancel: true, onConfirm: null });
+}
+
+function closeGenericConfirmModal() {
+  pendingGenericConfirmCallback = null;
+  // Whatever was showing (including a removed-teams notice — see
+  // queueRemovedTeamNotice() below) is done with once this shared modal
+  // closes, regardless of what closed it — this is the single teardown
+  // point for every use of it, so resetting that tracking state here is
+  // always safe.
+  pendingRemovedTeamNames = [];
+  removedTeamsNoticeShown = false;
+  const modal = document.getElementById('generic-confirm-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+// ====== Consolidate rapid-succession live removal notices — without this,
+// two kicks landing close together each independently call showNoticeModal()
+// on the same shared modal, and the second one simply overwrites the first
+// before the user ever sees it (they'd only learn one team stopped working,
+// never that they lost both). Buffers team names and either updates the
+// notice already on screen in place, or briefly debounces before the FIRST
+// display so several removals arriving within a short window still land as
+// one consolidated message. The offline reconciliation notice
+// (handleAuthenticatedUser(), auth.js) doesn't need this — it computes its
+// full list synchronously in one pass, so there's nothing to race. ======
+let pendingRemovedTeamNames = [];
+let removedTeamsNoticeShown = false;
+let removedTeamsNoticeDebounceTimer = null;
+
+function renderRemovedTeamsNotice() {
+  const names = pendingRemovedTeamNames;
+  const message = names.length === 1
+    ? `You've been removed from "${names[0]}".`
+    : `You've been removed from these teams: ${names.map(n => `"${n}"`).join(', ')}.`;
+  removedTeamsNoticeShown = true;
+  showNoticeModal({ title: 'Removed from Team', message });
+}
+
+function queueRemovedTeamNotice(teamName) {
+  if (!pendingRemovedTeamNames.includes(teamName)) {
+    pendingRemovedTeamNames.push(teamName);
+  }
+
+  if (removedTeamsNoticeShown) {
+    // Already on screen — update it in place. A debounce would never fire
+    // again here anyway (it already fired once to get the modal open).
+    renderRemovedTeamsNotice();
+    return;
+  }
+
+  // Not shown yet — briefly debounce so several removals landing within a
+  // few hundred ms of each other (the rapid-succession case) batch into the
+  // first display instead of each one replacing the last before it's seen.
+  if (removedTeamsNoticeDebounceTimer) clearTimeout(removedTeamsNoticeDebounceTimer);
+  removedTeamsNoticeDebounceTimer = setTimeout(() => {
+    removedTeamsNoticeDebounceTimer = null;
+    renderRemovedTeamsNotice();
+  }, 400);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const closeBtn = document.getElementById('btn-generic-confirm-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeGenericConfirmModal);
+
+  const cancelBtn = document.getElementById('btn-generic-confirm-cancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeGenericConfirmModal);
+
+  const overlay = document.getElementById('generic-confirm-modal-overlay');
+  if (overlay) overlay.addEventListener('click', closeGenericConfirmModal);
+
+  const proceedBtn = document.getElementById('btn-generic-confirm-proceed');
+  if (proceedBtn) {
+    proceedBtn.addEventListener('click', async () => {
+      const callback = pendingGenericConfirmCallback;
+      closeGenericConfirmModal();
+      if (callback) await callback();
+    });
+  }
+});
+
+// ====== Anonymize a KICKED member's attribution on the team's scouting
+// entries — a targeted mirror of anonymizeOwnScoutingEntries() (delete-
+// account.js), same two-query, one-field-at-a-time shape (scoutedBy ->
+// scoutedByName, lastEditedBy -> lastEditedByName, queried and written
+// separately since a single entry's departed scouter and still-present
+// last-editor can be different people), but keyed off the kicked member's
+// uid rather than the caller's own. Must run AFTER the membership removal
+// succeeds (see kickMember()'s call site below) — the narrow
+// canKickMembers-only carve-out in firestore.rules requires the target to
+// already be out of `members` before it allows this write. A captain or
+// canEditOtherEntries-holding kicker isn't affected by that ordering (their
+// write permission doesn't depend on the target's membership status at
+// all), so running it after is correct for every kicker permission
+// combination, not just the narrow one. Best-effort, same as the self
+// version: a failure on one document is logged and skipped rather than
+// aborting the rest. ======
+async function anonymizeKickedMembersScoutingEntries(teamId, targetUid) {
+  const collections = ['pitScouting', 'matchScouting'];
+  const fieldPairs = [
+    { queryField: 'scoutedBy', nameField: 'scoutedByName' },
+    { queryField: 'lastEditedBy', nameField: 'lastEditedByName' }
+  ];
+
+  for (const collectionName of collections) {
+    for (const { queryField, nameField } of fieldPairs) {
+      try {
+        const snap = await db.collection(collectionName)
+          .where('teamId', '==', teamId)
+          .where(queryField, '==', targetUid)
+          .get();
+
+        const refs = [];
+        snap.forEach(doc => refs.push(doc.ref));
+
+        for (const ref of refs) {
+          try {
+            await ref.update({ [nameField]: 'Deleted User' });
+          } catch (err) {
+            console.warn(`Failed to anonymize ${nameField} on ${collectionName}/${ref.id}:`, err);
+          }
+        }
+      } catch (err) {
+        console.warn(`Failed to query ${collectionName} by ${queryField} for kicked-member anonymization:`, err);
+      }
+    }
+  }
+}
+
+// ====== Kick a member from the team — captain/canKickMembers-initiated
+// removal, mirroring selfLeaveTeam()'s shape (remove from members, delete
+// their roles/permissions entries, delete their memberContacts doc) but for
+// a target uid instead of the caller's own. Unlike self-leave, this can
+// never trigger a team deletion — the kicker always remains on the team
+// afterward, and the captain can never be a kick target (also enforced
+// server-side by the teams/{teamId} update rule's kick branch). Past pit/
+// match entries the kicked member scouted are anonymized the same way
+// Leave Team and Delete Account do (scoutedByName/lastEditedByName ->
+// "Deleted User"), not deleted — see anonymizeKickedMembersScoutingEntries()
+// above. Note: unlike selfLeaveTeam() (which runs on the leaving member's
+// own client and can clear their sessionStorage), a kicked member's OWN
+// per-team session state (session-state.js) can't be reached from the
+// kicker's client — if they later rejoin on the same device, that old
+// event/search state could still be sitting there. Low-severity (stale UI
+// state, not a data/security issue) and inherent to being removed by
+// someone else rather than leaving yourself. ======
+async function kickMember(targetUid) {
+  if (!currentTeamId || !currentUser) return;
+
+  // Resolved fresh from memberInfoCache at call time rather than accepting
+  // a name parameter bound when the row/button was built — the row's
+  // "Loading…" placeholder info object (used before fetchMemberInfo()
+  // resolves) doesn't get retroactively updated once the real name arrives,
+  // only the DOM text does, so a captured value could go stale.
+  const cachedInfo = (typeof memberInfoCache !== 'undefined') ? memberInfoCache[targetUid] : null;
+  const targetName = (cachedInfo && cachedInfo.displayName) || 'this member';
+
+  showConfirmModal({
+    title: 'Kick Member?',
+    message: `Remove "${targetName}" from the team? They can rejoin later with the join code. Their past scouting entries stay on the team.`,
+    confirmLabel: 'Kick Member',
+    danger: true,
+    onConfirm: async () => {
+      const teamId = currentTeamId;
+      showLoading('Removing member...');
+      try {
+        const updates = {
+          members: firebase.firestore.FieldValue.arrayRemove(targetUid)
+        };
+        updates[`roles.${targetUid}`] = firebase.firestore.FieldValue.delete();
+        updates[`permissions.${targetUid}`] = firebase.firestore.FieldValue.delete();
+        await db.collection('teams').doc(teamId).update(updates);
+
+        // Must come after the membership removal above — see
+        // anonymizeKickedMembersScoutingEntries()'s docblock for why.
+        await anonymizeKickedMembersScoutingEntries(teamId, targetUid);
+
+        try {
+          await db.collection('teams').doc(teamId).collection('memberContacts').doc(targetUid).delete();
+        } catch (err) {
+          console.warn(`Failed to delete memberContacts for kicked member ${targetUid}:`, err);
+        }
+
+        hideLoading();
+        // No manual reload needed — the live team doc listener (watchTeamDoc
+        // in auth.js) picks up this update and refreshes currentTeamData /
+        // the member list for us, same as transferCaptaincy().
+      } catch (err) {
+        hideLoading();
+        console.error('Kick member error:', err);
+        if (typeof showNoticeModal === 'function') {
+          showNoticeModal({
+            title: 'Remove Failed',
+            message: 'Failed to remove member. Check your connection and try again.'
+          });
+        }
+      }
+    }
+  });
+}
+
+// ====== My Permissions modal (read-only) — opened by clicking your own row
+// in the member list (see buildMemberRow()). Shows only what you currently
+// have, not the full list with unchecked boxes. Stays live while open:
+// refreshActiveTeamData() (auth.js) calls renderMyPermissionsModal() on
+// every live team-doc update, same mechanism already used for every other
+// live-permission UI (updatePermissionUI(), the bulk-select toggles) — this
+// just no-ops when the modal isn't currently open. ======
+let myPermissionsModalOpen = false;
+
+function renderMyPermissionsModal() {
+  if (!myPermissionsModalOpen) return;
+
+  const statusEl = document.getElementById('my-permissions-status');
+  const listEl = document.getElementById('my-permissions-list');
+  if (!statusEl || !listEl) return;
+
+  listEl.innerHTML = '';
+
+  if (typeof getCurrentUserRole === 'function' && getCurrentUserRole() === 'captain') {
+    statusEl.textContent = "You're the captain — full permissions.";
+    return;
+  }
+
+  const myPerms = (currentTeamPermissions && currentUser && currentTeamPermissions[currentUser.uid]) || {};
+  const granted = MEMBER_PERMISSION_KEYS.filter(key => myPerms[key] === true);
+
+  if (granted.length === 0) {
+    statusEl.textContent = "You don't have any special permissions on this team.";
+    return;
+  }
+
+  statusEl.textContent = 'You currently have:';
+  granted.forEach(key => {
+    const li = document.createElement('li');
+    li.textContent = MEMBER_PERMISSION_LABELS[key] || key;
+    listEl.appendChild(li);
+  });
+}
+
+function openMyPermissionsModal() {
+  myPermissionsModalOpen = true;
+  renderMyPermissionsModal();
+  const modal = document.getElementById('my-permissions-modal');
+  if (modal) modal.classList.remove('hidden');
+}
+
+function closeMyPermissionsModal() {
+  myPermissionsModalOpen = false;
+  const modal = document.getElementById('my-permissions-modal');
+  if (modal) modal.classList.add('hidden');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const closeBtn = document.getElementById('btn-my-permissions-close');
+  if (closeBtn) closeBtn.addEventListener('click', closeMyPermissionsModal);
+
+  const overlay = document.getElementById('my-permissions-modal-overlay');
+  if (overlay) overlay.addEventListener('click', closeMyPermissionsModal);
 });
 
 // ====== Expose loadTeamMembers globally so auth.js can call it ======

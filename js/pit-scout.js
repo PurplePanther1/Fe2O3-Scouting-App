@@ -233,25 +233,32 @@ async function deletePitScoutData() {
     return;
   }
 
-  if (!confirm(`Delete pit scouting data for Team #${currentPitTeamNumber}? This cannot be undone.`)) return;
-
-  showLoading('Deleting...');
-  try {
-    await deletePitScoutEntry(teamId, currentPitEventCode, currentPitTeamNumber);
-    hideLoading();
-    successEl.textContent = 'Data deleted.';
-    setTimeout(() => {
-      closePitScoutForm();
-    }, 800);
-  } catch (err) {
-    hideLoading();
-    console.error('Failed to delete pit scouting data:', err);
-    if (err.code === 'permission-denied') {
-      errorEl.textContent = 'Permission denied: You do not have permission to edit or save this entry.';
-    } else {
-      errorEl.textContent = 'Failed to delete. Please check your connection and try again.';
+  if (typeof showConfirmModal !== 'function') return;
+  showConfirmModal({
+    title: 'Delete Pit Scouting Data?',
+    message: `Delete pit scouting data for Team #${currentPitTeamNumber}? This cannot be undone.`,
+    confirmLabel: 'Delete',
+    danger: true,
+    onConfirm: async () => {
+      showLoading('Deleting...');
+      try {
+        await deletePitScoutEntry(teamId, currentPitEventCode, currentPitTeamNumber);
+        hideLoading();
+        successEl.textContent = 'Data deleted.';
+        setTimeout(() => {
+          closePitScoutForm();
+        }, 800);
+      } catch (err) {
+        hideLoading();
+        console.error('Failed to delete pit scouting data:', err);
+        if (err.code === 'permission-denied') {
+          errorEl.textContent = 'Permission denied: You do not have permission to edit or save this entry.';
+        } else {
+          errorEl.textContent = 'Failed to delete. Please check your connection and try again.';
+        }
+      }
     }
-  }
+  });
 }
 
 // ====== Bulk-delete pit scouting entries by real doc id ======

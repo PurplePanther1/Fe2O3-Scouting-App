@@ -189,31 +189,42 @@ document.addEventListener('DOMContentLoaded', () => {
   // actually permitted to delete this specific entry.
   const pitDeleteBtn = document.getElementById('btn-team-info-pit-delete');
   if (pitDeleteBtn) {
-    pitDeleteBtn.addEventListener('click', async () => {
+    pitDeleteBtn.addEventListener('click', () => {
       const teamNumber = currentSelectedTeamNumber;
       const eventCode = selectedEvent?.code;
       const teamId = currentTeamData?.id;
-      if (!teamNumber || !eventCode || !teamId) return;
+      if (!teamNumber || !eventCode || !teamId || typeof showConfirmModal !== 'function') return;
 
-      if (!confirm(`Delete pit scouting data for Team #${teamNumber}? This cannot be undone.`)) return;
+      showConfirmModal({
+        title: 'Delete Pit Scouting Data?',
+        message: `Delete pit scouting data for Team #${teamNumber}? This cannot be undone.`,
+        confirmLabel: 'Delete',
+        danger: true,
+        onConfirm: async () => {
+          showLoading('Deleting...');
+          try {
+            if (typeof deletePitScoutEntry === 'function') {
+              await deletePitScoutEntry(teamId, eventCode, teamNumber);
+            }
+          } catch (err) {
+            console.error('Failed to delete pit scouting data:', err);
+            if (typeof showNoticeModal === 'function') {
+              showNoticeModal({
+                title: 'Delete Failed',
+                message: err.code === 'permission-denied'
+                  ? 'Permission denied: you do not have permission to delete this entry.'
+                  : 'Failed to delete. Please check your connection and try again.'
+              });
+            }
+          } finally {
+            hideLoading();
+          }
 
-      showLoading('Deleting...');
-      try {
-        if (typeof deletePitScoutEntry === 'function') {
-          await deletePitScoutEntry(teamId, eventCode, teamNumber);
+          if (currentSelectedTeamNumber === teamNumber) {
+            renderPitDataForTeam(teamNumber, eventCode);
+          }
         }
-      } catch (err) {
-        console.error('Failed to delete pit scouting data:', err);
-        alert(err.code === 'permission-denied'
-          ? 'Permission denied: you do not have permission to delete this entry.'
-          : 'Failed to delete. Please check your connection and try again.');
-      } finally {
-        hideLoading();
-      }
-
-      if (currentSelectedTeamNumber === teamNumber) {
-        renderPitDataForTeam(teamNumber, eventCode);
-      }
+      });
     });
   }
 });

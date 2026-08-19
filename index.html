@@ -709,6 +709,10 @@
           <input type="checkbox" id="perm-canViewMemberEmails" style="width:auto; margin:0" />
           <label for="perm-canViewMemberEmails" style="margin:0">View member emails</label>
         </div>
+        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
+          <input type="checkbox" id="perm-canKickMembers" style="width:auto; margin:0" />
+          <label for="perm-canKickMembers" style="margin:0">Kick members</label>
+        </div>
         <p id="member-permissions-error" class="error-message"></p>
         <div class="pit-modal-actions" style="margin-top:20px; flex-wrap:wrap">
           <div class="perm-split-btn" id="perm-grant-remove-split">
@@ -890,6 +894,45 @@
         <p id="leave-team-confirm-export-success" class="success-message"></p>
         <button id="btn-leave-team-confirm-proceed" class="btn btn-primary">Leave &amp; Delete Team</button>
         <button id="btn-leave-team-confirm-cancel" class="btn btn-outline">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generic confirmation modal — replaces native confirm() for team-
+       membership actions (Leave Team's plain case, Kick Member). Title,
+       message, and the confirm button's label/color/handler are all set
+       programmatically per use via showConfirmModal() (members.js); this
+       markup itself has no action-specific text baked in. -->
+  <div id="generic-confirm-modal" class="modal-overlay hidden">
+    <div id="generic-confirm-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:400px">
+      <div class="modal-header">
+        <h3 id="generic-confirm-title">Confirm</h3>
+        <button id="btn-generic-confirm-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px; display:flex; flex-direction:column; gap:12px">
+        <p class="help-text" id="generic-confirm-message"></p>
+        <button id="btn-generic-confirm-proceed" class="btn btn-primary">Confirm</button>
+        <button id="btn-generic-confirm-cancel" class="btn btn-outline">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- My Permissions modal — read-only, opened by clicking your own row in
+       the My Team member list. Shows only what you currently have (not the
+       full list with unchecked boxes), and stays live while open if a
+       captain changes your permissions (renderMyPermissionsModal(), called
+       from refreshActiveTeamData() same as every other live-permission UI). -->
+  <div id="my-permissions-modal" class="modal-overlay hidden">
+    <div id="my-permissions-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card" style="max-width:380px">
+      <div class="modal-header">
+        <h3>My Permissions</h3>
+        <button id="btn-my-permissions-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <p class="help-text" id="my-permissions-status" style="margin-bottom:10px"></p>
+        <ul id="my-permissions-list" style="margin:0; padding-left:20px; display:flex; flex-direction:column; gap:4px"></ul>
       </div>
     </div>
   </div>

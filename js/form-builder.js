@@ -21,14 +21,18 @@ async function openFormBuilder(type) {
 
   const teamId = currentTeamData?.id;
   if (!teamId) {
-    alert('Team data not loaded.');
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({ title: 'Team Not Loaded', message: 'Team data not loaded.' });
+    }
     return;
   }
 
   // Verify template editing permission (captain or canEditTemplates permission)
   const canEdit = typeof canUserEditTemplates === 'function' ? canUserEditTemplates() : (currentTeamRoles && currentTeamRoles[currentUser?.uid] === 'captain');
   if (!canEdit) {
-    alert('You do not have permission to edit the form configuration.');
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({ title: 'Permission Denied', message: 'You do not have permission to edit the form configuration.' });
+    }
     return;
   }
 
@@ -342,42 +346,46 @@ async function saveFieldEdit() {
 }
 
 // ====== Remove a field ======
-async function removeField(index) {
+function removeField(index) {
   const teamId = currentTeamData?.id;
   if (!teamId) return;
 
   const fields = getBuilderCachedConfig() || [];
   const field = fields[index];
-  if (!field) return;
+  if (!field || typeof showConfirmModal !== 'function') return;
 
-  if (!confirm(`Remove field "${field.label}"?\n\nExisting scouting data for this field will be preserved in the database but will no longer display in the form.`)) {
-    return;
-  }
+  showConfirmModal({
+    title: 'Remove Field?',
+    message: `Remove field "${field.label}"? Existing scouting data for this field will be preserved in the database but will no longer display in the form.`,
+    confirmLabel: 'Remove',
+    danger: true,
+    onConfirm: async () => {
+      const configDoc = getBuilderConfigDoc();
 
-  const configDoc = getBuilderConfigDoc();
+      showLoading('Removing field...');
+      try {
+        const updated = fields.filter((_, i) => i !== index);
+        // Recalculate sortOrders
+        updated.forEach((f, i) => { f.sortOrder = i; });
 
-  showLoading('Removing field...');
-  try {
-    const updated = fields.filter((_, i) => i !== index);
-    // Recalculate sortOrders
-    updated.forEach((f, i) => { f.sortOrder = i; });
+        await db.collection('teams').doc(teamId)
+          .collection('formConfig').doc(configDoc)
+          .set({ fields: updated });
 
-    await db.collection('teams').doc(teamId)
-      .collection('formConfig').doc(configDoc)
-      .set({ fields: updated });
+        hideLoading();
 
-    hideLoading();
+        invalidateBuilderConfigCache();
+        setBuilderCachedConfig(updated, teamId);
 
-    invalidateBuilderConfigCache();
-    setBuilderCachedConfig(updated, teamId);
-
-    await renderBuilderFields(teamId);
-    document.getElementById('builder-success').textContent = 'Field removed. Old data is preserved.';
-  } catch (err) {
-    hideLoading();
-    console.error('Failed to remove field:', err);
-    document.getElementById('builder-error').textContent = 'Failed to remove field.';
-  }
+        await renderBuilderFields(teamId);
+        document.getElementById('builder-success').textContent = 'Field removed. Old data is preserved.';
+      } catch (err) {
+        hideLoading();
+        console.error('Failed to remove field:', err);
+        document.getElementById('builder-error').textContent = 'Failed to remove field.';
+      }
+    }
+  });
 }
 
 // ====== Move a field up/down (reorder) ======

@@ -133,6 +133,9 @@ function refreshActiveTeamData(teamId, teamData) {
   if (typeof updatePermissionUI === 'function') {
     updatePermissionUI();
   }
+  if (typeof renderMyPermissionsModal === 'function') {
+    renderMyPermissionsModal();
+  }
   if (typeof updatePitBulkSelectUI === 'function') {
     updatePitBulkSelectUI();
   }
@@ -159,6 +162,11 @@ function watchTeamDoc(teamId) {
     const teamData = { id: doc.id, ...doc.data() };
     refreshActiveTeamData(teamId, teamData);
   }, (err) => {
+    // Removal detection (permission-denied -> this uid is no longer in
+    // `members`) lives in watchMyTeams()'s per-team error callback now —
+    // it already has a listener on every team including this active one
+    // (a documented, intentional overlap), so that's the single place this
+    // is handled, rather than duplicating it here too.
     console.warn('Team doc listener error:', err);
   });
 }
@@ -1016,6 +1024,37 @@ async function handleAuthenticatedUser(user) {
     $('user-avatar').alt = displayName;
     $('user-name').textContent = displayName;
 
+    // Reconcile against the last-known team set for this uid (localStorage,
+    // persisted below and by persistKnownTeamIds() elsewhere) BEFORE
+    // overwriting it — any team present in that old set but missing from
+    // this fresh fetch means this uid lost access to it since this device
+    // was last used (a kick, or a self-leave from elsewhere), and there was
+    // no live listener running here to show a notice for it at the time.
+    // getStoredKnownTeams() returns null (not []) when nothing's stored yet
+    // (this device's first-ever login for this uid), which correctly skips
+    // the diff below rather than treating "no baseline" as "every team was
+    // removed."
+    const previouslyKnownTeams = getStoredKnownTeams(user.uid);
+    const removedTeamNames = previouslyKnownTeams
+      ? previouslyKnownTeams
+          .filter(pt => !teams.some(t => t.id === pt.id))
+          .map(pt => pt.name || 'a team')
+      : [];
+    setStoredKnownTeams(user.uid, teams.map(t => ({ id: t.id, name: t.name || '' })));
+
+    // Shown after the dashboard/screen-team has fully settled (both call
+    // sites below are right after their own hideLoading()), never blocking
+    // the login flow itself. Worded neutrally — this signal can't tell a
+    // kick apart from a self-initiated leave on another device, so it never
+    // says "kicked."
+    const showRemovedTeamsNoticeIfAny = () => {
+      if (removedTeamNames.length === 0 || typeof showNoticeModal !== 'function') return;
+      const message = removedTeamNames.length === 1
+        ? `You're no longer a member of "${removedTeamNames[0]}".`
+        : `You're no longer a member of these teams: ${removedTeamNames.map(n => `"${n}"`).join(', ')}.`;
+      showNoticeModal({ title: 'Removed from Team', message });
+    };
+
     if (teams.length > 0) {
       // Existing users who haven't explicitly confirmed a display name yet must
       // do so before reaching the dashboard — same blocking pattern as the
@@ -1114,6 +1153,7 @@ async function handleAuthenticatedUser(user) {
         }
       }
       hideLoading();
+      showRemovedTeamsNoticeIfAny();
     } else {
       hideLoading();
       clearErrors();
@@ -1123,6 +1163,7 @@ async function handleAuthenticatedUser(user) {
       const nameInput = document.getElementById('input-screen-team-display-name');
       if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
       showScreen('screen-team');
+      showRemovedTeamsNoticeIfAny();
     }
   } catch (err) {
     hideLoading();
@@ -1239,6 +1280,20 @@ function canUserPinEvents() {
   return false;
 }
 
+// UI-only gate for the "Kick" button — the underlying removal is enforced
+// server-side by the teams/{teamId} update rule's kick branch, which checks
+// this same captain-or-canKickMembers condition independently.
+function canUserKickMembers() {
+  if (!currentUser || !currentTeamData) return false;
+  if (getCurrentUserRole() === 'captain') return true;
+  if (currentTeamData.permissions &&
+      currentTeamData.permissions[currentUser.uid] &&
+      currentTeamData.permissions[currentUser.uid].canKickMembers === true) {
+    return true;
+  }
+  return false;
+}
+
 function updatePermissionUI() {
   const canEditTmpl = canUserEditTemplates();
   const pitSection = document.getElementById('pit-form-config-section');
@@ -1298,6 +1353,55 @@ function setStoredActiveTeamId(uid, teamId) {
   }
 }
 
+// ====== Known-team-set persistence (offline removal reconciliation) ======
+// Same localStorage layer/per-uid scoping as active-team persistence above,
+// for the same reason (has to survive closing the browser, not just the
+// tab) — but here to answer a different question: "which teams did this
+// user belong to as of their last visit?" so a fresh login can detect a
+// team that disappeared while they weren't around to see a live removal
+// notice (handleRemovedFromTeam(), members.js) — see the reconciliation
+// diff in handleAuthenticatedUser() below. Stores {id, name} pairs, not
+// bare IDs — the name has to be captured NOW, while still a member,
+// because a team that's disappeared by the next login can no longer be
+// read to look its name up after the fact.
+function knownTeamIdsStorageKey(uid) {
+  return `fe2o3_known_teams_${uid}`;
+}
+
+// Returns null (not []) when nothing's been stored yet, so callers can tell
+// "no baseline to diff against" (e.g. this device's very first login) apart
+// from "the last known set was genuinely empty."
+function getStoredKnownTeams(uid) {
+  try {
+    const raw = localStorage.getItem(knownTeamIdsStorageKey(uid));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    console.warn('Failed to read stored known teams:', err);
+    return null;
+  }
+}
+
+function setStoredKnownTeams(uid, teams) {
+  try {
+    localStorage.setItem(knownTeamIdsStorageKey(uid), JSON.stringify(teams));
+  } catch (err) {
+    console.warn('Failed to persist known teams:', err);
+  }
+}
+
+// ====== Persist the CURRENT myTeams as the known-team-set for this uid —
+// called immediately after every local myTeams change (login, join, create,
+// leave, kick-detected) so the baseline never lags behind a deliberate
+// action taken on THIS device. That's what keeps a self-initiated Leave
+// Team (or joining a new team) from misfiring as a "mystery removal" (or a
+// missed one) the next time this device opens the app — without updating
+// the baseline at the moment of the action, the next login's diff would
+// compare against a stale set and draw the wrong conclusion. ======
+function persistKnownTeamIds() {
+  if (!currentUser || typeof myTeams === 'undefined' || !Array.isArray(myTeams)) return;
+  setStoredKnownTeams(currentUser.uid, myTeams.map(t => ({ id: t.id, name: t.name || '' })));
+}
+
 /**
  * Switch which of the user's teams (myTeams) is "active" — everything the
  * dashboard shows (Scouting tabs, Pinned Events, My Team, permission checks)
@@ -1305,7 +1409,7 @@ function setStoredActiveTeamId(uid, teamId) {
  * whatever depends on them is the whole job. Not called from anywhere yet —
  * Stage 3 wires this to the team-switcher UI.
  */
-function switchActiveTeam(teamId) {
+async function switchActiveTeam(teamId) {
   if (!currentUser) return;
   const team = (myTeams || []).find(t => t.id === teamId);
   if (!team) {
@@ -1327,14 +1431,16 @@ function switchActiveTeam(teamId) {
 
   // Event/search state is scoped per team (session-state.js) — restore
   // whatever THIS team last had (or clear to empty if it's never had one),
-  // now that currentTeamId already points at it. Deliberately not awaited:
-  // switchActiveTeam() isn't async, and selectEvent()/clearSelectedEvent()
-  // (which this calls into) already set the selectedEvent global and
-  // re-subscribe watchPitScoutStatus()/watchMatchScoutStatus() themselves as
-  // part of their own synchronous prefix / internal logic — no separate
-  // re-subscription step is needed here for that anymore.
+  // now that currentTeamId already points at it. Must be awaited: the
+  // activateDashboardTab('myteam') call below fires its own
+  // saveSessionState() synchronously, which reads whatever's currently in
+  // selectedEvent/the search box — if that ran before this finished
+  // restoring (e.g. mid-selectEvent() network round trip), it would write
+  // the PREVIOUS team's still-in-memory selectedEvent into the newly
+  // active team's own perTeam entry instead of what's actually being
+  // restored for it.
   if (typeof restorePerTeamEventState === 'function') {
-    restorePerTeamEventState();
+    await restorePerTeamEventState();
   }
 
   $('main-team-name').textContent = team.name || 'Your Team';
@@ -1436,6 +1542,18 @@ function watchMyTeams() {
       }
     }, (err) => {
       console.warn(`myTeams listener error for team ${teamId}:`, err);
+      // A permission-denied error here means this uid is no longer in this
+      // team's `members` — the only way that happens to a previously-
+      // working listener (kicked, or removed from a different tab/device).
+      // This one callback already covers every team the user belongs to,
+      // active or not, so it's the single place removal needs handling —
+      // handleRemovedFromTeam() (members.js) branches internally on whether
+      // this was the active team (navigate away, then notify) or a
+      // background one (just drop it and notify, nothing to navigate away
+      // from).
+      if (err.code === 'permission-denied' && typeof handleRemovedFromTeam === 'function') {
+        handleRemovedFromTeam(teamId);
+      }
     });
   });
 }

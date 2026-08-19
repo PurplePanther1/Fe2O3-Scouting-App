@@ -50,7 +50,12 @@ async function togglePinForEvent(eventEntry) {
     // for us. Doing it here too raced that listener and duplicated the visual row.
   } catch (err) {
     console.error('Failed to toggle pinned event:', err);
-    alert('Failed to update pinned events. Check your connection and permissions.');
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({
+        title: 'Update Failed',
+        message: 'Failed to update pinned events. Check your connection and permissions.'
+      });
+    }
   }
 }
 

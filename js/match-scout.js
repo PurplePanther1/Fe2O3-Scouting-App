@@ -314,29 +314,35 @@ async function deleteMatchScoutData() {
   errorEl.textContent = '';
   successEl.textContent = '';
 
-  if (!currentMatchDocId) return;
+  if (!currentMatchDocId || typeof showConfirmModal !== 'function') return;
 
-  if (!confirm(`Delete this match scouting entry for Team #${currentMatchTeamNumber}? This cannot be undone.`)) return;
-
-  showLoading('Deleting...');
-  try {
-    await db.collection('matchScouting').doc(currentMatchDocId).delete();
-    hideLoading();
-    refreshMatchEntriesCache();
-    refreshOpenMatchListPanels();
-    successEl.textContent = 'Entry deleted.';
-    setTimeout(() => {
-      closeMatchScoutForm();
-    }, 800);
-  } catch (err) {
-    hideLoading();
-    console.error('Failed to delete match scouting data:', err);
-    if (err.code === 'permission-denied') {
-      errorEl.textContent = 'Permission denied: You do not have permission to edit or save this entry.';
-    } else {
-      errorEl.textContent = 'Failed to delete. Please check your connection and try again.';
+  showConfirmModal({
+    title: 'Delete Match Scouting Data?',
+    message: `Delete this match scouting entry for Team #${currentMatchTeamNumber}? This cannot be undone.`,
+    confirmLabel: 'Delete',
+    danger: true,
+    onConfirm: async () => {
+      showLoading('Deleting...');
+      try {
+        await db.collection('matchScouting').doc(currentMatchDocId).delete();
+        hideLoading();
+        refreshMatchEntriesCache();
+        refreshOpenMatchListPanels();
+        successEl.textContent = 'Entry deleted.';
+        setTimeout(() => {
+          closeMatchScoutForm();
+        }, 800);
+      } catch (err) {
+        hideLoading();
+        console.error('Failed to delete match scouting data:', err);
+        if (err.code === 'permission-denied') {
+          errorEl.textContent = 'Permission denied: You do not have permission to edit or save this entry.';
+        } else {
+          errorEl.textContent = 'Failed to delete. Please check your connection and try again.';
+        }
+      }
     }
-  }
+  });
 }
 
 // ====== Close the match scouting form ======
@@ -624,36 +630,43 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const deleteBtn = document.getElementById(`${prefix}match-bulk-delete`);
     if (deleteBtn) {
-      deleteBtn.addEventListener('click', async () => {
+      deleteBtn.addEventListener('click', () => {
         const state = matchBulkState[prefix];
         const entryIds = [...state.selectedIds];
-        if (entryIds.length === 0) return;
-        if (!confirm(`Delete ${entryIds.length} match scouting entr${entryIds.length === 1 ? 'y' : 'ies'}? This cannot be undone.`)) return;
+        if (entryIds.length === 0 || typeof showConfirmModal !== 'function') return;
 
-        showLoading('Deleting selected entries...');
-        let results = { succeeded: [], failed: [] };
-        try {
-          results = await bulkDeleteMatchScoutData(entryIds);
-        } finally {
-          hideLoading();
-        }
+        showConfirmModal({
+          title: 'Delete Match Scouting Data?',
+          message: `Delete ${entryIds.length} match scouting entr${entryIds.length === 1 ? 'y' : 'ies'}? This cannot be undone.`,
+          confirmLabel: 'Delete',
+          danger: true,
+          onConfirm: async () => {
+            showLoading('Deleting selected entries...');
+            let results = { succeeded: [], failed: [] };
+            try {
+              results = await bulkDeleteMatchScoutData(entryIds);
+            } finally {
+              hideLoading();
+            }
 
-        const statusEl = document.getElementById(`${prefix}match-bulk-delete-status`);
-        if (statusEl) {
-          if (results.failed.length > 0) {
-            console.error('Bulk match delete: failed entry IDs:', results.failed);
-            statusEl.textContent = `Deleted ${results.succeeded.length} of ${entryIds.length} entries — ${results.failed.length} failed`;
-            statusEl.className = 'error-message';
-          } else {
-            statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
-            statusEl.className = 'success-message';
+            const statusEl = document.getElementById(`${prefix}match-bulk-delete-status`);
+            if (statusEl) {
+              if (results.failed.length > 0) {
+                console.error('Bulk match delete: failed entry IDs:', results.failed);
+                statusEl.textContent = `Deleted ${results.succeeded.length} of ${entryIds.length} entries — ${results.failed.length} failed`;
+                statusEl.className = 'error-message';
+              } else {
+                statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
+                statusEl.className = 'success-message';
+              }
+              setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
+            }
+
+            state.mode = false;
+            state.selectedIds.clear();
+            refreshOpenMatchListPanels();
           }
-          setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
-        }
-
-        state.mode = false;
-        state.selectedIds.clear();
-        refreshOpenMatchListPanels();
+        });
       });
     }
   }

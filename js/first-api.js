@@ -666,40 +666,47 @@ document.addEventListener('DOMContentLoaded', () => {
   // Pit bulk delete
   const pitBulkDeleteBtn = document.getElementById('btn-pit-bulk-delete');
   if (pitBulkDeleteBtn) {
-    pitBulkDeleteBtn.addEventListener('click', async () => {
+    pitBulkDeleteBtn.addEventListener('click', () => {
       const docIds = [...pitBulkSelectedDocIds];
-      if (docIds.length === 0) return;
-      if (!confirm(`Delete pit scouting data for ${docIds.length} team(s)? This cannot be undone.`)) return;
+      if (docIds.length === 0 || typeof showConfirmModal !== 'function') return;
 
-      showLoading('Deleting selected entries...');
-      let results = { succeeded: [], failed: [] };
-      try {
-        if (typeof bulkDeletePitScoutData === 'function') {
-          results = await bulkDeletePitScoutData(docIds);
+      showConfirmModal({
+        title: 'Delete Pit Scouting Data?',
+        message: `Delete pit scouting data for ${docIds.length} team(s)? This cannot be undone.`,
+        confirmLabel: 'Delete',
+        danger: true,
+        onConfirm: async () => {
+          showLoading('Deleting selected entries...');
+          let results = { succeeded: [], failed: [] };
+          try {
+            if (typeof bulkDeletePitScoutData === 'function') {
+              results = await bulkDeletePitScoutData(docIds);
+            }
+          } finally {
+            hideLoading();
+          }
+
+          const statusEl = document.getElementById('pit-bulk-delete-status');
+          if (statusEl) {
+            if (results.failed.length > 0) {
+              console.error('Bulk pit delete: failed doc IDs:', results.failed);
+              statusEl.textContent = `Deleted ${results.succeeded.length} of ${docIds.length} entries — ${results.failed.length} failed`;
+              statusEl.className = 'error-message';
+            } else {
+              statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
+              statusEl.className = 'success-message';
+            }
+            setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
+          }
+
+          pitBulkSelectMode = false;
+          pitBulkSelectedDocIds.clear();
+          if (currentEventTeams && currentEventTeams.length > 0) {
+            renderPitTeamList(currentEventTeams);
+            applyTeamSearchFilter(currentTeamSearchQuery);
+          }
         }
-      } finally {
-        hideLoading();
-      }
-
-      const statusEl = document.getElementById('pit-bulk-delete-status');
-      if (statusEl) {
-        if (results.failed.length > 0) {
-          console.error('Bulk pit delete: failed doc IDs:', results.failed);
-          statusEl.textContent = `Deleted ${results.succeeded.length} of ${docIds.length} entries — ${results.failed.length} failed`;
-          statusEl.className = 'error-message';
-        } else {
-          statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
-          statusEl.className = 'success-message';
-        }
-        setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
-      }
-
-      pitBulkSelectMode = false;
-      pitBulkSelectedDocIds.clear();
-      if (currentEventTeams && currentEventTeams.length > 0) {
-        renderPitTeamList(currentEventTeams);
-        applyTeamSearchFilter(currentTeamSearchQuery);
-      }
+      });
     });
   }
 
@@ -722,7 +729,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // (not one doc per team, since match has many entries per team).
   const matchBulkDeleteBtn = document.getElementById('btn-match-bulk-delete');
   if (matchBulkDeleteBtn) {
-    matchBulkDeleteBtn.addEventListener('click', async () => {
+    matchBulkDeleteBtn.addEventListener('click', () => {
       const teamNumbers = [...matchBulkSelectedTeamNumbers];
       if (teamNumbers.length === 0) return;
 
@@ -730,42 +737,48 @@ document.addEventListener('DOMContentLoaded', () => {
       const allEntryIds = (eventCode && typeof getMatchEntriesForTeam === 'function')
         ? teamNumbers.flatMap(tn => getMatchEntriesForTeam(tn, eventCode).map(e => e.id))
         : [];
-      if (allEntryIds.length === 0) return;
+      if (allEntryIds.length === 0 || typeof showConfirmModal !== 'function') return;
 
-      if (!confirm(`Delete ALL match scouting entries for ${teamNumbers.length} team(s)? This will remove ${allEntryIds.length} total entr${allEntryIds.length === 1 ? 'y' : 'ies'}. This cannot be undone.`)) return;
+      showConfirmModal({
+        title: 'Delete Match Scouting Data?',
+        message: `Delete ALL match scouting entries for ${teamNumbers.length} team(s)? This will remove ${allEntryIds.length} total entr${allEntryIds.length === 1 ? 'y' : 'ies'}. This cannot be undone.`,
+        confirmLabel: 'Delete',
+        danger: true,
+        onConfirm: async () => {
+          showLoading('Deleting selected entries...');
+          let results = { succeeded: [], failed: [] };
+          try {
+            if (typeof bulkDeleteMatchScoutData === 'function') {
+              results = await bulkDeleteMatchScoutData(allEntryIds);
+            }
+          } finally {
+            hideLoading();
+          }
 
-      showLoading('Deleting selected entries...');
-      let results = { succeeded: [], failed: [] };
-      try {
-        if (typeof bulkDeleteMatchScoutData === 'function') {
-          results = await bulkDeleteMatchScoutData(allEntryIds);
+          const statusEl = document.getElementById('match-bulk-delete-status');
+          if (statusEl) {
+            if (results.failed.length > 0) {
+              console.error('Bulk match delete: failed doc IDs:', results.failed);
+              statusEl.textContent = `Deleted ${results.succeeded.length} of ${allEntryIds.length} entries — ${results.failed.length} failed`;
+              statusEl.className = 'error-message';
+            } else {
+              statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
+              statusEl.className = 'success-message';
+            }
+            setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
+          }
+
+          matchBulkSelectMode = false;
+          matchBulkSelectedTeamNumbers.clear();
+          if (currentEventTeams && currentEventTeams.length > 0) {
+            renderMatchTeamList(currentEventTeams);
+            applyTeamSearchFilter(currentTeamSearchQuery);
+          }
+          if (typeof refreshMatchTeamListCounts === 'function') {
+            refreshMatchTeamListCounts();
+          }
         }
-      } finally {
-        hideLoading();
-      }
-
-      const statusEl = document.getElementById('match-bulk-delete-status');
-      if (statusEl) {
-        if (results.failed.length > 0) {
-          console.error('Bulk match delete: failed doc IDs:', results.failed);
-          statusEl.textContent = `Deleted ${results.succeeded.length} of ${allEntryIds.length} entries — ${results.failed.length} failed`;
-          statusEl.className = 'error-message';
-        } else {
-          statusEl.textContent = `Deleted ${results.succeeded.length} entr${results.succeeded.length === 1 ? 'y' : 'ies'}.`;
-          statusEl.className = 'success-message';
-        }
-        setTimeout(() => { statusEl.textContent = ''; statusEl.className = ''; }, 5000);
-      }
-
-      matchBulkSelectMode = false;
-      matchBulkSelectedTeamNumbers.clear();
-      if (currentEventTeams && currentEventTeams.length > 0) {
-        renderMatchTeamList(currentEventTeams);
-        applyTeamSearchFilter(currentTeamSearchQuery);
-      }
-      if (typeof refreshMatchTeamListCounts === 'function') {
-        refreshMatchTeamListCounts();
-      }
+      });
     });
   }
 });

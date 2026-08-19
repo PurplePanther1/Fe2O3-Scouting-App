@@ -346,7 +346,7 @@ async function deleteEntireTeam(teamId, uid, teamData) {
   await db.collection('teams').doc(teamId).delete();
 }
 
-async function confirmDeleteAccount() {
+function confirmDeleteAccount() {
   const errorEl = document.getElementById('delete-account-error');
   const successEl = document.getElementById('delete-account-success');
   errorEl.textContent = '';
@@ -357,119 +357,130 @@ async function confirmDeleteAccount() {
     return;
   }
 
-  if (!confirm('This will permanently delete your account. This cannot be undone. Continue?')) {
-    return;
-  }
+  if (typeof showConfirmModal !== 'function') return;
+  // Stacks above delete-account-modal (see #generic-confirm-modal's z-index
+  // in style.css) rather than closing it first — same nested-modal pattern
+  // as the export-choice modal opening on top of Leave Team's confirmation.
+  // Everything after the original confirm() line moves into onConfirm,
+  // including the password field read below, which still works fine since
+  // the modal underneath (and its DOM) never actually closes.
+  showConfirmModal({
+    title: 'Delete Account?',
+    message: 'This will permanently delete your account. This cannot be undone. Continue?',
+    confirmLabel: 'Delete Account',
+    danger: true,
+    onConfirm: async () => {
+      const hasPasswordProvider = !!(currentUser.providerData &&
+        currentUser.providerData.some(p => p.providerId === 'password'));
 
-  const hasPasswordProvider = !!(currentUser.providerData &&
-    currentUser.providerData.some(p => p.providerId === 'password'));
-
-  // Reauth first, before any Firestore mutation, so a cancelled/failed reauth
-  // leaves nothing half-changed.
-  showLoading('Verifying your identity...');
-  try {
-    if (hasPasswordProvider) {
-      const currentPassword = document.getElementById('input-delete-account-password').value;
-      if (!currentPassword) {
+      // Reauth first, before any Firestore mutation, so a cancelled/failed reauth
+      // leaves nothing half-changed.
+      showLoading('Verifying your identity...');
+      try {
+        if (hasPasswordProvider) {
+          const currentPassword = document.getElementById('input-delete-account-password').value;
+          if (!currentPassword) {
+            hideLoading();
+            errorEl.textContent = 'Please enter your current password.';
+            return;
+          }
+          const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, currentPassword);
+          await currentUser.reauthenticateWithCredential(cred);
+        } else {
+          // Google-only accounts have no password — reauthenticate with the same
+          // provider/popup flow used for Google sign-in.
+          const provider = new firebase.auth.GoogleAuthProvider();
+          provider.setCustomParameters({ prompt: 'select_account' });
+          await currentUser.reauthenticateWithPopup(provider);
+        }
+      } catch (err) {
         hideLoading();
-        errorEl.textContent = 'Please enter your current password.';
+        console.error('Delete account reauth error:', err);
+        if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/popup-blocked') {
+          errorEl.textContent = friendlyAuthError(err.code);
+        } else if (hasPasswordProvider) {
+          errorEl.textContent = 'Incorrect password. Please try again.';
+        } else {
+          errorEl.textContent = 'Could not verify your identity. Please try again.';
+        }
         return;
       }
-      const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, currentPassword);
-      await currentUser.reauthenticateWithCredential(cred);
-    } else {
-      // Google-only accounts have no password — reauthenticate with the same
-      // provider/popup flow used for Google sign-in.
-      const provider = new firebase.auth.GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-      await currentUser.reauthenticateWithPopup(provider);
-    }
-  } catch (err) {
-    hideLoading();
-    console.error('Delete account reauth error:', err);
-    if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/popup-blocked') {
-      errorEl.textContent = friendlyAuthError(err.code);
-    } else if (hasPasswordProvider) {
-      errorEl.textContent = 'Incorrect password. Please try again.';
-    } else {
-      errorEl.textContent = 'Could not verify your identity. Please try again.';
-    }
-    return;
-  }
 
-  const uid = currentUser.uid;
-  // Every team this account belongs to, not just the active one — deleting
-  // the account has to clean up all of them, or it'd leave the departed
-  // user's uid stuck in every OTHER team's members/roles/permissions and
-  // memberContacts forever (no one can ever remove them after this point —
-  // only the account itself could self-leave, and it's about to stop existing).
-  const teams = (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.length > 0)
-    ? myTeams.slice()
-    : (currentTeamData ? [currentTeamData] : []);
+      const uid = currentUser.uid;
+      // Every team this account belongs to, not just the active one — deleting
+      // the account has to clean up all of them, or it'd leave the departed
+      // user's uid stuck in every OTHER team's members/roles/permissions and
+      // memberContacts forever (no one can ever remove them after this point —
+      // only the account itself could self-leave, and it's about to stop existing).
+      const teams = (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.length > 0)
+        ? myTeams.slice()
+        : (currentTeamData ? [currentTeamData] : []);
 
-  // Stop listeners tied to team/event membership before we start removing
-  // that membership — otherwise they'll harmlessly error out mid-sequence
-  // once read access is gone.
-  if (typeof watchTeamDoc === 'function') watchTeamDoc(null);
-  if (typeof watchPitScoutStatus === 'function') watchPitScoutStatus(null);
-  if (typeof watchMatchScoutStatus === 'function') watchMatchScoutStatus(null);
+      // Stop listeners tied to team/event membership before we start removing
+      // that membership — otherwise they'll harmlessly error out mid-sequence
+      // once read access is gone.
+      if (typeof watchTeamDoc === 'function') watchTeamDoc(null);
+      if (typeof watchPitScoutStatus === 'function') watchPitScoutStatus(null);
+      if (typeof watchMatchScoutStatus === 'function') watchMatchScoutStatus(null);
 
-  try {
-    for (const team of teams) {
-      const teamLabel = team.name || team.id;
-      const isSoleMember = Array.isArray(team.members) && team.members.length === 1;
+      try {
+        for (const team of teams) {
+          const teamLabel = team.name || team.id;
+          const isSoleMember = Array.isArray(team.members) && team.members.length === 1;
 
-      if (isSoleMember) {
-        // Last member — the whole team (and its data) goes with them, not
-        // just their own membership. See deleteEntireTeam() for why order
-        // matters here.
-        showLoading(teams.length > 1 ? `Deleting team ${teamLabel} and all its data...` : 'Deleting your team and all its data...');
-        await withStep(`Deleting team ${teamLabel}`, () => deleteEntireTeam(team.id, uid, team));
-        continue;
+          if (isSoleMember) {
+            // Last member — the whole team (and its data) goes with them, not
+            // just their own membership. See deleteEntireTeam() for why order
+            // matters here.
+            showLoading(teams.length > 1 ? `Deleting team ${teamLabel} and all its data...` : 'Deleting your team and all its data...');
+            await withStep(`Deleting team ${teamLabel}`, () => deleteEntireTeam(team.id, uid, team));
+            continue;
+          }
+
+          showLoading(teams.length > 1 ? `Cleaning up your scouting data (${teamLabel})...` : 'Cleaning up your scouting data...');
+          await anonymizeOwnScoutingEntries(team.id, uid);
+
+          showLoading(teams.length > 1 ? `Removing you from ${teamLabel}...` : 'Removing you from your team...');
+          // Labeled via withStep() (same helper sheets-export.js uses) so any
+          // failure here is identifiable by step (and by team) rather than a
+          // bare "Missing or insufficient permissions".
+          await withStep(`Leaving team ${teamLabel} (self-leave write)`, () => selfLeaveTeam(team.id, uid));
+        }
+
+        showLoading('Deleting your account data...');
+        await withStep('Deleting private contact doc', () => db.collection('users').doc(uid).collection('private').doc('contact').delete());
+        await withStep('Deleting user profile doc', () => db.collection('users').doc(uid).delete());
+
+        showLoading('Deleting your account...');
+        await withStep('Deleting Firebase Auth account', () => currentUser.delete());
+
+        hideLoading();
+
+        // Close and clean up immediately rather than on a delay — currentUser.delete()
+        // already ends the Firebase session, which fires the app's own
+        // onAuthStateChanged listener right away. A delay here just left the modal
+        // visibly lingering after that listener had already flipped the screen
+        // underneath it, and let our own cleanup below fire late enough to race
+        // whatever the user did next (e.g. signing into a brand new account).
+        closeDeleteAccountModal();
+        // Reuses the same sign-out cleanup (auth form fields, selected
+        // event/team state, session storage) rather than duplicating it —
+        // currentUser.delete() already ends the Firebase session itself.
+        if (typeof signOut === 'function') {
+          await signOut();
+        } else {
+          showScreen('screen-login');
+        }
+      } catch (err) {
+        hideLoading();
+        console.error('Delete account error:', err);
+        // friendlyAuthError() already falls back to a generic message for
+        // non-auth errors (e.g. a Firestore permission-denied), since its map
+        // lookup just misses and returns the default.
+        errorEl.textContent = friendlyAuthError(err.code);
       }
-
-      showLoading(teams.length > 1 ? `Cleaning up your scouting data (${teamLabel})...` : 'Cleaning up your scouting data...');
-      await anonymizeOwnScoutingEntries(team.id, uid);
-
-      showLoading(teams.length > 1 ? `Removing you from ${teamLabel}...` : 'Removing you from your team...');
-      // Labeled via withStep() (same helper sheets-export.js uses) so any
-      // failure here is identifiable by step (and by team) rather than a
-      // bare "Missing or insufficient permissions".
-      await withStep(`Leaving team ${teamLabel} (self-leave write)`, () => selfLeaveTeam(team.id, uid));
     }
-
-    showLoading('Deleting your account data...');
-    await withStep('Deleting private contact doc', () => db.collection('users').doc(uid).collection('private').doc('contact').delete());
-    await withStep('Deleting user profile doc', () => db.collection('users').doc(uid).delete());
-
-    showLoading('Deleting your account...');
-    await withStep('Deleting Firebase Auth account', () => currentUser.delete());
-
-    hideLoading();
-
-    // Close and clean up immediately rather than on a delay — currentUser.delete()
-    // already ends the Firebase session, which fires the app's own
-    // onAuthStateChanged listener right away. A delay here just left the modal
-    // visibly lingering after that listener had already flipped the screen
-    // underneath it, and let our own cleanup below fire late enough to race
-    // whatever the user did next (e.g. signing into a brand new account).
-    closeDeleteAccountModal();
-    // Reuses the same sign-out cleanup (auth form fields, selected
-    // event/team state, session storage) rather than duplicating it —
-    // currentUser.delete() already ends the Firebase session itself.
-    if (typeof signOut === 'function') {
-      await signOut();
-    } else {
-      showScreen('screen-login');
-    }
-  } catch (err) {
-    hideLoading();
-    console.error('Delete account error:', err);
-    // friendlyAuthError() already falls back to a generic message for
-    // non-auth errors (e.g. a Firestore permission-denied), since its map
-    // lookup just misses and returns the default.
-    errorEl.textContent = friendlyAuthError(err.code);
-  }
+  });
 }
 
 document.getElementById('btn-open-delete-account').addEventListener('click', openDeleteAccountModal);

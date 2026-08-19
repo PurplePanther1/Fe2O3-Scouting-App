@@ -787,6 +787,18 @@ input[type="password"]::placeholder {
   z-index: 1001;
 }
 
+/* The generic confirm/notice modal (showConfirmModal()/showNoticeModal(),
+   members.js) is now used from EVERY confirm()/alert() call site in the
+   app, including several nested inside pit-modal/match-modal (1001) —
+   delete confirms — and inside base-level (1000) modals like Delete
+   Account, Team Detail, the form builder, and "View Matches Scouted".
+   Set one level above the highest existing nested level (1001) so it
+   reliably stacks above whichever of those it's opened from, rather than
+   needing a different value per call site. */
+#generic-confirm-modal {
+  z-index: 1002;
+}
+
 .modal-overlay-bg {
   position: absolute;
   inset: 0;

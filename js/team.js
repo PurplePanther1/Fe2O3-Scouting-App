@@ -226,6 +226,22 @@ $('btn-create-team').addEventListener('click', async () => {
       watchTeamDoc(teamRef.id);
     }
 
+    // This is the initial (zero-teams) onboarding flow — createAnotherTeam()
+    // (members.js) already does this for an account that already has ≥1
+    // team, but this path never did, leaving myTeams stale/empty and
+    // watchMyTeams() (auth.js) without a listener for this team at all until
+    // the next full login re-ran getUserTeams(). That's what let a kick (or
+    // any other live team-doc change) on a team created this way go
+    // undetected: watchTeamDoc() alone doesn't cover removal detection
+    // anymore (see watchMyTeams()'s error callback) since that's now
+    // centralized in watchMyTeams(), which had nothing registered here.
+    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+      myTeams = [...myTeams, fullTeamData];
+    }
+    if (typeof watchMyTeams === 'function') watchMyTeams();
+    if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
+
     // Show the join code on the create tab
     const joinCodeCreated = document.getElementById('join-code-created');
     const createdJoinCode = document.getElementById('created-join-code');
@@ -293,6 +309,15 @@ $('btn-join-team').addEventListener('click', async () => {
         if (typeof watchTeamDoc === 'function') {
           watchTeamDoc(teamId);
         }
+        // Same myTeams/watchMyTeams gap as the create-team flow above — see
+        // that block's comment for why this matters (live removal
+        // detection has nothing to detect with otherwise).
+        if (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && !myTeams.some(t => t.id === teamId)) {
+          myTeams = [...myTeams, fullTeamData];
+        }
+        if (typeof watchMyTeams === 'function') watchMyTeams();
+        if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+        if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
         $('main-team-name').textContent = existingData.name;
         showJoinCodeOnDashboard(existingData.joinCode);
         showScreen('screen-main');
@@ -308,6 +333,17 @@ $('btn-join-team').addEventListener('click', async () => {
     await teamRef.update({
       members: firebase.firestore.FieldValue.arrayUnion(currentUser.uid)
     });
+
+    // A genuine (re)join is always a fresh start for this team's saved
+    // event/search state (session-state.js) — clearing here, not just on
+    // the way out, is what makes this hold even when the PRIOR departure
+    // was a kick (whose leave-time clear can only ever run on the KICKED
+    // member's own client, and kickMember() has no way to reach into it —
+    // sessionStorage is per-browser-tab) or somehow skipped its own
+    // leave-time clear. A no-op if this team was never joined before.
+    if (typeof clearTeamSessionState === 'function') {
+      clearTeamSessionState(teamId);
+    }
 
     // Now that we're a member, we can read the full doc.
     const joinedSnap = await teamRef.get();
@@ -329,6 +365,15 @@ $('btn-join-team').addEventListener('click', async () => {
     if (typeof watchTeamDoc === 'function') {
       watchTeamDoc(teamId);
     }
+
+    // Same myTeams/watchMyTeams gap as the create-team flow — see that
+    // block's comment for why this matters.
+    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+      myTeams = [...myTeams, fullTeamData];
+    }
+    if (typeof watchMyTeams === 'function') watchMyTeams();
+    if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
 
     hideLoading();
     $('main-team-name').textContent = teamData.name;
