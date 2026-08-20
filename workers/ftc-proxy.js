@@ -6,8 +6,9 @@
  * Cloudflare Worker secret (environment variable).
  *
  * Endpoints:
- *   GET /events?query=SEARCH_TERM&season=YYYY   — search events by name/code (season defaults to current FTC season)
- *   GET /teams?eventCode=CODE&season=YYYY       — get teams for an event (season defaults to current FTC season)
+ *   GET /events?query=SEARCH_TERM&season=YYYY                        — search events by name/code (season defaults to current FTC season)
+ *   GET /teams?eventCode=CODE&season=YYYY                             — get teams for an event (season defaults to current FTC season)
+ *   GET /schedule?eventCode=CODE&season=YYYY&tournamentLevel=LEVEL    — get the match schedule for an event (season defaults to current FTC season, tournamentLevel defaults to "qual")
  *
  * Deploy:
  *   npm install -g wrangler
@@ -65,8 +66,16 @@ export default {
           return jsonResponse({ error: 'eventCode query parameter is required' }, 400, corsHeaders());
         }
         result = await handleGetEventTeams(eventCode, season, env);
+      } else if (path === '/schedule') {
+        const eventCode = url.searchParams.get('eventCode');
+        const season = url.searchParams.get('season') || '';
+        const tournamentLevel = url.searchParams.get('tournamentLevel') || 'qual';
+        if (!eventCode) {
+          return jsonResponse({ error: 'eventCode query parameter is required' }, 400, corsHeaders());
+        }
+        result = await handleGetEventSchedule(eventCode, season, tournamentLevel, env);
       } else {
-        return jsonResponse({ error: 'Not found. Use GET /events or GET /teams?eventCode=...' }, 404, corsHeaders());
+        return jsonResponse({ error: 'Not found. Use GET /events, GET /teams?eventCode=..., or GET /schedule?eventCode=...' }, 404, corsHeaders());
       }
 
       return jsonResponse(result, 200, corsHeaders());
@@ -146,6 +155,25 @@ async function handleGetEventTeams(eventCode, season, env) {
 
   console.log(`[teams] DONE event=${eventCode} totalTeams=${allTeams.length} across ${page - 1} pages`);
   return { teams: allTeams };
+}
+
+/**
+ * Fetch the match schedule for an event. Unlike /events and /teams, the
+ * FIRST API's schedule endpoint doesn't paginate — it returns the full
+ * schedule for the requested tournament level in one response, so no
+ * page-loop is needed here.
+ *
+ * Before an event's schedule is published, the API returns an empty
+ * schedule array (not an error) for an otherwise-valid event code — that's
+ * passed straight through as { schedule: [] } so the client can treat it as
+ * a normal "not available yet" state rather than a failure.
+ */
+async function handleGetEventSchedule(eventCode, season, tournamentLevel, env) {
+  const s = season || getCurrentSeason();
+  const data = await ftcApiGet(`/${s}/schedule/${encodeURIComponent(eventCode)}?tournamentLevel=${encodeURIComponent(tournamentLevel)}`, env);
+  const schedule = data.schedule || [];
+  console.log(`[schedule] event=${eventCode} season=${s} level=${tournamentLevel} matchCount=${schedule.length}`);
+  return { schedule };
 }
 
 // ====== Helper: Authenticated GET to FIRST API ======

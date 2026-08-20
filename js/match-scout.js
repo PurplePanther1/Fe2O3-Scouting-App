@@ -20,6 +20,14 @@
 let currentMatchTeamNumber = null;
 let currentMatchEventCode = null;
 let currentMatchDocId = null; // set when editing an existing entry
+// Set only when the form was opened from the match-based view
+// (match-schedule-view.js), where matchNumber/teamNumber/eventCode are
+// already known from which match row + team slot was clicked. When
+// non-null, the matchNumber field is excluded from the rendered dynamic
+// form (same as teamNumber/eventCode, which are never dynamic-form fields
+// at all — title + module state only) and saveMatchScoutForm() uses this
+// value instead of reading one out of the form.
+let currentLockedMatchNumber = null;
 let matchScoutUnsubscribe = null; // Firestore snapshot listener
 let matchEntriesCache = {}; // keyed by "eventCode_teamNumber" -> array of entries (each entry's own .id is the real doc id, format-agnostic)
 let currentMatchFormController = null; // returned by renderDynamicForm
@@ -104,13 +112,19 @@ async function bulkDeleteMatchScoutData(entryIds) {
 }
 
 // ====== Open the match scouting form (modal) for a new entry ======
-async function openMatchScoutForm(teamNumber, eventCode) {
+// lockedMatchNumber/teamName are only passed by openMatchScoutFormFromSchedule()
+// (the match-based view's entry point, below) — every other existing caller
+// passes just (teamNumber, eventCode), which behaves exactly as before.
+async function openMatchScoutForm(teamNumber, eventCode, lockedMatchNumber = null, teamName = null) {
   currentMatchTeamNumber = teamNumber;
   currentMatchEventCode = eventCode;
   currentMatchDocId = null;
+  currentLockedMatchNumber = lockedMatchNumber;
 
   // Reset modal state
-  document.getElementById('match-modal-title').textContent = `Match Scout Team #${teamNumber}`;
+  document.getElementById('match-modal-title').textContent = lockedMatchNumber != null
+    ? `Match #${lockedMatchNumber} — Team #${teamNumber}${teamName ? ` (${teamName})` : ''}`
+    : `Match Scout Team #${teamNumber}`;
   document.getElementById('match-modal-error').textContent = '';
   document.getElementById('match-modal-success').textContent = '';
   document.getElementById('match-delete-btn').classList.add('hidden');
@@ -135,8 +149,13 @@ async function openMatchScoutForm(teamNumber, eventCode) {
   try {
     const fields = await loadMatchFormConfig(teamId);
     const container = document.getElementById('match-dynamic-fields');
+    // Locked entries already have their match number fixed by which row was
+    // clicked — exclude it from the rendered form the same way
+    // teamNumber/eventCode are never rendered as form fields at all, shown
+    // only in the title above.
+    const renderedFields = lockedMatchNumber != null ? fields.filter(f => f.id !== 'matchNumber') : fields;
 
-    currentMatchFormController = renderDynamicForm(container, fields, null);
+    currentMatchFormController = renderDynamicForm(container, renderedFields, null);
 
     // Clear success message
     document.getElementById('match-modal-success').textContent = '';
@@ -147,13 +166,22 @@ async function openMatchScoutForm(teamNumber, eventCode) {
 }
 
 // ====== Open match form to edit an existing entry ======
-async function openMatchScoutEdit(docId, existingData) {
+// lockMatchNumber/teamName are only passed by openMatchScoutFormFromSchedule()
+// (below) — every other existing caller (the team-based view's Edit button)
+// passes just (docId, existingData), which behaves exactly as before. The
+// locked value is always derived from existingData.matchNumber itself, not
+// a separately-passed number, so it can never disagree with the entry being
+// edited.
+async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, teamName = null) {
   // Extract team number and event code from existing data
   currentMatchTeamNumber = existingData.teamNumber;
   currentMatchEventCode = existingData.eventCode;
   currentMatchDocId = docId;
+  currentLockedMatchNumber = lockMatchNumber ? existingData.matchNumber : null;
 
-  document.getElementById('match-modal-title').textContent = `Edit Match #${existingData.matchNumber || '?'} — Team #${currentMatchTeamNumber}`;
+  document.getElementById('match-modal-title').textContent = lockMatchNumber && teamName
+    ? `Edit Match #${existingData.matchNumber || '?'} — Team #${currentMatchTeamNumber} (${teamName})`
+    : `Edit Match #${existingData.matchNumber || '?'} — Team #${currentMatchTeamNumber}`;
   document.getElementById('match-modal-error').textContent = '';
   document.getElementById('match-modal-success').textContent = '';
   document.getElementById('match-delete-btn').classList.remove('hidden');
@@ -172,13 +200,48 @@ async function openMatchScoutEdit(docId, existingData) {
   try {
     const fields = await loadMatchFormConfig(teamId);
     const container = document.getElementById('match-dynamic-fields');
+    const renderedFields = lockMatchNumber ? fields.filter(f => f.id !== 'matchNumber') : fields;
 
-    currentMatchFormController = renderDynamicForm(container, fields, existingData);
+    currentMatchFormController = renderDynamicForm(container, renderedFields, existingData);
 
     document.getElementById('match-modal-success').textContent = 'Editing existing match entry.';
   } catch (err) {
     console.error('Failed to render match form for edit:', err);
     document.getElementById('match-modal-error').textContent = 'Failed to load form. Please try again.';
+  }
+}
+
+// ====== Open the match scouting form from the match-based view
+// (match-schedule-view.js's expanded panel) — matchNumber, teamNumber, and
+// eventCode are all already known from which match row + team slot was
+// clicked, so all three end up locked (title-only, not user-editable) in
+// whichever of the two functions above ends up handling it. Resolves
+// new-vs-edit and permission exactly like the team-based view already does:
+// looks up any existing entry via findExistingMatchDoc() (the same helper
+// the manual flow already uses to avoid guessing doc IDs), and if one
+// exists but the current user isn't its original scouter and lacks
+// canEditOtherEntries, tells them so via showNoticeModal() — same
+// Permission Denied message renderMatchListForTeam()'s Edit button now
+// shows in that case, below. ======
+async function openMatchScoutFormFromSchedule(matchNumber, teamNumber, eventCode, teamName) {
+  const teamId = currentTeamData?.id;
+  if (!teamId || !currentUser) return;
+
+  const existing = await findExistingMatchDoc(teamId, eventCode, matchNumber, teamNumber);
+
+  if (existing) {
+    const canEdit = typeof canUserEditOtherEntries === 'function'
+      ? canUserEditOtherEntries(existing)
+      : (existing.scoutedBy === currentUser?.uid);
+    if (!canEdit) {
+      if (typeof showNoticeModal === 'function') {
+        showNoticeModal({ title: 'Permission Denied', message: 'You do not have permission to edit this match scouting entry.' });
+      }
+      return;
+    }
+    await openMatchScoutEdit(existing.id, existing, true, teamName);
+  } else {
+    await openMatchScoutForm(teamNumber, eventCode, matchNumber, teamName);
   }
 }
 
@@ -212,7 +275,11 @@ async function saveMatchScoutForm() {
   }
 
     const fieldValues = currentMatchFormController.getValues();
-    const matchNumber = fieldValues.matchNumber;
+    // Locked entries (opened from the match-based view) never render a
+    // matchNumber field at all — same as teamNumber/eventCode, which have
+    // never been form fields — so the fixed value set when the form was
+    // opened is used instead of reading one out of the (excluded) field.
+    const matchNumber = currentLockedMatchNumber != null ? currentLockedMatchNumber : fieldValues.matchNumber;
 
     if (!matchNumber) {
       errorEl.textContent = 'Match Number is required.';
@@ -366,6 +433,7 @@ function closeMatchScoutForm() {
   currentMatchTeamNumber = null;
   currentMatchEventCode = null;
   currentMatchDocId = null;
+  currentLockedMatchNumber = null;
   currentMatchFormController = null;
 }
 
@@ -524,16 +592,26 @@ function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
 
     header.appendChild(numAndCheckbox);
 
-    if (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries(entry) : (entry.scoutedBy === currentUser?.uid)) {
-      const editBtn = document.createElement('button');
-      editBtn.className = 'btn btn-small btn-outline';
-      editBtn.textContent = 'Edit';
-      editBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        openMatchScoutEdit(entry.id, entry);
-      });
-      header.appendChild(editBtn);
-    }
+    // Always rendered now, regardless of permission — an unauthorized user
+    // clicking it finds out why via showNoticeModal(), rather than the
+    // control simply being absent with no way to discover the reason.
+    const editBtn = document.createElement('button');
+    editBtn.className = 'btn btn-small btn-outline';
+    editBtn.textContent = 'Edit';
+    const canEditThisEntry = typeof canUserEditOtherEntries === 'function'
+      ? canUserEditOtherEntries(entry)
+      : (entry.scoutedBy === currentUser?.uid);
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!canEditThisEntry) {
+        if (typeof showNoticeModal === 'function') {
+          showNoticeModal({ title: 'Permission Denied', message: 'You do not have permission to edit this match scouting entry.' });
+        }
+        return;
+      }
+      openMatchScoutEdit(entry.id, entry);
+    });
+    header.appendChild(editBtn);
     item.appendChild(header);
 
     // Metadata line

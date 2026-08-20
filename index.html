@@ -266,24 +266,43 @@
           <!-- Team list for Match Scouting -->
           <div style="margin-top:10px">
             <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (MATCH)</h3>
-            <button id="btn-export-event-match" class="btn btn-outline btn-small" style="margin-bottom:10px; width:100%">📤 Export All Match Data</button>
-            <p id="event-export-match-error" class="error-message"></p>
-            <p id="event-export-match-success" class="success-message"></p>
-            <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
-              <input type="text" id="input-team-search-match" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
-              <select id="select-team-sort-match" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
-                <option value="number">Sort: Number (low-high)</option>
-                <option value="name">Sort: Name (A-Z)</option>
-                <option value="opr">Sort: OPR (high-low)</option>
-              </select>
+
+            <!-- Team View / Match View toggle — hidden until an event is selected
+                 (shown/hidden by selectEvent()/clearSelectedEvent() in first-api.js).
+                 Reuses the same .tabs/.tab styling as the builder-type toggle in the
+                 Form Builder modal, not new CSS. -->
+            <div class="tabs hidden" id="match-view-toggle-bar" style="margin-bottom:16px">
+              <button class="tab match-view-toggle-btn active" data-view="team">Team View</button>
+              <button class="tab match-view-toggle-btn" data-view="match">Match View</button>
             </div>
-            <div id="match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
-              <button id="btn-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
-              <button id="btn-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
-              <span id="match-bulk-delete-status" style="font-size:0.8rem;"></span>
+
+            <!-- ====== TEAM-BASED VIEW (existing — unchanged) ====== -->
+            <div id="match-team-view">
+              <button id="btn-export-event-match" class="btn btn-outline btn-small" style="margin-bottom:10px; width:100%">📤 Export All Match Data</button>
+              <p id="event-export-match-error" class="error-message"></p>
+              <p id="event-export-match-success" class="success-message"></p>
+              <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
+                <input type="text" id="input-team-search-match" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
+                <select id="select-team-sort-match" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
+                  <option value="number">Sort: Number (low-high)</option>
+                  <option value="name">Sort: Name (A-Z)</option>
+                  <option value="opr">Sort: OPR (high-low)</option>
+                </select>
+              </div>
+              <div id="match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+                <button id="btn-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
+                <button id="btn-match-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
+                <span id="match-bulk-delete-status" style="font-size:0.8rem;"></span>
+              </div>
+              <p class="help-text" id="team-list-status-match">Select an event above to load teams.</p>
+              <div id="team-list-match" class="team-list"></div>
             </div>
-            <p class="help-text" id="team-list-status-match">Select an event above to load teams.</p>
-            <div id="team-list-match" class="team-list"></div>
+
+            <!-- ====== MATCH-BASED VIEW (new) ====== -->
+            <div id="match-schedule-view" class="hidden">
+              <p class="help-text" id="match-schedule-status"></p>
+              <div id="match-schedule-list" class="match-schedule-list"></div>
+            </div>
           </div>
         </div>
 
@@ -964,6 +983,7 @@
   <script src="js/dynamic-form.js"></script>
   <script src="js/pit-scout.js"></script>
   <script src="js/match-scout.js"></script>
+  <script src="js/match-schedule-view.js"></script>
   <script src="js/team-info.js"></script>
   <script src="js/match-scouted-modal.js"></script>
   <script src="js/form-builder.js"></script>

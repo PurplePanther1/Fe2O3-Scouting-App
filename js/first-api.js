@@ -141,6 +141,74 @@ async function getEventTeams(eventCode, season) {
   }
 }
 
+// ====== Get (and cache) an event's match schedule via Worker ======
+// Cached on the same events/{eventCode} doc cacheEventToFirestore() writes
+// name/date/ftcTeams to, as schedule/scheduleCachedAt — a merge-write, so it
+// coexists with those fields rather than clobbering them. Same 1-hour TTL
+// pattern as ensureEventsLoaded()'s season cache.
+//
+// An empty schedule (event's match list not published yet) is cached and
+// returned the same as a populated one — callers treat "no matches yet" as
+// a normal state, not an error, so there's no reason to skip caching it.
+//
+// IMPORTANT: firestore.rules' events/{eventCode} write rule requires
+// request.resource.data.name to be a string on the RESULTING document — for
+// a merge-write, that's the full document after the merge applies, not just
+// this write's fields. If the doc doesn't exist yet at all, a merge-write
+// containing only schedule/scheduleCachedAt has no `name` in the result and
+// is denied (confirmed empirically against the real rules file via the
+// Firestore emulator, not just reasoned about — see scripts/ history). In
+// practice this event doc should already exist by the time schedule is ever
+// fetched (selectEvent() always caches name+ftcTeams first), but the guard
+// below makes that a safe no-op rather than a relied-upon assumption: if the
+// doc isn't there yet, this just skips the Firestore write and returns the
+// in-memory result uncached, instead of attempting a write that's certain
+// to be denied.
+async function getEventSchedule(eventCode, season) {
+  console.time('[Timing] getEventSchedule');
+  try {
+    const eventRef = db.collection('events').doc(eventCode);
+    const doc = await eventRef.get();
+
+    if (doc.exists) {
+      const data = doc.data();
+      if (data.schedule !== undefined) {
+        const cachedAt = data.scheduleCachedAt ? data.scheduleCachedAt.toMillis() : 0;
+        const age = Date.now() - cachedAt;
+        if (age < CACHE_TTL_MS) {
+          console.log(`[schedule] cache hit for ${eventCode}: ${data.schedule.length} match(es), ${Math.round(age / 1000)}s old`);
+          console.timeEnd('[Timing] getEventSchedule');
+          return data.schedule;
+        }
+        console.log(`[schedule] cache for ${eventCode} is ${Math.round(age / 1000 / 60)}m old, re-fetching`);
+      }
+    }
+
+    const result = await callWorker(`/schedule?eventCode=${encodeURIComponent(eventCode)}&season=${encodeURIComponent(season || getSelectedSeason())}`);
+    const schedule = result.schedule || [];
+    console.log(`[schedule] fetched ${schedule.length} match(es) for ${eventCode} from worker:`, schedule);
+
+    if (doc.exists) {
+      try {
+        await eventRef.set({
+          schedule,
+          scheduleCachedAt: firebase.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+      } catch (err) {
+        console.warn('Failed to cache schedule to Firestore:', err);
+      }
+    } else {
+      console.warn(`[schedule] events/${eventCode} doc doesn't exist yet — skipping Firestore cache write (will retry next call)`);
+    }
+
+    console.timeEnd('[Timing] getEventSchedule');
+    return schedule;
+  } catch (err) {
+    console.timeEnd('[Timing] getEventSchedule');
+    throw err;
+  }
+}
+
 // ====== Cache event data to Firestore ======
 async function cacheEventToFirestore(eventData, ftcTeams) {
   if (!eventData || !eventData.code) return;
@@ -337,6 +405,11 @@ function clearSelectedEvent() {
   if (typeof watchMatchScoutStatus === 'function') {
     watchMatchScoutStatus(null);
   }
+  // Hide the Team View/Match View toggle and clear the previous event's
+  // schedule/expand state
+  if (typeof resetMatchScheduleView === 'function') {
+    resetMatchScheduleView();
+  }
 
   if (typeof updatePinButtonUI === 'function') {
     updatePinButtonUI();
@@ -495,6 +568,14 @@ async function selectEvent(eventData) {
     // Start watching match scouting status for this event
     if (typeof watchMatchScoutStatus === 'function') {
       watchMatchScoutStatus(eventData.code);
+    }
+
+    // Reveal the Match Scouting tab's Team View/Match View toggle and load
+    // the match-based view's schedule data (currentEventTeams above is
+    // already populated by renderTeamList(), which match-schedule-view.js's
+    // name lookups depend on).
+    if (typeof onMatchScheduleEventSelected === 'function') {
+      onMatchScheduleEventSelected(eventData.code);
     }
     console.timeEnd('[Timing] selectEvent total');
   } catch (err) {
