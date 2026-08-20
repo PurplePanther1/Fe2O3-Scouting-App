@@ -207,16 +207,12 @@ async function anonymizeOwnScoutingEntries(teamId, uid) {
     { queryField: 'lastEditedBy', nameField: 'lastEditedByName' }
   ];
 
-  // pitScouting is now a teams/{teamId}/pitScouting subcollection, scoped by
-  // path — no teamId where() clause needed. matchScouting is still the flat
-  // top-level collection, so it still needs one: teamId is included alongside
-  // the uid filter for the same reason the Sheets export queries do —
-  // Firestore can only validate a list query against a rule that does
-  // get(resource.data.teamId) when teamId is pinned to a single value by an
-  // exact-match where() clause.
+  // Both pitScouting and matchScouting are now teams/{teamId}/pitScouting
+  // and teams/{teamId}/matchScouting subcollections, scoped by path — no
+  // teamId where() clause needed on either.
   const collections = [
     { name: 'pitScouting', baseQuery: db.collection('teams').doc(teamId).collection('pitScouting') },
-    { name: 'matchScouting', baseQuery: db.collection('matchScouting').where('teamId', '==', teamId) }
+    { name: 'matchScouting', baseQuery: db.collection('teams').doc(teamId).collection('matchScouting') }
   ];
 
   for (const { name, baseQuery } of collections) {
@@ -277,12 +273,11 @@ async function selfLeaveTeam(teamId, uid) {
 // them. Best-effort per document, same style: a failure on one entry is
 // logged and skipped rather than aborting the rest. ======
 async function deleteAllScoutingEntriesForTeam(teamId) {
-  // pitScouting: teams/{teamId}/pitScouting subcollection, scoped by path.
-  // matchScouting: still the flat top-level collection, still needs the
-  // teamId where() clause.
+  // Both are teams/{teamId}/pitScouting and teams/{teamId}/matchScouting
+  // subcollections now, scoped by path.
   const collections = [
     { name: 'pitScouting', query: db.collection('teams').doc(teamId).collection('pitScouting') },
-    { name: 'matchScouting', query: db.collection('matchScouting').where('teamId', '==', teamId) }
+    { name: 'matchScouting', query: db.collection('teams').doc(teamId).collection('matchScouting') }
   ];
 
   for (const { name, query } of collections) {

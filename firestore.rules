@@ -263,6 +263,26 @@ service cloud.firestore {
         allow delete: if isAuth() && canEditOrDeleteEntry(teamId, resource.data);
       }
 
+      // Nested match-scouting subcollection — mirrors the pit-scouting block
+      // above exactly (same functions, same shape, both active alongside the
+      // flat /matchScouting/{documentId} collection below during the data-
+      // reorg migration). Match's doc-ID scheme and per-match cardinality
+      // differ from pit's at the application layer, but none of that is
+      // visible to these rules — teamId, scoutedBy, and lastEditedBy are the
+      // only fields any of this depends on, same as pit.
+      match /matchScouting/{documentId} {
+        allow read: if resource == null || isTeamMember(teamId);
+        allow create: if isAuth() && isTeamMember(teamId);
+        allow update: if isAuth() && (
+          (canEditOrDeleteEntry(teamId, resource.data)
+            && request.resource.data.scoutedBy == resource.data.scoutedBy)
+          || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
+          || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
+          || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
+        );
+        allow delete: if isAuth() && canEditOrDeleteEntry(teamId, resource.data);
+      }
+
       // Per-team copy of a member's email — lets THIS team's captain (or a
       // teammate granted canViewMemberEmails) see it, scoped to this team
       // specifically. Replaces the old userTeams-based cross-user pointer

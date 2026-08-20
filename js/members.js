@@ -1221,13 +1221,12 @@ async function anonymizeKickedMembersScoutingEntries(teamId, targetUid) {
     { queryField: 'lastEditedBy', nameField: 'lastEditedByName' }
   ];
 
-  // pitScouting is now a teams/{teamId}/pitScouting subcollection, scoped by
-  // path — no teamId where() clause needed. matchScouting is still the flat
-  // top-level collection and still needs one — see anonymizeOwnScoutingEntries()
-  // (delete-account.js) for the fuller reasoning, same pattern here.
+  // Both pitScouting and matchScouting are teams/{teamId}/pitScouting and
+  // teams/{teamId}/matchScouting subcollections now, scoped by path — no
+  // teamId where() clause needed on either.
   const collections = [
     { name: 'pitScouting', baseQuery: db.collection('teams').doc(teamId).collection('pitScouting') },
-    { name: 'matchScouting', baseQuery: db.collection('matchScouting').where('teamId', '==', teamId) }
+    { name: 'matchScouting', baseQuery: db.collection('teams').doc(teamId).collection('matchScouting') }
   ];
 
   for (const { name, baseQuery } of collections) {

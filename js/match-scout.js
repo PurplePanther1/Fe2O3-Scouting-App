@@ -1,14 +1,18 @@
 // ====== Match Scouting Form ======
-// Data stored in Firestore collection "matchScouting"
+// Data stored in Firestore at teams/{teamId}/matchScouting/{docId} (moved
+// from the flat top-level "matchScouting" collection as part of the data
+// reorg — same move pit scouting already went through, see pit-scout.js).
 // Document ID: `${teamId}_${eventCode}_${matchNumber}_${teamNumber}` — teamId
 // (the SCOUTING team's own Firestore team ID) is included so two different
 // scouting teams can never collide, even though match numbers are canonical/
 // shared across a real event (two different teams both scouting the same
 // target team in the same real match is a plausible collision, not just an
 // artifact of reused test data — same reasoning as pit-scout.js, see there
-// for the fuller writeup). Older entries (saved before this existed) used
-// `${eventCode}_${matchNumber}_${teamNumber}` — left as-is (see
-// findExistingMatchDoc() below) rather than migrated.
+// for the fuller writeup). Now that the collection itself is scoped per-team
+// by its path, this prefix is redundant for new docs, but kept for ID-format
+// continuity with pre-migration data. Older entries (saved before this
+// existed) used `${eventCode}_${matchNumber}_${teamNumber}` — left as-is
+// (see findExistingMatchDoc() below) rather than migrated.
 // Fields: eventCode, matchNumber, teamNumber, teamId, plus dynamic fields
 //         from formConfig, scoutedBy (uid), scoutedByName, scoutedAt, updatedAt
 // Unlike pit scouting, each team can have multiple match entries (one per match).
@@ -26,8 +30,7 @@ let currentMatchFormController = null; // returned by renderDynamicForm
 // Queries by data fields rather than guessing an ID. Returns { id, ...data }
 // or null. ======
 async function findExistingMatchDoc(teamId, eventCode, matchNumber, teamNumber) {
-  const snap = await db.collection('matchScouting')
-    .where('teamId', '==', teamId)
+  const snap = await db.collection('teams').doc(teamId).collection('matchScouting')
     .where('eventCode', '==', eventCode)
     .where('matchNumber', '==', Number(matchNumber))
     .where('teamNumber', '==', Number(teamNumber))
@@ -77,14 +80,20 @@ function updateMatchBulkSelectUI(prefix = 'td-') {
 }
 
 // ====== Bulk-delete match scouting entries by doc id ======
-// Each delete goes through the same db.collection('matchScouting').doc(id).delete() call
+// Each delete goes through the same teams/{teamId}/matchScouting doc(id).delete() call
 // as the single-entry path, so Firestore rules (canEditOrDeleteEntry) enforce permission
-// per-document exactly as they already do — this is a UI convenience, not a bypass.
+// per-document exactly as they already do — this is a UI convenience, not a bypass. Reads
+// teamId from currentTeamData (like pit-scout.js's bulkDeletePitScoutData) since callers
+// only ever operate on the current team's own bulk-selected entries.
 async function bulkDeleteMatchScoutData(entryIds) {
   const results = { succeeded: [], failed: [] };
+  const teamId = currentTeamData?.id;
+  if (!teamId) {
+    return { succeeded: [], failed: [...entryIds] };
+  }
   for (const entryId of entryIds) {
     try {
-      await db.collection('matchScouting').doc(entryId).delete();
+      await db.collection('teams').doc(teamId).collection('matchScouting').doc(entryId).delete();
       results.succeeded.push(entryId);
     } catch (err) {
       console.error(`Failed to delete match scouting data for ${entryId}:`, err);
@@ -224,7 +233,7 @@ async function saveMatchScoutForm() {
       // below is being changed (i.e. "moving" this entry to a new slot).
       let existingData = null;
       if (currentMatchDocId) {
-        const knownDoc = await db.collection('matchScouting').doc(currentMatchDocId).get();
+        const knownDoc = await db.collection('teams').doc(teamId).collection('matchScouting').doc(currentMatchDocId).get();
         if (knownDoc.exists) existingData = knownDoc.data();
       }
 
@@ -274,11 +283,11 @@ async function saveMatchScoutForm() {
         payload.lastEditedByName = userDisplayName;
         payload.lastEditedByTimestamp = Date.now();
         if (currentMatchDocId && currentMatchDocId !== docId) {
-          await db.collection('matchScouting').doc(currentMatchDocId).delete();
+          await db.collection('teams').doc(teamId).collection('matchScouting').doc(currentMatchDocId).delete();
         }
       }
 
-    await db.collection('matchScouting').doc(docId).set(payload, { merge: true });
+    await db.collection('teams').doc(teamId).collection('matchScouting').doc(docId).set(payload, { merge: true });
 
     hideLoading();
     if (successEl) successEl.textContent = 'Match scouting data saved!';
@@ -316,6 +325,12 @@ async function deleteMatchScoutData() {
 
   if (!currentMatchDocId || typeof showConfirmModal !== 'function') return;
 
+  const teamId = currentTeamData?.id;
+  if (!teamId) {
+    errorEl.textContent = 'Team data not loaded. Please rejoin your team.';
+    return;
+  }
+
   showConfirmModal({
     title: 'Delete Match Scouting Data?',
     message: `Delete this match scouting entry for Team #${currentMatchTeamNumber}? This cannot be undone.`,
@@ -324,7 +339,7 @@ async function deleteMatchScoutData() {
     onConfirm: async () => {
       showLoading('Deleting...');
       try {
-        await db.collection('matchScouting').doc(currentMatchDocId).delete();
+        await db.collection('teams').doc(teamId).collection('matchScouting').doc(currentMatchDocId).delete();
         hideLoading();
         refreshMatchEntriesCache();
         refreshOpenMatchListPanels();
@@ -366,18 +381,20 @@ function watchMatchScoutStatus(eventCode) {
 
   matchEntriesCache = {};
 
-  if (!eventCode) {
-    // No event selected — notify
+  const teamId = currentTeamData?.id;
+  if (!eventCode || !teamId) {
+    // No event selected, or team data not loaded yet — notify
     if (typeof onMatchScoutedStateChanged === 'function') {
       onMatchScoutedStateChanged();
     }
     return;
   }
 
-  // Listen for our own team's match scouting docs at this event code
-  matchScoutUnsubscribe = db.collection('matchScouting')
+  // Listen for our own team's match scouting docs at this event code —
+  // scoped by the teams/{teamId}/matchScouting subcollection path itself
+  // now, not a teamId where() clause.
+  matchScoutUnsubscribe = db.collection('teams').doc(teamId).collection('matchScouting')
     .where('eventCode', '==', eventCode)
-    .where('teamId', '==', currentTeamData?.id || null)
     .onSnapshot((snapshot) => {
       matchEntriesCache = {};
       snapshot.forEach((doc) => {

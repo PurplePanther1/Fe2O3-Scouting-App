@@ -337,14 +337,11 @@ async function withStep(stepLabel, fn) {
 }
 
 // ====== Fetch all matchScouting docs for an event (same query shape as watchMatchScoutStatus) ======
-// The teamId filter isn't just a convenience narrowing — firestore.rules' matchScouting
-// read rule does a get() keyed on resource.data.teamId, and Firestore can only validate
-// that for a list query when a where() clause pins teamId to a single value; without it
-// the whole query is rejected as "insufficient permissions" for every requester.
+// Reads teams/{teamId}/matchScouting — scoped by path now, not a teamId
+// where() clause.
 async function fetchMatchDocsForEvent(eventCode, teamId) {
-  const snap = await db.collection('matchScouting')
+  const snap = await db.collection('teams').doc(teamId).collection('matchScouting')
     .where('eventCode', '==', eventCode)
-    .where('teamId', '==', teamId)
     .get();
   const docs = [];
   snap.forEach(doc => docs.push({ id: doc.id, ...doc.data() }));
@@ -584,11 +581,9 @@ async function gatherEventMatchOnlyExportData(eventCode, teamId) {
 // ANY event — not just the currently selected one. Same unfiltered-by-event
 // query deleteAllScoutingEntriesForTeam() (delete-account.js) already uses
 // when a team is deleted — an unfiltered read of the teams/{teamId}/pitScouting
-// subcollection for pit, and the same teamId-pinned where() clause as before
-// for the still-flat matchScouting (which firestore.rules' rule already
-// permits — no rule change needed there). Grouped client-side by eventCode.
-// Used only by the "Export Whole Team Data" flow, right before a team's data
-// is permanently deleted (leaving/deleting as its last member). ======
+// and teams/{teamId}/matchScouting subcollections. Grouped client-side by
+// eventCode. Used only by the "Export Whole Team Data" flow, right before a
+// team's data is permanently deleted (leaving/deleting as its last member). ======
 async function gatherFullTeamExportData(teamId) {
   const [pitFields, matchFields] = await Promise.all([
     loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
@@ -598,7 +593,7 @@ async function gatherFullTeamExportData(teamId) {
   const pitSnap = await withStep('Reading all pit scouting data',
     () => db.collection('teams').doc(teamId).collection('pitScouting').get());
   const matchSnap = await withStep('Reading all match scouting data',
-    () => db.collection('matchScouting').where('teamId', '==', teamId).get());
+    () => db.collection('teams').doc(teamId).collection('matchScouting').get());
 
   const byEvent = {}; // eventCode -> { pitDocs: [], matchDocs: [] }
   const getBucket = (eventCode) => {
