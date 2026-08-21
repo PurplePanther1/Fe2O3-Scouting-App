@@ -7,8 +7,11 @@
     "ignore": [
       "firebase.json",
       "**/.*",
+      ".git/**",
+      ".claude/**",
       "**/node_modules/**",
-      "workers/**"
+      "workers/**",
+      "scripts/**"
     ],
     "rewrites": [
       {
