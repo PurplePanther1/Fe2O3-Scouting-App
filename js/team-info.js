@@ -65,11 +65,20 @@ function renderTeamInfoList(teams) {
 }
 
 // ====== Open the Team Detail modal for a given team ======
-function openTeamDetailModal(teamNumber, eventCode, teamObj) {
+// Keeps the real content hidden behind a loading state until every piece
+// (profile/awards/OPR via loadTeamDetail, pit data via renderPitDataForTeam —
+// match entries render synchronously off the local cache inside
+// loadTeamDetail) has finished loading, so the popup appears already fully
+// populated instead of visibly resizing as each piece fills in.
+async function openTeamDetailModal(teamNumber, eventCode, teamObj) {
   currentSelectedTeamNumber = teamNumber;
 
   const modal = document.getElementById('team-detail-modal');
+  const body = document.getElementById('td-modal-body');
+  const loadingEl = document.getElementById('td-modal-loading');
   if (modal) modal.classList.remove('hidden');
+  if (body) body.classList.add('hidden');
+  if (loadingEl) loadingEl.classList.remove('hidden');
 
   const titleEl = document.getElementById('team-detail-modal-title');
   if (titleEl) {
@@ -77,11 +86,24 @@ function openTeamDetailModal(teamNumber, eventCode, teamObj) {
     titleEl.textContent = teamName ? `Team #${teamNumber} — ${teamName}` : `Team #${teamNumber}`;
   }
 
+  const loadPromises = [];
   if (typeof loadTeamDetail === 'function') {
-    loadTeamDetail(teamNumber, eventCode);
+    loadPromises.push(loadTeamDetail(teamNumber, eventCode));
   }
   if (typeof renderPitDataForTeam === 'function') {
-    renderPitDataForTeam(teamNumber, eventCode);
+    loadPromises.push(renderPitDataForTeam(teamNumber, eventCode));
+  }
+
+  try {
+    await Promise.all(loadPromises);
+  } finally {
+    // The team may have changed (or the modal closed) while data was loading
+    // — don't reveal stale content for a team the user has since navigated
+    // away from. Same guard renderPitDataForTeam already uses internally.
+    if (currentSelectedTeamNumber === teamNumber) {
+      if (loadingEl) loadingEl.classList.add('hidden');
+      if (body) body.classList.remove('hidden');
+    }
   }
 }
 
@@ -147,7 +169,18 @@ async function renderPitDataForTeam(teamNumber, eventCode) {
     return;
   }
 
-  fields.forEach(field => {
+  // This read-only view is the entry's "preview" — only fields the team has
+  // configured to show there (see form-builder.js's "Show in preview"
+  // checkbox) appear here, in the field order the team set. The full field
+  // set is still always shown in the actual edit form (openPitScoutForm),
+  // regardless of this setting.
+  const previewFields = fields.filter(field => field.showInPreview !== false);
+  if (previewFields.length === 0) {
+    container.innerHTML = '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">No fields are configured to show in the preview.</p>';
+    return;
+  }
+
+  previewFields.forEach(field => {
     const row = document.createElement('div');
     row.style.cssText = 'display:flex; justify-content:space-between; gap:8px; padding:4px 0; font-size:0.85rem; border-bottom:1px solid var(--border);';
 

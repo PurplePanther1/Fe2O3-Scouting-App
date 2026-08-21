@@ -11,9 +11,11 @@
 // clicking a team in the expanded panel does nothing yet (phase 4 wires it
 // to the match scouting form).
 
-// ====== Default view on every page load — change this one constant to flip
-// the default later. Deliberately NOT persisted (no session-state.js entry)
-// per current instructions: every load/reload always starts here. ======
+// ====== Fallback view for a team that's never set one — change this one
+// constant to flip the default. Persisted per-team via session-state.js
+// (perTeam[teamId].matchViewMode, restored in restorePerTeamEventState())
+// same as selectedEvent/searchText, so a refresh or team switch shows
+// whichever view this team was last left on rather than always resetting. ======
 const MATCH_VIEW_DEFAULT = 'team'; // 'team' | 'match'
 
 let matchViewMode = MATCH_VIEW_DEFAULT;
@@ -339,6 +341,7 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.addEventListener('click', () => {
       matchViewMode = btn.dataset.view === 'match' ? 'match' : 'team';
       applyMatchViewMode();
+      if (typeof saveSessionState === 'function') saveSessionState();
     });
   });
 

@@ -245,6 +245,17 @@ async function openMatchScoutFormFromSchedule(matchNumber, teamNumber, eventCode
   }
 }
 
+// ====== Did the form's field values actually differ from what's already
+// saved? Used to decide whether a Save on an existing entry should touch
+// lastEditedBy/lastEditedByName/lastEditedByTimestamp at all — clicking Save
+// without changing anything shouldn't reassign "last edited by" to whoever
+// just reopened and resaved the entry unchanged. Same pattern as pit-scout.js's
+// pitFormValuesChanged(). ======
+function matchFormValuesChanged(fieldValues, existingData) {
+  if (!existingData) return true;
+  return Object.keys(fieldValues).some(key => (fieldValues[key] ?? null) !== (existingData[key] ?? null));
+}
+
 // ====== Save match scouting form ======
 async function saveMatchScoutForm() {
   const errorEl = document.getElementById('match-modal-error');
@@ -345,10 +356,17 @@ async function saveMatchScoutForm() {
         payload.scoutedAt = firebase.firestore.FieldValue.serverTimestamp();
       } else {
         payload.scoutedAt = existingData.scoutedAt || firebase.firestore.FieldValue.serverTimestamp();
-        payload.lastEditedBy = currentUser.uid;
-        payload.lastEditedByEmail = firebase.firestore.FieldValue.delete();
-        payload.lastEditedByName = userDisplayName;
-        payload.lastEditedByTimestamp = Date.now();
+        // Moving an entry to a different match-number slot (docId changed) is
+        // always a real edit even if every other field is untouched — only
+        // resaving the SAME slot needs the field-by-field comparison to tell
+        // whether anything actually changed.
+        const sameSlot = currentMatchDocId === docId;
+        if (!sameSlot || matchFormValuesChanged(fieldValues, existingData)) {
+          payload.lastEditedBy = currentUser.uid;
+          payload.lastEditedByEmail = firebase.firestore.FieldValue.delete();
+          payload.lastEditedByName = userDisplayName;
+          payload.lastEditedByTimestamp = Date.now();
+        }
         if (currentMatchDocId && currentMatchDocId !== docId) {
           await db.collection('teams').doc(teamId).collection('matchScouting').doc(currentMatchDocId).delete();
         }
@@ -523,11 +541,23 @@ function refreshMatchEntriesCache() {
 // match number — keyed by ID prefix, same reasoning as matchBulkState above.
 const matchEntrySearchQuery = { 'td-': '', 'msm-': '' };
 
-function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
+// ====== Per-panel render-generation counter — renderMatchListForTeam() is
+// async (it awaits the match form config to know which fields belong in the
+// preview), and can be re-invoked for the same panel (prefix) again before an
+// earlier call's await resolves (rapid snapshot updates, a search keystroke,
+// ...). Each call captures the counter's value at its start, bumps it first,
+// and checks after the await that no newer call has since started — if one
+// has, this stale call bails without touching the DOM instead of a slower
+// call clobbering a newer one's already-rendered result. ======
+const matchListRenderGeneration = { 'td-': 0, 'msm-': 0 };
+
+async function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
   const container = document.getElementById(`${prefix}match-entries`);
   const countEl = document.getElementById(`${prefix}match-count`);
   const bulkState = matchBulkState[prefix];
   if (!container || !bulkState) return;
+
+  const myGeneration = ++matchListRenderGeneration[prefix];
 
   const entries = getMatchEntriesForTeam(teamNumber, eventCode);
 
@@ -552,6 +582,25 @@ function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
     updateMatchBulkSelectUI(prefix);
     return;
   }
+
+  // Which fields belong in each entry's preview (and in what order) is
+  // team-configured — see form-builder.js's "Show in preview" checkbox on
+  // the match form's fields. Textarea-type fields (e.g. Notes) render as
+  // their own block below the line rather than jammed into it, same as the
+  // old hardcoded Notes section did.
+  let previewFields = [];
+  const teamId = currentTeamData?.id;
+  if (teamId && typeof loadMatchFormConfig === 'function') {
+    try {
+      const matchFields = await loadMatchFormConfig(teamId);
+      if (matchListRenderGeneration[prefix] !== myGeneration) return; // superseded by a newer call
+      previewFields = matchFields.filter(f => f.showInPreview !== false);
+    } catch (err) {
+      console.warn('Failed to load match form config for preview:', err);
+    }
+  }
+  const lineFields = previewFields.filter(f => f.type !== 'textarea');
+  const blockFields = previewFields.filter(f => f.type === 'textarea');
 
   filtered.forEach((entry, index) => {
     const item = document.createElement('div');
@@ -622,23 +671,29 @@ function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
     meta.textContent = `Scouted by: ${scoutedBy} | Last edited by: ${lastEditedBy}`;
     item.appendChild(meta);
 
-    // Metrics summary line
-    const metrics = document.createElement('div');
-    metrics.style.cssText = 'font-size:0.9rem; font-weight:500; margin-bottom:8px; padding:6px 10px; background: rgba(255, 255, 255, 0.08); color: var(--text-main, #ffffff); border-radius:6px;';
-    const autoScore = entry.autoScore ?? entry.auto ?? 0;
-    const teleopScore = entry.teleopScore ?? entry.teleop ?? 0;
-    const endgameScore = entry.endgameScore ?? entry.endgame ?? 0;
-    const cycleTime = entry.cycleTime ?? entry.cycle ?? 0;
-    metrics.textContent = `Auto: ${autoScore} | Teleop: ${teleopScore} | Endgame: ${endgameScore} | Cycle: ${cycleTime}s`;
-    item.appendChild(metrics);
-
-    // Notes section (if present)
-    if (entry.notes) {
-      const notesEl = document.createElement('div');
-      notesEl.style.cssText = 'font-size:0.85rem; color:var(--text-main); margin-top:8px; padding-top:8px; border-top:1px dashed var(--border);';
-      notesEl.textContent = `Notes: ${entry.notes}`;
-      item.appendChild(notesEl);
+    // Preview line — one "Label: value" pair per configured non-textarea
+    // preview field, pipe-delimited. Missing/empty values show as '—'.
+    if (lineFields.length > 0) {
+      const metrics = document.createElement('div');
+      metrics.style.cssText = 'font-size:0.9rem; font-weight:500; margin-bottom:8px; padding:6px 10px; background: rgba(255, 255, 255, 0.08); color: var(--text-main, #ffffff); border-radius:6px;';
+      metrics.textContent = lineFields.map(f => {
+        const val = entry[f.id];
+        return `${f.label}: ${(val === null || val === undefined || val === '') ? '—' : val}`;
+      }).join(' | ');
+      item.appendChild(metrics);
     }
+
+    // Preview blocks — configured textarea-type fields (e.g. Notes), each
+    // its own block below the line. Skipped entirely when empty, same as the
+    // old hardcoded Notes section did.
+    blockFields.forEach(f => {
+      const val = entry[f.id];
+      if (val === null || val === undefined || val === '') return;
+      const blockEl = document.createElement('div');
+      blockEl.style.cssText = 'font-size:0.85rem; color:var(--text-main); margin-top:8px; padding-top:8px; border-top:1px dashed var(--border);';
+      blockEl.textContent = `${f.label}: ${val}`;
+      item.appendChild(blockEl);
+    });
 
     container.appendChild(item);
   });

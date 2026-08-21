@@ -265,6 +265,14 @@ async function selfLeaveTeam(teamId, uid) {
   } catch (err) {
     console.warn(`Failed to delete memberContacts for team ${teamId}:`, err);
   }
+
+  // Same reasoning as memberContacts above — this team's copy of the
+  // departing user's per-team display name shouldn't outlive their membership.
+  try {
+    await db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(uid).delete();
+  } catch (err) {
+    console.warn(`Failed to delete memberDisplayNames for team ${teamId}:`, err);
+  }
 }
 
 // ====== Delete every pitScouting/matchScouting entry for a team — used when
@@ -341,6 +349,12 @@ async function deleteEntireTeam(teamId, uid, teamData) {
     await db.collection('teams').doc(teamId).collection('memberContacts').doc(uid).delete();
   } catch (err) {
     console.warn(`Failed to delete memberContacts for team ${teamId}:`, err);
+  }
+
+  try {
+    await db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(uid).delete();
+  } catch (err) {
+    console.warn(`Failed to delete memberDisplayNames for team ${teamId}:`, err);
   }
 
   // Must be last — everything above depends on this document (and this

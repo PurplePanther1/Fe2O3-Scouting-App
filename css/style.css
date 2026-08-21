@@ -435,6 +435,19 @@ input[type="password"]::placeholder {
   to { transform: rotate(360deg); }
 }
 
+/* ====== My Account Tab (card-style sections) ====== */
+.account-section-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-top: 16px;
+}
+
+.account-section-card:first-child {
+  margin-top: 0;
+}
+
 /* ====== Join Code Display ====== */
 .join-code-card {
   background: var(--surface);

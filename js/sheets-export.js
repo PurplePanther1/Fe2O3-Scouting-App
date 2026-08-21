@@ -227,15 +227,53 @@ function formatTimestamp(ts) {
   return String(ts);
 }
 
+// ====== Structural/metadata keys every pitScouting/matchScouting doc can
+// carry that are NEVER form fields (Firestore doc id, denormalized team
+// name, attribution/timestamp bookkeeping, ...) — excluded when scanning a
+// doc for "deleted field" columns below, regardless of whether a given
+// export's fixedColumns already happens to cover some of them too. ======
+const RESERVED_DOC_KEYS = new Set([
+  'id', 'eventCode', 'teamNumber', 'teamId', 'matchNumber', 'teamName',
+  'scoutedBy', 'scoutedByEmail', 'scoutedByName', 'scoutedAt', 'updatedAt',
+  'lastEditedBy', 'lastEditedByEmail', 'lastEditedByName', 'lastEditedByTimestamp'
+]);
+
 // ====== Turn formConfig fields + Firestore docs into a 2D array of sheet rows ======
 // fixedColumns: [{ header, key }] columns that always exist regardless of formConfig
 // (e.g. Team Number, Match Number) — any formConfig field sharing one of their keys
 // is skipped so the column isn't duplicated.
+//
+// Also includes a column for any field that's no longer on the current form
+// config but still has data on at least one doc in THIS export's scope — a
+// field deleted from the form shouldn't silently drop its historical data
+// from every export forever after. Skipped entirely (not just left empty)
+// when nothing being exported this time has it, so it doesn't accumulate as
+// a permanent empty column across unrelated exports.
 function buildSheetRows(fields, docs, fixedColumns) {
   const fixedKeys = fixedColumns.map(c => c.key);
-  const dynamicColumns = fields
+  const currentFieldColumns = fields
     .filter(f => !fixedKeys.includes(f.id))
     .map(f => ({ header: f.label, key: f.id }));
+
+  const currentFieldKeys = new Set(fields.map(f => f.id));
+  const deletedFieldKeys = new Set();
+  docs.forEach(doc => {
+    Object.keys(doc).forEach(key => {
+      if (fixedKeys.includes(key)) return;
+      if (currentFieldKeys.has(key)) return;
+      if (RESERVED_DOC_KEYS.has(key)) return;
+      deletedFieldKeys.add(key);
+    });
+  });
+  // Sorted for a stable, deterministic column order — otherwise it'd vary
+  // export to export based on incidental key-iteration order.
+  const deletedFieldColumns = Array.from(deletedFieldKeys).sort().map(key => ({
+    header: `${key} (deleted field)`,
+    key
+  }));
+
+  const dynamicColumns = [...currentFieldColumns, ...deletedFieldColumns];
+  const dynamicKeys = new Set(dynamicColumns.map(c => c.key));
 
   const columns = [
     ...fixedColumns,
@@ -249,6 +287,16 @@ function buildSheetRows(fields, docs, fixedColumns) {
     rows.push(columns.map(c => {
       if (c.key === '__scoutedBy') return doc.scoutedByEmail || doc.scoutedByName || '';
       if (c.key === '__scoutedAt') return formatTimestamp(doc.scoutedAt);
+      if (dynamicKeys.has(c.key)) {
+        // Distinguish "this field existed on the form when the entry was
+        // made and was left blank" (key present, even as '') from "this
+        // field didn't exist yet on this entry" (key entirely absent — a
+        // field added to the form after this entry was scouted, or a
+        // deleted field being included via the rule above): the latter
+        // renders as N/A rather than an indistinguishable blank cell.
+        if (!(c.key in doc)) return 'N/A';
+        return formatCellValue(doc[c.key]);
+      }
       return formatCellValue(doc[c.key]);
     }));
   });

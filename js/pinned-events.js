@@ -92,7 +92,6 @@ function renderPinnedEventsList() {
     item.style.justifyContent = 'space-between';
     item.style.alignItems = 'center';
     item.style.gap = '10px';
-    item.style.cursor = 'default'; // row itself is no longer clickable — use the Select button
     if (isSelected) {
       item.classList.add('selected');
     }
@@ -111,46 +110,47 @@ function renderPinnedEventsList() {
     textGroup.appendChild(codeEl);
     item.appendChild(textGroup);
 
-    const btnGroup = document.createElement('div');
-    btnGroup.style.display = 'flex';
-    btnGroup.style.gap = '6px';
-    btnGroup.style.flexShrink = '0';
-
-    const selectBtn = document.createElement('button');
-    selectBtn.className = `btn btn-small ${isSelected ? 'btn-primary' : 'btn-outline'}`;
-    selectBtn.textContent = isSelected ? 'Deselect' : 'Select';
-    selectBtn.addEventListener('click', () => {
+    // Row itself is the click target now — matches the event-search results
+    // list's pattern (click to select, no separate button). Clicking an
+    // already-selected row deselects it.
+    item.addEventListener('click', () => {
       if (isSelected) {
         // Reuse the same "clear selected event" logic used elsewhere in the app.
         if (typeof clearSelectedEvent === 'function') {
           clearSelectedEvent();
         }
       } else if (typeof selectEvent === 'function') {
-        // Selecting from this tab leaves behind a stale search query/result set
-        // from the event-search box, since that flow was never involved — clear it.
+        // Fill the search bar with this event's name and route through the exact
+        // same steps selecting from the search dropdown uses (first-api.js
+        // renderSuggestions' click handler) — needed so the choice persists
+        // across a refresh the same way: session-state.js saves whatever's in
+        // the search box alongside selectedEvent, and restorePerTeamEventState()
+        // just restores that saved text verbatim rather than re-deriving it.
         const searchInput = document.getElementById('input-event-search');
-        if (searchInput) searchInput.value = '';
-        if (typeof hideSuggestions === 'function') hideSuggestions();
-        const eventResults = document.getElementById('event-results');
-        if (eventResults) eventResults.innerHTML = '';
-
-        // Loads the event exactly the way selecting it from search results does.
+        if (searchInput) searchInput.value = evt.name || evt.code;
+        if (typeof clearSelectedEvent === 'function') clearSelectedEvent();
         selectEvent({ code: evt.code, name: evt.name || evt.code });
+        if (typeof hideSuggestions === 'function') hideSuggestions();
       }
     });
-    btnGroup.appendChild(selectBtn);
 
     if (canPin) {
+      const btnGroup = document.createElement('div');
+      btnGroup.style.display = 'flex';
+      btnGroup.style.gap = '6px';
+      btnGroup.style.flexShrink = '0';
+
       const unpinBtn = document.createElement('button');
       unpinBtn.className = 'btn btn-outline btn-small';
       unpinBtn.textContent = isEventPinned(evt.code) ? '📌 Unpin' : '📌 Pin';
-      unpinBtn.addEventListener('click', () => {
+      unpinBtn.addEventListener('click', (e) => {
+        e.stopPropagation(); // don't also trigger the row's select/deselect click
         togglePinForEvent(evt);
       });
       btnGroup.appendChild(unpinBtn);
+      item.appendChild(btnGroup);
     }
 
-    item.appendChild(btnGroup);
     container.appendChild(item);
   });
 }

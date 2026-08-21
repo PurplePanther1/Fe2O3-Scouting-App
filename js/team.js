@@ -72,6 +72,21 @@ function resetDashboardOnEnterTeam() {
   if (typeof window.activateScoutingSubTab === 'function') {
     window.activateScoutingSubTab('info');
   }
+
+  // Also reset the live selectedEvent/search-box state — unlike
+  // switchActiveTeam() (auth.js), which calls restorePerTeamEventState() for
+  // exactly this reason, nothing else on this path resets them. Without
+  // this, whatever event/search text was still showing from before (most
+  // notably: leaving one's LAST team lands on this same screen without ever
+  // blanking the search box — navigateAwayFromRemovedTeam(), members.js,
+  // only clears that team's OWN saved sessionStorage entry, not the live
+  // DOM/in-memory state) would carry straight into the newly joined/created
+  // team's view instead of starting fresh.
+  const searchInput = document.getElementById('input-event-search');
+  if (searchInput) searchInput.value = '';
+  if (typeof clearSelectedEvent === 'function') {
+    clearSelectedEvent();
+  }
 }
 
 // ====== Derive a join-code prefix from the team's own name — first word,
@@ -85,12 +100,19 @@ function joinCodePrefixFromTeamName(teamName) {
 }
 
 // ====== Generate a random join code ======
+// Suffix alternates number-letter-number-letter (e.g. "3F7K") rather than
+// drawing all 4 characters from one mixed pool — since no two letters are
+// ever adjacent, the suffix can never spell a real or inappropriate word,
+// and since no two digits are ever adjacent either, it can never land on a
+// problematic 2-digit segment.
 function generateJoinCode(teamName) {
   const prefix = joinCodePrefixFromTeamName(teamName);
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I, O, 0, 1 to avoid confusion
+  const digits = '23456789'; // no 0, 1 to avoid confusion with O, I
+  const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ'; // no I, O to avoid confusion with 1, 0
   let suffix = '';
   for (let i = 0; i < 4; i++) {
-    suffix += chars.charAt(Math.floor(Math.random() * chars.length));
+    const pool = i % 2 === 0 ? digits : letters;
+    suffix += pool.charAt(Math.floor(Math.random() * pool.length));
   }
   return `${prefix}-${suffix}`;
 }

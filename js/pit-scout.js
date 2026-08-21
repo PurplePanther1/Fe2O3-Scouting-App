@@ -102,6 +102,16 @@ async function loadExistingPitData(teamId, eventCode, teamNumber) {
   return null;
 }
 
+// ====== Did the form's field values actually differ from what's already
+// saved? Used to decide whether a Save on an existing entry should touch
+// lastEditedBy/lastEditedByName/lastEditedByTimestamp at all — clicking Save
+// without changing anything shouldn't reassign "last edited by" to whoever
+// just reopened and resaved the entry unchanged. ======
+function pitFormValuesChanged(fieldValues, existingData) {
+  if (!existingData) return true;
+  return Object.keys(fieldValues).some(key => (fieldValues[key] ?? null) !== (existingData[key] ?? null));
+}
+
 // ====== Save pit scouting form ======
 async function savePitScoutForm() {
   const errorEl = document.getElementById('pit-modal-error');
@@ -171,10 +181,14 @@ async function savePitScoutForm() {
       payload.scoutedAt = firebase.firestore.FieldValue.serverTimestamp();
     } else {
       payload.scoutedAt = existingData.scoutedAt || firebase.firestore.FieldValue.serverTimestamp();
-      payload.lastEditedBy = currentUser.uid;
-      payload.lastEditedByEmail = firebase.firestore.FieldValue.delete();
-      payload.lastEditedByName = userDisplayName;
-      payload.lastEditedByTimestamp = Date.now();
+      // Only reassign "last edited by" if the saved fields actually changed —
+      // resaving an untouched entry shouldn't claim it as edited.
+      if (pitFormValuesChanged(fieldValues, existingData)) {
+        payload.lastEditedBy = currentUser.uid;
+        payload.lastEditedByEmail = firebase.firestore.FieldValue.delete();
+        payload.lastEditedByName = userDisplayName;
+        payload.lastEditedByTimestamp = Date.now();
+      }
     }
 
     await db.collection('teams').doc(teamId).collection('pitScouting').doc(docId).set(payload, { merge: true });

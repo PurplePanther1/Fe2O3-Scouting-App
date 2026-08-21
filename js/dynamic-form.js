@@ -11,7 +11,8 @@ const DEFAULT_PIT_FIELDS = [
     type: 'dropdown',
     required: true,
     options: ['Tank (2-motor, left/right)', 'Mecanum', 'Swerve', 'X-Drive / Omni', 'H-Drive', 'Other'],
-    sortOrder: 0
+    sortOrder: 0,
+    showInPreview: true
   },
   {
     id: 'autoCapability',
@@ -19,35 +20,40 @@ const DEFAULT_PIT_FIELDS = [
     type: 'dropdown',
     required: false,
     options: ['None (park only)', 'Basic (1 preload + park)', 'Intermediate (scoring + park)', 'Advanced (multi-cycle auto)', 'Custom / Hybrid'],
-    sortOrder: 1
+    sortOrder: 1,
+    showInPreview: true
   },
   {
     id: 'claimedAvgAutoScore',
     label: 'Claimed Avg Auto Score',
     type: 'number',
     required: false,
-    sortOrder: 2
+    sortOrder: 2,
+    showInPreview: true
   },
   {
     id: 'claimedAvgTeleopScore',
     label: 'Claimed Avg Teleop Score',
     type: 'number',
     required: false,
-    sortOrder: 3
+    sortOrder: 3,
+    showInPreview: true
   },
   {
     id: 'claimedCycleTime',
     label: 'Claimed Cycle Time (seconds)',
     type: 'number',
     required: false,
-    sortOrder: 4
+    sortOrder: 4,
+    showInPreview: true
   },
   {
     id: 'notes',
     label: 'Notes',
     type: 'textarea',
     required: false,
-    sortOrder: 5
+    sortOrder: 5,
+    showInPreview: true
   }
 ];
 
@@ -58,42 +64,51 @@ const DEFAULT_MATCH_FIELDS = [
     label: 'Match Number',
     type: 'number',
     required: true,
-    sortOrder: 0
+    sortOrder: 0,
+    // Already shown in the entry list's own header ("Match #N") — defaulting
+    // this to false avoids a redundant line in the preview. A team can still
+    // check it on if they want it repeated there.
+    showInPreview: false
   },
   {
     id: 'autoScore',
     label: 'Auto Score',
     type: 'number',
     required: false,
-    sortOrder: 1
+    sortOrder: 1,
+    showInPreview: true
   },
   {
     id: 'teleopScore',
     label: 'Teleop Score',
     type: 'number',
     required: false,
-    sortOrder: 2
+    sortOrder: 2,
+    showInPreview: true
   },
   {
     id: 'endgameScore',
     label: 'Endgame Score',
     type: 'number',
     required: false,
-    sortOrder: 3
+    sortOrder: 3,
+    showInPreview: true
   },
   {
     id: 'cycleTime',
     label: 'Cycle Time (seconds)',
     type: 'number',
     required: false,
-    sortOrder: 4
+    sortOrder: 4,
+    showInPreview: true
   },
   {
     id: 'notes',
     label: 'Notes',
     type: 'textarea',
     required: false,
-    sortOrder: 5
+    sortOrder: 5,
+    showInPreview: true
   }
 ];
 

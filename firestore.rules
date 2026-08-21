@@ -333,6 +333,35 @@ service cloud.firestore {
           )
         );
       }
+
+      // Per-team override of a member's display name — unlike memberContacts
+      // (email), this is NOT sensitive: it exists specifically so teammates see
+      // it (member list, scouting entry attribution), same audience as the
+      // team-wide member list itself, so read is any team member rather than
+      // captain/permission-gated. Write/delete rules otherwise mirror
+      // memberContacts exactly (self-write cross-validated against real
+      // membership; self-delete or captain/canKickMembers-permitted teammate
+      // delete, for kickMember() cleanup).
+      match /memberDisplayNames/{uid} {
+        allow read: if isTeamMember(teamId);
+        allow write: if isAuth() && request.auth.uid == uid
+          && exists(/databases/$(database)/documents/teams/$(teamId))
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([uid]);
+        allow delete: if isAuth() && (
+          request.auth.uid == uid
+          || (
+            exists(/databases/$(database)/documents/teams/$(teamId))
+            && (
+              isCaptain(get(/databases/$(database)/documents/teams/$(teamId)).data)
+              || (
+                get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null
+                && request.auth.uid in get(/databases/$(database)/documents/teams/$(teamId)).data.permissions
+                && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid].canKickMembers == true
+              )
+            )
+          )
+        );
+      }
     }
 
     // Public lookup so a join code can be resolved to a team ID without needing

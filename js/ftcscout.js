@@ -154,6 +154,13 @@ function populateAwardsSeasonSelect(prefix, awards) {
     opt.value = season;
     opt.textContent = formatFtcSeasonLabel(season);
     select.appendChild(opt);
+    // No-op if already cached (label above already reflects it); otherwise
+    // patches this option's textContent in place once the name resolves —
+    // a team's award history can reach back further than the main season
+    // dropdown's prefetched range.
+    if (typeof ensureSeasonGameNameLoaded === 'function') {
+      ensureSeasonGameNameLoaded(season);
+    }
   });
 
   // Default to the globally selected season if the team won something that season, else its most recent award season

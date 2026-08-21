@@ -16,6 +16,53 @@ if ('serviceWorker' in navigator) {
 // ====== Global Tab Navigation Handler ======
 let lastActiveScoutingSubTab = 'info'; // Remembers 'info', 'match', 'pit', or 'pinned'
 
+// ====== Modals always reopen scrolled to top ======
+// Every modal's scrollable region(s) — the outer .modal-card itself
+// (max-height:90vh; overflow-y:auto — the only scroll region for most
+// modals) plus any inline overflow-y:auto region nested inside it (e.g. Team
+// Detail's own scrollable body) — keep whatever scroll position they were
+// left at between opens, since the elements just stay in the DOM. Rather
+// than resetting scrollTop at every one of the many open-call sites spread
+// across the codebase, a single observer watches every modal's `hidden`
+// class and resets scroll the moment it's removed, regardless of which
+// call site did it.
+//
+// Also watches the SUBTREE, not just each modal's own class attribute: Team
+// Detail (team-info.js) hides its scrollable body behind a loading state and
+// reveals it only after data finishes loading — resetting scrollTop while an
+// element is display:none is silently ignored by the browser, so doing it
+// only when the outer modal opens left the pre-close scroll position to
+// resurface the instant the body itself became visible again. Watching every
+// descendant's class changes catches that reveal too, not just the modal's.
+document.addEventListener('DOMContentLoaded', () => {
+  const resetModalScroll = (modal) => {
+    const card = modal.querySelector('.modal-card');
+    if (card) card.scrollTop = 0;
+    modal.querySelectorAll('[style*="overflow-y"]').forEach(el => { el.scrollTop = 0; });
+  };
+
+  const modalScrollObserver = new MutationObserver(mutations => {
+    mutations.forEach(mutation => {
+      const el = mutation.target;
+      if (el.classList.contains('hidden')) return; // just hidden (or already hidden) — nothing to reset
+
+      if (el.classList.contains('modal-overlay')) {
+        resetModalScroll(el);
+      } else if (el.style && el.style.overflowY) {
+        // A scrollable region nested inside an already-open modal just
+        // became visible (e.g. Team Detail's td-modal-body, revealed after
+        // its loading state) — reset it now that display:none can no longer
+        // swallow the write.
+        el.scrollTop = 0;
+      }
+    });
+  });
+
+  document.querySelectorAll('.modal-overlay').forEach(modal => {
+    modalScrollObserver.observe(modal, { attributes: true, attributeFilter: ['class'], subtree: true });
+  });
+});
+
 document.addEventListener('DOMContentLoaded', () => {
   const subtabs = {
     info: {

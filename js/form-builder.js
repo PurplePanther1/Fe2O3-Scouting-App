@@ -6,6 +6,11 @@
 // ====== Current form type being edited ======
 let currentFormBuilderType = 'pitScouting'; // 'pitScouting' or 'matchScouting'
 
+// ====== Max fields allowed in the entry preview line at once (per form type
+// — pit and match each get their own budget), so the Team Detail card's
+// preview can't be configured into unreadable clutter. ======
+const PREVIEW_FIELD_CAP = 6;
+
 // ====== Field type options ======
 const FIELD_TYPES = [
   { value: 'dropdown', label: 'Dropdown (select one)' },
@@ -46,8 +51,12 @@ async function openFormBuilder(type) {
   });
 
   document.getElementById('builder-modal').classList.remove('hidden');
-  document.getElementById('builder-error').textContent = '';
-  document.getElementById('builder-success').textContent = '';
+  // builder-modal stays open across multiple field edits (unlike pit-modal/
+  // match-modal, which close on save) — its error/success messages use the
+  // same auto-clearing helper sheets-export.js's export flows already do
+  // (setStatusMessage/clearStatusMessage), rather than sitting there
+  // indefinitely until the next edit happens to touch them.
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('builder');
 
   await renderBuilderFields(teamId);
 }
@@ -170,7 +179,8 @@ function createBuilderFieldItem(field, index) {
   const metaEl = document.createElement('span');
   metaEl.className = 'builder-field-meta';
   const typeLabel = FIELD_TYPES.find(t => t.value === field.type)?.label || field.type;
-  metaEl.textContent = `${typeLabel}${field.required ? ' • Required' : ''}`;
+  const inPreview = field.showInPreview !== false;
+  metaEl.textContent = `${typeLabel}${field.required ? ' • Required' : ''}${inPreview ? ' • In Preview' : ''}`;
 
   summary.appendChild(labelEl);
   summary.appendChild(metaEl);
@@ -201,8 +211,39 @@ function createBuilderFieldItem(field, index) {
   return item;
 }
 
+// ====== Derive a Field ID candidate from a Field Label — camelCase: split
+// into words on any run of non-alphanumerics, lowercase the first word,
+// capitalize the rest, join with no separator (e.g. "Auto Points" ->
+// "autoPoints"), then strip any leading non-letters so the result always
+// starts with a letter (matching the Field ID validation rule in
+// saveFieldEdit() below). ======
+function slugifyFieldLabel(label) {
+  const words = (label || '').trim().split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  if (words.length === 0) return '';
+
+  const camel = words
+    .map((word, i) => {
+      const lower = word.toLowerCase();
+      return i === 0 ? lower : lower.charAt(0).toUpperCase() + lower.slice(1);
+    })
+    .join('');
+
+  return camel.replace(/^[^a-zA-Z]+/, '');
+}
+
 // ====== Open field editor sub-modal to edit an existing field or add a new one ======
 let editingFieldIndex = -1;
+// Only a brand-new field's ID auto-follows the label as the user types it
+// (see the bld-field-label input listener below) — an existing field's ID is
+// already meaningful (changing it loses the connection to its saved data,
+// per the warning text next to it) and is always freely editable, no
+// auto-follow involved. For a new field, the ID input starts locked
+// (readOnly) and auto-following; checking bld-field-id-manual (see its
+// change listener below) is what unlocks it for manual editing and stops
+// the follow — unchecking re-locks it and snaps back to whatever
+// auto-generation currently produces, confirming first if that would
+// discard a manually-typed value.
+let fieldIdAutoFollow = false;
 
 function openFieldEditor(index) {
   editingFieldIndex = index;
@@ -214,12 +255,38 @@ function openFieldEditor(index) {
   const fields = getBuilderCachedConfig() || [];
   const field = index >= 0 && index < fields.length ? fields[index] : null;
 
+  document.getElementById('field-editor-title').textContent = field ? 'Edit Field' : 'Add Field';
+  const isNewField = !field;
+  fieldIdAutoFollow = isNewField;
+
+  const idInput = document.getElementById('bld-field-id');
+  const manualRow = document.getElementById('bld-field-id-manual-row');
+  const manualCheckbox = document.getElementById('bld-field-id-manual');
+  if (isNewField) {
+    // Locked + auto-following by default — the checkbox (wired up in the
+    // DOMContentLoaded handler below) is what unlocks it.
+    if (manualRow) manualRow.classList.remove('hidden');
+    if (manualCheckbox) manualCheckbox.checked = false;
+    idInput.readOnly = true;
+  } else {
+    // Editing an existing field: auto-generation was never a thing here —
+    // the ID is already meaningful and always freely editable, same as
+    // before this feature existed.
+    if (manualRow) manualRow.classList.add('hidden');
+    idInput.readOnly = false;
+  }
+
   document.getElementById('bld-field-label').value = field?.label || '';
-  document.getElementById('bld-field-id').value = field?.id || '';
+  idInput.value = field?.id || '';
   document.getElementById('bld-field-type').value = field?.type || 'text';
   document.getElementById('bld-field-required').checked = field?.required || false;
+  // Missing showInPreview (pre-existing fields saved before this setting
+  // existed, and brand-new fields alike) defaults to checked/shown.
+  document.getElementById('bld-field-show-in-preview').checked = field?.showInPreview !== false;
   document.getElementById('bld-field-options').value = field?.options ? field.options.join('\n') : '';
   document.getElementById('bld-field-id-warning').textContent = '';
+  const modalErrorEl = document.getElementById('field-editor-error');
+  if (modalErrorEl) modalErrorEl.textContent = '';
 
   document.getElementById('bld-field-min').value = field?.min ?? 0;
   document.getElementById('bld-field-max').value = field?.max ?? '';
@@ -247,15 +314,22 @@ function toggleOptionsField() {
 
 // ====== Save the field being edited ======
 async function saveFieldEdit() {
-  const errorEl = document.getElementById('builder-error');
-  const successEl = document.getElementById('builder-success');
-  errorEl.textContent = '';
-  successEl.textContent = '';
+  // Validation/failure messages use the field-editor sub-modal's OWN error
+  // element, not the parent Form Builder screen's — that modal stays open
+  // (or, on a save failure, is still open) through every case below, and the
+  // parent's builder-error sits behind it, invisible to whoever's looking at
+  // this topmost modal. builder-success is still correct for the one case
+  // that actually uses it (below): by then closeFieldEditor() has already
+  // run, so the parent screen is what's showing again.
+  const modalErrorEl = document.getElementById('field-editor-error');
+  if (modalErrorEl) modalErrorEl.textContent = '';
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('builder');
 
   const label = document.getElementById('bld-field-label').value.trim();
   const fieldId = document.getElementById('bld-field-id').value.trim();
   const type = document.getElementById('bld-field-type').value;
   const required = document.getElementById('bld-field-required').checked;
+  const showInPreview = document.getElementById('bld-field-show-in-preview').checked;
   const optionsRaw = document.getElementById('bld-field-options').value;
   const minRaw = document.getElementById('bld-field-min').value.trim();
   const maxRaw = document.getElementById('bld-field-max').value.trim();
@@ -263,25 +337,39 @@ async function saveFieldEdit() {
   const defaultRaw = document.getElementById('bld-field-default').value.trim();
 
   if (!label) {
-    errorEl.textContent = 'Field label is required.';
+    if (modalErrorEl) modalErrorEl.textContent = 'Field label is required.';
     return;
   }
   if (!fieldId) {
-    errorEl.textContent = 'Field ID (database key) is required.';
+    if (modalErrorEl) modalErrorEl.textContent = 'Field ID (database key) is required.';
     return;
   }
   // Validate field ID format: lowercase, no spaces, alphanumeric + underscore
   if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(fieldId)) {
-    errorEl.textContent = 'Field ID must start with a letter and contain only letters, numbers, and underscores.';
+    if (modalErrorEl) modalErrorEl.textContent = 'Field ID must start with a letter and contain only letters, numbers, and underscores.';
     return;
   }
   if (type === 'dropdown' && !optionsRaw.trim()) {
-    errorEl.textContent = 'Dropdown options are required. Enter one per line.';
+    if (modalErrorEl) modalErrorEl.textContent = 'Dropdown options are required. Enter one per line.';
     return;
   }
   if (type === 'counter' && maxRaw !== '' && minRaw !== '' && Number(maxRaw) <= Number(minRaw)) {
-    errorEl.textContent = 'Counter maximum must be greater than the minimum.';
+    if (modalErrorEl) modalErrorEl.textContent = 'Counter maximum must be greater than the minimum.';
     return;
+  }
+  if (showInPreview) {
+    // Count every OTHER field currently marked for preview — excludes the
+    // field being edited (if any), since its own new value is what we're
+    // about to set, not what's already saved.
+    const existingFields = getBuilderCachedConfig() || [];
+    const otherPreviewCount = existingFields.reduce((count, f, i) => {
+      if (i === editingFieldIndex) return count;
+      return count + (f.showInPreview !== false ? 1 : 0);
+    }, 0);
+    if (otherPreviewCount >= PREVIEW_FIELD_CAP) {
+      if (modalErrorEl) modalErrorEl.textContent = `Up to ${PREVIEW_FIELD_CAP} fields can be shown in the preview at once. Uncheck another field first.`;
+      return;
+    }
   }
 
   const options = type === 'dropdown'
@@ -298,7 +386,7 @@ async function saveFieldEdit() {
     // Get current fields (or empty array if none)
     const fields = getBuilderCachedConfig() ? [...getBuilderCachedConfig()] : [];
 
-    const fieldData = { id: fieldId, label, type, required, sortOrder: 0 };
+    const fieldData = { id: fieldId, label, type, required, sortOrder: 0, showInPreview };
 
     if (type === 'dropdown') {
       fieldData.options = options;
@@ -337,11 +425,11 @@ async function saveFieldEdit() {
 
     closeFieldEditor();
     await renderBuilderFields(teamId);
-    successEl.textContent = 'Field saved!';
+    if (typeof setStatusMessage === 'function') setStatusMessage('builder', 'success', 'Field saved!');
   } catch (err) {
     hideLoading();
     console.error('Failed to save field:', err);
-    errorEl.textContent = 'Failed to save. Please check your connection.';
+    if (modalErrorEl) modalErrorEl.textContent = 'Failed to save. Please check your connection.';
   }
 }
 
@@ -378,11 +466,11 @@ function removeField(index) {
         setBuilderCachedConfig(updated, teamId);
 
         await renderBuilderFields(teamId);
-        document.getElementById('builder-success').textContent = 'Field removed. Old data is preserved.';
+        if (typeof setStatusMessage === 'function') setStatusMessage('builder', 'success', 'Field removed. Old data is preserved.');
       } catch (err) {
         hideLoading();
         console.error('Failed to remove field:', err);
-        document.getElementById('builder-error').textContent = 'Failed to remove field.';
+        if (typeof setStatusMessage === 'function') setStatusMessage('builder', 'error', 'Failed to remove field.');
       }
     }
   });
@@ -423,15 +511,15 @@ async function moveField(fromIndex, direction) {
 // ====== Close the form builder ======
 function closeFormBuilder() {
   document.getElementById('builder-modal').classList.add('hidden');
-  document.getElementById('builder-error').textContent = '';
-  document.getElementById('builder-success').textContent = '';
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('builder');
 }
 
 // ====== Wire up event handlers ======
 document.addEventListener('DOMContentLoaded', () => {
-  // Open form builder from My Team tab
+  // Open form builder from My Team tab — single entry point, defaults to the
+  // Pit Scouting tab; the Match Scouting tab is one click away inside the
+  // modal's own builder-type-tab switcher.
   document.getElementById('btn-open-form-builder').addEventListener('click', () => openFormBuilder('pitScouting'));
-  document.getElementById('btn-open-match-form-builder').addEventListener('click', () => openFormBuilder('matchScouting'));
 
   // Builder type tabs
   document.querySelectorAll('.builder-type-tab').forEach(tab => {
@@ -451,6 +539,61 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Toggle options on type change
   document.getElementById('bld-field-type').addEventListener('change', toggleOptionsField);
+
+  // Auto-generate the Field ID from the Field Label as the user types it
+  // (new fields only — see fieldIdAutoFollow's comment above), shown live in
+  // the (locked, read-only) ID field.
+  document.getElementById('bld-field-label').addEventListener('input', (e) => {
+    if (!fieldIdAutoFollow) return;
+    document.getElementById('bld-field-id').value = slugifyFieldLabel(e.target.value);
+  });
+
+  // "Edit ID manually" checkbox — gates manual editing of a NEW field's ID.
+  document.getElementById('bld-field-id-manual').addEventListener('change', (e) => {
+    const idInput = document.getElementById('bld-field-id');
+    const checkbox = e.target;
+
+    if (checkbox.checked) {
+      // Unlock for manual editing; stop auto-following the label.
+      fieldIdAutoFollow = false;
+      idInput.readOnly = false;
+      idInput.focus();
+      return;
+    }
+
+    // Re-locking snaps the ID back to whatever auto-generation currently
+    // produces from the label. If that differs from what's there now (a
+    // manually-typed value), confirm first since unchecking would silently
+    // discard it — revert the checkbox back to checked until/unless
+    // confirmed, since showConfirmModal() has no cancel callback to undo it.
+    const autoGenerated = slugifyFieldLabel(document.getElementById('bld-field-label').value);
+    const currentId = idInput.value.trim();
+
+    const applyAutoFollow = () => {
+      fieldIdAutoFollow = true;
+      idInput.value = autoGenerated;
+      idInput.readOnly = true;
+    };
+
+    if (currentId === autoGenerated) {
+      applyAutoFollow();
+      return;
+    }
+
+    checkbox.checked = true;
+    if (typeof showConfirmModal === 'function') {
+      showConfirmModal({
+        title: 'Discard Manual Field ID?',
+        message: `Switching back to auto-generated will discard "${currentId}" and use "${autoGenerated}" instead (from the current label). Continue?`,
+        confirmLabel: 'Use Auto-Generated ID',
+        danger: true,
+        onConfirm: () => {
+          checkbox.checked = false;
+          applyAutoFollow();
+        }
+      });
+    }
+  });
 
   // Close builder on overlay click
   document.getElementById('builder-modal-overlay').addEventListener('click', closeFormBuilder);

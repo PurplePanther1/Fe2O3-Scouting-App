@@ -29,7 +29,8 @@ function saveSessionState() {
       const searchInput = document.getElementById('input-event-search');
       perTeam[currentTeamId] = {
         selectedEvent: eventToSave,
-        searchText: searchInput ? searchInput.value : ''
+        searchText: searchInput ? searchInput.value : '',
+        matchViewMode: (typeof matchViewMode !== 'undefined') ? matchViewMode : undefined
       };
     }
 
@@ -100,10 +101,20 @@ async function restorePerTeamEventState() {
 
   const searchInput = document.getElementById('input-event-search');
 
+  // Restore the match-based view's team-vs-match toggle BEFORE selectEvent()
+  // below — selectEvent() applies matchViewMode as a side effect of loading
+  // the schedule (onMatchScheduleEventSelected(), match-schedule-view.js),
+  // so this has to already reflect the restored value by the time that runs
+  // rather than whatever it was left at on page load.
+  if (typeof matchViewMode !== 'undefined') {
+    matchViewMode = (teamEntry && teamEntry.matchViewMode)
+      || (typeof MATCH_VIEW_DEFAULT !== 'undefined' ? MATCH_VIEW_DEFAULT : 'team');
+  }
+
   if (teamEntry && teamEntry.selectedEvent && typeof selectEvent === 'function') {
-    // Reloads the team list for this event. selectEvent() always forces the
-    // scouting subtab to 'info' as a side effect — callers that care about a
-    // specific subtab (restoreOrDefaultSessionState()) re-apply it after.
+    // Reloads the team list for this event. selectEvent() no longer forces
+    // any particular scouting subtab — whatever the caller already applied
+    // (or applies after, e.g. restoreOrDefaultSessionState() below) stands.
     await selectEvent(teamEntry.selectedEvent);
     if (searchInput) searchInput.value = teamEntry.searchText || '';
   } else {
@@ -141,11 +152,7 @@ async function restoreOrDefaultSessionState() {
   // otherwise overwrite currentTeamId's still-unrestored entry (selectedEvent
   // still null at this point, nothing has restored it yet) before this ever
   // gets to read the real saved data. Same ordering already used in
-  // switchActiveTeam() for the same reason. This also means the final
-  // activateScoutingSubTab() call below is naturally the last thing to run,
-  // authoritatively correcting the subtab even though selectEvent() (inside
-  // restorePerTeamEventState(), if it restores an event) forces it to 'info'
-  // as its own side effect first.
+  // switchActiveTeam() for the same reason.
   await restorePerTeamEventState();
 
   if (typeof window.activateDashboardTab === 'function') {

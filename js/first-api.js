@@ -15,8 +15,36 @@ let debounceTimer = null;
 // sessionStorage on every keystroke would be wasteful.
 let searchSaveDebounceTimer = null;
 
+// ====== The array most recently passed to renderEventList() — null again
+// whenever clearSelectedEvent() genuinely wipes #event-results (a fresh
+// search, a season change, ...), so deselectEventPreservingResults() (below)
+// always knows whether there's an actual list worth restoring versus
+// nothing having been searched yet. ======
+let lastRenderedEventResults = null;
+
 // ====== In-memory event cache (keyed by season) ======
 const eventCache = {};
+
+// ====== Show an event-tab-level error, auto-clearing it after a few seconds
+// ======
+// event-error sits inline on the persistent Events area (not a modal that
+// gets closed), and unlike doSearch()'s own errors — cleared by clearErrors()
+// the next time the user searches — a team-load failure here was never
+// cleared by anything if the user just moved on to browsing rather than
+// retrying, so it could sit there indefinitely. Not using the shared
+// showError() directly since that's also used for blocking form-validation
+// errors elsewhere (Sign In, Create Team, ...) where persisting until the
+// next attempt is correct; this is scoped to event-error alone.
+let eventErrorTimer = null;
+function showEventError(message) {
+  showError('event-error', message);
+  if (eventErrorTimer) clearTimeout(eventErrorTimer);
+  eventErrorTimer = setTimeout(() => {
+    const el = document.getElementById('event-error');
+    if (el) el.textContent = '';
+    eventErrorTimer = null;
+  }, 5000);
+}
 
 // ====== Compute the current FTC season ======
 function getCurrentFtcSeason() {
@@ -25,10 +53,50 @@ function getCurrentFtcSeason() {
   return month >= 9 ? now.getFullYear() : now.getFullYear() - 1;
 }
 
-// ====== Format an FTC season number as its "YYYY-YYYY" label (e.g. 2025 -> "2025-2026") ======
+// ====== Format an FTC season number as its "YYYY-YYYY" label, plus the
+// season's game name once known (e.g. 2025 -> "2025-2026" or, once
+// seasonGameNameCache has resolved it, "2025-2026 — INTO THE DEEP presented
+// by RTX"). Every place that displays a season (the season dropdown, the
+// Team Detail modal's awards season filter) already goes through this one
+// function, so enriching it here covers all of them. ======
 function formatFtcSeasonLabel(season) {
   const s = Number(season);
-  return `${s}-${s + 1}`;
+  const base = `${s}-${s + 1}`;
+  const gameName = seasonGameNameCache[s];
+  return gameName ? `${base} — ${gameName}` : base;
+}
+
+// ====== Season game-name cache (season -> gameName string, or null once
+// confirmed unavailable) — fetched lazily from FIRST's own API (via the
+// worker's /season endpoint), never a maintained lookup table, since FIRST
+// already serves this. ======
+const seasonGameNameCache = {};
+
+// ====== Fetch a season's game name (if not already cached) and patch every
+// matching <option> already in the DOM in place once it resolves — safe to
+// call repeatedly/concurrently for the same season. A no-op once cached
+// (formatFtcSeasonLabel() already picks it up on the next render from
+// there), so callers can call this unconditionally after building any
+// season <option>. ======
+async function ensureSeasonGameNameLoaded(season) {
+  const s = Number(season);
+  if (s in seasonGameNameCache) return seasonGameNameCache[s];
+
+  try {
+    const result = await callWorker(`/season?season=${encodeURIComponent(s)}`);
+    seasonGameNameCache[s] = (result && result.gameName) || null;
+  } catch (err) {
+    console.warn(`Failed to load game name for season ${s}:`, err);
+    seasonGameNameCache[s] = null;
+  }
+
+  if (seasonGameNameCache[s]) {
+    document.querySelectorAll(`option[value="${s}"]`).forEach(opt => {
+      const isCurrent = opt.textContent.includes('(current)');
+      opt.textContent = formatFtcSeasonLabel(s) + (isCurrent ? ' (current)' : '');
+    });
+  }
+  return seasonGameNameCache[s];
 }
 
 // ====== Populate season dropdown ======
@@ -46,6 +114,14 @@ function populateSeasonDropdown() {
       option.selected = true;
     }
     select.appendChild(option);
+  }
+
+  // Game names load lazily (one worker call per season, cached) and patch
+  // each option's label in place once resolved — the dropdown is fully
+  // usable immediately with year-only labels; this is a progressive
+  // enhancement on top of that, not a blocking step.
+  for (let y = current; y >= startYear; y--) {
+    ensureSeasonGameNameLoaded(y);
   }
 }
 
@@ -269,6 +345,8 @@ async function getCachedEvent(eventCode) {
 
 // ====== Render event list (full results area) ======
 function renderEventList(events) {
+  lastRenderedEventResults = events || [];
+
   const container = document.getElementById('event-results');
   container.innerHTML = '';
 
@@ -296,7 +374,16 @@ function renderEventList(events) {
     item.appendChild(nameEl);
     item.appendChild(codeEl);
 
-    item.addEventListener('click', () => selectEvent(evt));
+    // Click to select; clicking the already-selected row again deselects it
+    // — same toggle pattern as the Pinned Events list (pinned-events.js).
+    item.addEventListener('click', () => {
+      const isSelected = selectedEvent && selectedEvent.code === evt.code;
+      if (isSelected) {
+        deselectEventPreservingResults();
+      } else {
+        selectEvent(evt);
+      }
+    });
 
     container.appendChild(item);
   });
@@ -382,6 +469,7 @@ function clearSelectedEvent() {
 
   const eventResults = document.getElementById('event-results');
   if (eventResults) eventResults.innerHTML = '';
+  lastRenderedEventResults = null;
 
   const teamListInfo = document.getElementById('team-list-info');
   if (teamListInfo) teamListInfo.innerHTML = '';
@@ -423,6 +511,25 @@ function clearSelectedEvent() {
   }
 }
 
+// ====== Deselect the current event WITHOUT losing the search results list
+// ======
+// clearSelectedEvent() wipes #event-results — correct for its OTHER callers
+// (a fresh search, a season change, selecting a different event via the
+// dropdown/Pinned Events, ...) but wrong for a plain deselect: the user just
+// wants to clear the selection, not lose the results they were looking at.
+// Captures the last-rendered array BEFORE clearing (clearSelectedEvent()
+// resets the tracking var to null itself) and re-renders it after, unless
+// nothing was ever actually searched this session. Shared by both places a
+// user can deselect without picking something else: a search result row
+// clicked again, and the standalone "Deselect Event" button. ======
+function deselectEventPreservingResults() {
+  const resultsToRestore = lastRenderedEventResults;
+  if (typeof clearSelectedEvent === 'function') clearSelectedEvent();
+  if (resultsToRestore !== null && typeof renderEventList === 'function') {
+    renderEventList(resultsToRestore);
+  }
+}
+
 // ====== Select an event ======
 async function selectEvent(eventData) {
   console.time('[Timing] selectEvent total');
@@ -442,12 +549,6 @@ async function selectEvent(eventData) {
   document.getElementById('selected-event-code').textContent = `Code: ${eventData.code}`;
   document.getElementById('selected-event-teams-count').textContent = 'Loading teams...';
   document.getElementById('selected-event-area').classList.remove('hidden');
-
-  // Selecting an event always lands on Team Information, regardless of which
-  // subtab was active beforehand or which source (search vs. Pinned Events) it came from.
-  if (typeof window.activateScoutingSubTab === 'function') {
-    window.activateScoutingSubTab('info');
-  }
 
   if (typeof updatePinButtonUI === 'function') {
     updatePinButtonUI();
@@ -583,7 +684,7 @@ async function selectEvent(eventData) {
     console.timeEnd('[Timing] selectEvent total');
     console.error('Failed to fetch teams:', err);
     document.getElementById('selected-event-teams-count').textContent = 'Failed to load teams';
-    showError('event-error', 'Could not load teams. Check your connection and try again.');
+    showEventError('Could not load teams. Check your connection and try again.');
   }
 }
 
@@ -1275,7 +1376,7 @@ async function doSearch() {
   } catch (err) {
     hideLoading();
     console.error('Event search error:', err);
-    showError('event-error', 'Failed to search events. Check your connection and try again.');
+    showEventError('Failed to search events. Check your connection and try again.');
   } finally {
     isSearching = false;
   }
@@ -1288,7 +1389,7 @@ document.getElementById('btn-search-events').addEventListener('click', doSearch)
 const btnDeselectEvent = document.getElementById('btn-deselect-event');
 if (btnDeselectEvent) {
   btnDeselectEvent.addEventListener('click', () => {
-    clearSelectedEvent();
+    deselectEventPreservingResults();
   });
 }
 

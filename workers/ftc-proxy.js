@@ -9,6 +9,7 @@
  *   GET /events?query=SEARCH_TERM&season=YYYY                        — search events by name/code (season defaults to current FTC season)
  *   GET /teams?eventCode=CODE&season=YYYY                             — get teams for an event (season defaults to current FTC season)
  *   GET /schedule?eventCode=CODE&season=YYYY&tournamentLevel=LEVEL    — get the match schedule for an event (season defaults to current FTC season, tournamentLevel defaults to "qual")
+ *   GET /season?season=YYYY                                           — get the season summary (currently just the game name, e.g. "INTO THE DEEP presented by RTX") for a season (defaults to current FTC season)
  *
  * Deploy:
  *   npm install -g wrangler
@@ -74,8 +75,11 @@ export default {
           return jsonResponse({ error: 'eventCode query parameter is required' }, 400, corsHeaders());
         }
         result = await handleGetEventSchedule(eventCode, season, tournamentLevel, env);
+      } else if (path === '/season') {
+        const season = url.searchParams.get('season') || '';
+        result = await handleGetSeasonSummary(season, env);
       } else {
-        return jsonResponse({ error: 'Not found. Use GET /events, GET /teams?eventCode=..., or GET /schedule?eventCode=...' }, 404, corsHeaders());
+        return jsonResponse({ error: 'Not found. Use GET /events, GET /teams?eventCode=..., GET /schedule?eventCode=..., or GET /season' }, 404, corsHeaders());
       }
 
       return jsonResponse(result, 200, corsHeaders());
@@ -174,6 +178,18 @@ async function handleGetEventSchedule(eventCode, season, tournamentLevel, env) {
   const schedule = data.schedule || [];
   console.log(`[schedule] event=${eventCode} season=${s} level=${tournamentLevel} matchCount=${schedule.length}`);
   return { schedule };
+}
+
+/**
+ * Fetch the season summary — a single, non-paginated object. Only the game
+ * name is surfaced to the client for now (the rest of the response —
+ * eventCount, kickoff, rookieStart, teamCount, frcChampionships — isn't
+ * used anywhere in the app yet).
+ */
+async function handleGetSeasonSummary(season, env) {
+  const s = season || getCurrentSeason();
+  const data = await ftcApiGet(`/${s}`, env);
+  return { gameName: data.gameName || null };
 }
 
 // ====== Helper: Authenticated GET to FIRST API ======

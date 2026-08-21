@@ -12,7 +12,10 @@ let currentTeamPermissions = {};
 // permission-change refresh, or after switching teams and back) paints with
 // real info on the very first frame; only a member never resolved before
 // shows a brief "Loading…" placeholder until its own fetch finishes,
-// independently of every other member's.
+// independently of every other member's. Keyed by "${teamId}_${uid}", not
+// uid alone — email and display name are both per-team data (memberContacts,
+// memberDisplayNames), so a user on more than one team needs a separate
+// cache entry per team rather than one shared/stale entry across all of them.
 let memberInfoCache = {};
 
 // ====== Dashboard tab switching ======
@@ -25,6 +28,15 @@ function activateDashboardTab(name) {
   document.querySelectorAll('.dtab-content').forEach(tc => tc.classList.remove('active'));
   const content = document.getElementById('dtab-' + name);
   if (content) content.classList.add('active');
+
+  // Refresh the My Account tab's own info/teams list every time it's
+  // switched to, not just on login — e.g. a team created/left elsewhere in
+  // the same session should show up here without needing a page refresh.
+  if (name === 'account') {
+    if (typeof renderAccountInfo === 'function') renderAccountInfo();
+    if (typeof renderAccountTeamsList === 'function') renderAccountTeamsList();
+    if (typeof renderPerTeamDisplayNames === 'function') renderPerTeamDisplayNames();
+  }
 
   // The My Team tab's "Join Another Team" input/status belong to whatever
   // attempt was last in progress — stale the moment ANY tab switch happens
@@ -120,11 +132,12 @@ async function loadTeamMembers(teamId, teamData) {
     return;
   }
 
-  // Populate the display-name input with whatever this user has already chosen
-  const nameInput = document.getElementById('input-display-name');
-  if (nameInput) {
-    nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
-  }
+  // Reset synchronously so a stale PREVIOUS team's override never leaks into
+  // this team's first paint below — getCurrentUserTeamOverrideKnown() (below)
+  // then fetches this team's own override and patches the self row once it
+  // resolves, same "resolve independently, patch after" pattern the other
+  // members already use (see the fetchMemberInfo loop below).
+  currentTeamDisplayNameOverride = null;
 
   const isCaptain = currentUser && currentTeamRoles[currentUser.uid] === 'captain';
 
@@ -141,20 +154,49 @@ async function loadTeamMembers(teamId, teamData) {
           email: currentUser.email || '',
           photoURL: currentUser.photoURL || null
         }
-      : (memberInfoCache[uid] || { displayName: 'Loading…', email: '', photoURL: null });
+      : (memberInfoCache[`${teamId}_${uid}`] || { displayName: 'Loading…', email: '', photoURL: null });
 
     const row = buildMemberRow(uid, role, isCaptain, isSelf, info);
     memberList.appendChild(row.el);
     rowRefs[uid] = row;
   });
 
+  // This team's override (if any) of the CURRENT user's own display name —
+  // feeds getCurrentUserDisplayName() (auth.js), so once resolved it also
+  // corrects every new scoutedByName write made under this team, not just
+  // this row's text.
+  if (currentUser) {
+    db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(currentUser.uid).get()
+      .then(doc => {
+        currentTeamDisplayNameOverride = (doc.exists && doc.data().displayName) || null;
+        if (currentTeamId !== teamId) return; // switched again before this resolved
+        const row = rowRefs[currentUser.uid];
+        if (row && typeof getCurrentUserDisplayName === 'function') {
+          row.nameEl.textContent = `${getCurrentUserDisplayName()} (You)`;
+        }
+      })
+      .catch(err => {
+        // A permission-denied here almost always means this user just left
+        // (or was kicked from) this exact team while this read was still in
+        // flight — not a real problem, same "expected removal signal"
+        // reasoning watchMyTeams()'s error handler (auth.js) already uses
+        // for its own listener. myTeams is already pruned of a team by the
+        // time any of its removal handling finishes (navigateAwayFromRemovedTeam()
+        // does that synchronously), so "not there anymore" is a reliable
+        // signal this is exactly that case, not a genuine problem.
+        const stillMember = typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.some(t => t.id === teamId);
+        if (err.code === 'permission-denied' && !stillMember) return;
+        console.warn(`Failed to load own memberDisplayNames override for team ${teamId}:`, err);
+      });
+  }
+
   // Fill in real display info for any member not already cached, each
   // independently as its own fetch resolves — a slow member no longer holds
   // up the rest of the list.
   teamData.members.forEach(uid => {
-    if (uid === currentUser.uid || memberInfoCache[uid]) return;
+    if (uid === currentUser.uid || memberInfoCache[`${teamId}_${uid}`]) return;
     fetchMemberInfo(teamId, uid).then(info => {
-      memberInfoCache[uid] = info;
+      memberInfoCache[`${teamId}_${uid}`] = info;
       // The team may have changed, or this render superseded, while the
       // fetch was in flight.
       if (currentTeamId !== teamId) return;
@@ -309,9 +351,10 @@ async function fetchMemberInfo(teamId, uid) {
   let photoURL = null;
   let email = '';
 
-  const [userResult, contactResult] = await Promise.allSettled([
+  const [userResult, contactResult, displayNameOverrideResult] = await Promise.allSettled([
     db.collection('users').doc(uid).get(),
-    db.collection('teams').doc(teamId).collection('memberContacts').doc(uid).get()
+    db.collection('teams').doc(teamId).collection('memberContacts').doc(uid).get(),
+    db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(uid).get()
   ]);
 
   if (userResult.status === 'fulfilled' && userResult.value.exists) {
@@ -326,6 +369,14 @@ async function fetchMemberInfo(teamId, uid) {
   // "don't show it."
   if (contactResult.status === 'fulfilled' && contactResult.value.exists) {
     email = contactResult.value.data().email || '';
+  }
+
+  // This team's override of the member's name, if they've set one (Account
+  // tab's "Per-Team Display Names" section) — takes precedence over their
+  // account-level displayName above, scoped to just this team.
+  if (displayNameOverrideResult.status === 'fulfilled' && displayNameOverrideResult.value.exists) {
+    const overrideName = displayNameOverrideResult.value.data().displayName;
+    if (overrideName) displayName = overrideName;
   }
 
   return { uid, displayName, email, photoURL };
@@ -506,41 +557,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const checkbox = document.getElementById(`perm-${key}`);
     if (checkbox) checkbox.addEventListener('change', updateGrantAllModalSplitFill);
   });
-});
-
-document.getElementById('input-display-name').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') document.getElementById('btn-save-display-name').click();
-});
-
-// ====== Save the current user's chosen display name ======
-document.getElementById('btn-save-display-name').addEventListener('click', async () => {
-  const input = document.getElementById('input-display-name');
-  const status = document.getElementById('display-name-status');
-  const name = input.value.trim();
-
-  if (!name) {
-    status.textContent = 'Please enter a name.';
-    status.className = 'error-message';
-    return;
-  }
-  if (!currentUser) return;
-
-  try {
-    await saveDisplayName(name);
-
-    status.textContent = 'Saved!';
-    status.className = 'success-message';
-    setTimeout(() => { status.textContent = ''; }, 2000);
-
-    // Refresh our own row in the member list to reflect the change immediately
-    if (currentTeamId && currentTeamData) {
-      loadTeamMembers(currentTeamId, currentTeamData);
-    }
-  } catch (err) {
-    console.error('Failed to save display name:', err);
-    status.textContent = 'Failed to save. Please try again.';
-    status.className = 'error-message';
-  }
 });
 
 // ====== Transfer captaincy to another member ======
@@ -802,8 +818,11 @@ document.getElementById('input-create-another-team-name').addEventListener('keyd
 // team's LAST member, leaving deletes the entire team instead (also shared
 // with account deletion — see deleteEntireTeam() in delete-account.js). ======
 async function leaveTeam() {
-  const errorEl = document.getElementById('leave-team-error');
-  if (errorEl) errorEl.textContent = '';
+  // Inline on the persistent My Team tab (not a modal that gets closed) —
+  // uses the same auto-clearing helper sheets-export.js's export flows
+  // already do (setStatusMessage/clearStatusMessage), so a message here
+  // can't sit indefinitely while the user does other things on the tab.
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('leave-team');
 
   if (!currentUser || !currentTeamId) return;
 
@@ -811,7 +830,7 @@ async function leaveTeam() {
   const otherMembersExist = !!(currentTeamData && Array.isArray(currentTeamData.members) && currentTeamData.members.length > 1);
 
   if (isCaptain && otherMembersExist) {
-    if (errorEl) errorEl.textContent = 'You must transfer the captain role to another member (above) before leaving.';
+    if (typeof setStatusMessage === 'function') setStatusMessage('leave-team', 'error', 'You must transfer the captain role to another member (above) before leaving.');
     return;
   }
 
@@ -846,8 +865,7 @@ async function leaveTeam() {
 // had the chance to export). Split out from leaveTeam() so the sole-member
 // case can defer this until the user acts on the modal. ======
 async function performLeaveTeam(isSoleMember, leftTeamId, leftTeamData) {
-  const errorEl = document.getElementById('leave-team-error');
-  if (errorEl) errorEl.textContent = '';
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('leave-team');
 
   showLoading('Leaving team...');
   try {
@@ -888,7 +906,7 @@ async function performLeaveTeam(isSoleMember, leftTeamId, leftTeamData) {
   } catch (err) {
     hideLoading();
     console.error('Leave team error:', err);
-    if (errorEl) errorEl.textContent = 'Failed to leave team. Please try again.';
+    if (typeof setStatusMessage === 'function') setStatusMessage('leave-team', 'error', 'Failed to leave team. Please try again.');
   }
 }
 
@@ -1276,7 +1294,7 @@ async function kickMember(targetUid) {
   // "Loading…" placeholder info object (used before fetchMemberInfo()
   // resolves) doesn't get retroactively updated once the real name arrives,
   // only the DOM text does, so a captured value could go stale.
-  const cachedInfo = (typeof memberInfoCache !== 'undefined') ? memberInfoCache[targetUid] : null;
+  const cachedInfo = (typeof memberInfoCache !== 'undefined') ? memberInfoCache[`${currentTeamId}_${targetUid}`] : null;
   const targetName = (cachedInfo && cachedInfo.displayName) || 'this member';
 
   showConfirmModal({
@@ -1303,6 +1321,12 @@ async function kickMember(targetUid) {
           await db.collection('teams').doc(teamId).collection('memberContacts').doc(targetUid).delete();
         } catch (err) {
           console.warn(`Failed to delete memberContacts for kicked member ${targetUid}:`, err);
+        }
+
+        try {
+          await db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(targetUid).delete();
+        } catch (err) {
+          console.warn(`Failed to delete memberDisplayNames for kicked member ${targetUid}:`, err);
         }
 
         hideLoading();

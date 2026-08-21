@@ -20,6 +20,16 @@ let myTeams = [];
 // Firestore-backed profile for the current user (displayName the user chose, email, photoURL)
 let currentUserProfile = null;
 
+// This user's display-name override for whichever team is currently active
+// (teams/{teamId}/memberDisplayNames/{uid}), or null if they haven't set one
+// for this team — reset and re-fetched by loadTeamMembers() (members.js)
+// every time the active team changes. getCurrentUserDisplayName() below
+// checks this before falling back to the account-level name, so it's what
+// every new scoutedByName write (pit-scout.js/match-scout.js) and the member
+// list's self row reflect, without either needing to know about per-team
+// names directly.
+let currentTeamDisplayNameOverride = null;
+
 /**
  * Load (or create) this user's Firestore profile, without ever clobbering a
  * display name the user has already chosen for themselves.
@@ -218,6 +228,7 @@ async function saveDisplayName(name) {
  * falling back to whatever Firebase Auth knows (Google name, then email).
  */
 function getCurrentUserDisplayName() {
+  if (currentTeamDisplayNameOverride) return currentTeamDisplayNameOverride;
   if (currentUserProfile && currentUserProfile.displayName) return currentUserProfile.displayName;
   if (currentUser && currentUser.displayName) return currentUser.displayName;
   if (currentUser && currentUser.email) return currentUser.email;
@@ -491,6 +502,21 @@ $('btn-back-to-login-from-reset').addEventListener('click', () => {
   showScreen('screen-login');
 });
 
+// ====== reset-success auto-clears after a few seconds — nothing else on
+// this persistent screen ever touches it otherwise (no auto-navigation, and
+// the user may just sit on it rather than immediately going to check their
+// inbox). ======
+let resetSuccessTimer = null;
+function showResetSuccess() {
+  $('reset-success').textContent = 'Password reset link sent! Check your inbox. (Check your spam/junk folder if you don\'t see it.)';
+  if (resetSuccessTimer) clearTimeout(resetSuccessTimer);
+  resetSuccessTimer = setTimeout(() => {
+    const el = document.getElementById('reset-success');
+    if (el) el.textContent = '';
+    resetSuccessTimer = null;
+  }, 5000);
+}
+
 $('btn-send-reset').addEventListener('click', async () => {
   clearErrors();
   const email = $('input-reset-email').value.trim();
@@ -508,7 +534,7 @@ $('btn-send-reset').addEventListener('click', async () => {
   try {
     await auth.sendPasswordResetEmail(email);
     hideLoading();
-    $('reset-success').textContent = 'Password reset link sent! Check your inbox. (Check your spam/junk folder if you don\'t see it.)';
+    showResetSuccess();
     $('input-reset-email').value = '';
   } catch (err) {
     hideLoading();
@@ -517,7 +543,7 @@ $('btn-send-reset').addEventListener('click', async () => {
       // Deliberately shown as if it succeeded — confirming "no account exists"
       // here is an enumeration leak, exactly as revealing "an account exists"
       // would be. Nothing was actually sent, but the response looks identical.
-      $('reset-success').textContent = 'Password reset link sent! Check your inbox. (Check your spam/junk folder if you don\'t see it.)';
+      showResetSuccess();
       $('input-reset-email').value = '';
     } else if (err.code === 'auth/invalid-email') {
       showError('reset-error', 'Please enter a valid email address.');
@@ -572,7 +598,13 @@ $('btn-set-password').addEventListener('click', async () => {
   try {
     await auth.confirmPasswordReset(window.__resetOobCode, newPassword);
     hideLoading();
+    // Auto-clears after a few seconds — nothing else on this persistent
+    // screen (no auto-navigation) would otherwise touch it.
     $('set-password-success').textContent = 'Password reset successfully! You can now sign in with your new password.';
+    setTimeout(() => {
+      const el = document.getElementById('set-password-success');
+      if (el) el.textContent = '';
+    }, 5000);
     $('input-new-password').value = '';
     $('input-new-password-confirm').value = '';
     window.__resetOobCode = null;
@@ -633,10 +665,29 @@ function stopVerifyEmailPolling() {
   }
 }
 
+// ====== verify-error auto-clears after a few seconds — this screen runs a
+// live 4s background poll (startVerifyEmailPolling() above) the whole time
+// it's shown, so a message here (whether "resent!" or an error) would
+// otherwise sit indefinitely while the user just waits for the poll to
+// succeed, with nothing else around to naturally clear it. Scoped to this
+// one element rather than changing showError() itself, which is also used
+// for blocking form-validation errors elsewhere (Sign In, Create Team, ...)
+// where persisting until the next attempt is correct. ======
+let verifyErrorTimer = null;
+function showVerifyError(message) {
+  showError('verify-error', message);
+  if (verifyErrorTimer) clearTimeout(verifyErrorTimer);
+  verifyErrorTimer = setTimeout(() => {
+    const el = document.getElementById('verify-error');
+    if (el) el.textContent = '';
+    verifyErrorTimer = null;
+  }, 5000);
+}
+
 $('btn-resend-verification').addEventListener('click', async () => {
   clearErrors();
   if (!currentUser) {
-    showError('verify-error', 'You are not signed in. Please go back and sign in again.');
+    showVerifyError('You are not signed in. Please go back and sign in again.');
     return;
   }
 
@@ -644,18 +695,18 @@ $('btn-resend-verification').addEventListener('click', async () => {
   try {
     await currentUser.sendEmailVerification();
     hideLoading();
-    showError('verify-error', 'Verification email resent! Check your inbox. (Check your spam/junk folder if you don\'t see it.)');
+    showVerifyError('Verification email resent! Check your inbox. (Check your spam/junk folder if you don\'t see it.)');
   } catch (err) {
     hideLoading();
     console.error('Resend verification error:', err);
-    showError('verify-error', 'Failed to resend. Please try again.');
+    showVerifyError('Failed to resend. Please try again.');
   }
 });
 
 $('btn-check-verified').addEventListener('click', async () => {
   clearErrors();
   if (!currentUser) {
-    showError('verify-error', 'You are not signed in. Please go back and sign in again.');
+    showVerifyError('You are not signed in. Please go back and sign in again.');
     return;
   }
 
@@ -672,12 +723,12 @@ $('btn-check-verified').addEventListener('click', async () => {
       await handleAuthenticatedUser(freshUser);
     } else {
       hideLoading();
-      showError('verify-error', 'Email not verified yet. Please check your inbox and click the verification link, then try again.');
+      showVerifyError('Email not verified yet. Please check your inbox and click the verification link, then try again.');
     }
   } catch (err) {
     hideLoading();
     console.error('Check verified error:', err);
-    showError('verify-error', 'Failed to check verification status. Please try again.');
+    showVerifyError('Failed to check verification status. Please try again.');
   }
 });
 
@@ -715,185 +766,483 @@ $('input-set-display-name').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') $('btn-set-display-name-continue').click();
 });
 
-// ====== Change Password (My Account tab, email/password accounts only) ======
-function openChangePasswordModal() {
-  $('input-change-password-current').value = '';
-  $('input-change-password-new').value = '';
-  $('input-change-password-confirm').value = '';
-  $('change-password-error').textContent = '';
-  $('change-password-success').textContent = '';
-  $('change-password-modal').classList.remove('hidden');
+// ====== My Account tab: consolidated info card (name/email/login method) ======
+// Replaces the old separate Change Email / Change Password modals
+// (openChangeEmailModal/saveNewEmail, openChangePasswordModal/
+// saveNewPassword) with one Edit -> reauth -> Save flow covering all three
+// fields at once. The underlying Firebase calls are unchanged from those —
+// reauthenticateWithCredential/reauthenticateWithPopup, verifyBeforeUpdateEmail,
+// updatePassword — just no longer split across two separate modals/buttons.
+function userHasPasswordProvider() {
+  return !!(currentUser && currentUser.providerData &&
+    currentUser.providerData.some(p => p.providerId === 'password'));
 }
 
-function closeChangePasswordModal() {
-  $('change-password-modal').classList.add('hidden');
+function userHasGoogleProvider() {
+  return !!(currentUser && currentUser.providerData &&
+    currentUser.providerData.some(p => p.providerId === 'google.com'));
 }
 
-async function saveNewPassword() {
-  const errorEl = $('change-password-error');
-  const successEl = $('change-password-success');
+function renderAccountInfo() {
+  if (!currentUser) return;
+
+  const nameEl = document.getElementById('account-card-name-display');
+  if (nameEl) nameEl.textContent = (typeof getCurrentUserDisplayName === 'function') ? getCurrentUserDisplayName() : (currentUser.email || '');
+
+  const hasPassword = userHasPasswordProvider();
+
+  // A password-provider account gets its own Email row, same as always; a
+  // Google-provider account's email is shown inline with Login Method
+  // instead (it isn't a separately editable field for that account type —
+  // see enterAccountCardEditMode()).
+  const emailRow = document.getElementById('account-card-email-row');
+  if (emailRow) emailRow.classList.toggle('hidden', !hasPassword);
+  const emailEl = document.getElementById('account-card-email-display');
+  if (emailEl) emailEl.textContent = currentUser.email || '(no email on this account)';
+
+  const methodEl = document.getElementById('account-card-login-method-display');
+  if (methodEl) {
+    methodEl.textContent = hasPassword ? 'Email & Password' : `Google (${currentUser.email || 'no email on this account'})`;
+  }
+
+  const convertSection = document.getElementById('account-google-convert-section');
+  if (convertSection) convertSection.classList.toggle('hidden', hasPassword);
+  const convertCurrentEmailEl = document.getElementById('account-google-convert-current-email');
+  if (convertCurrentEmailEl) convertCurrentEmailEl.textContent = currentUser.email || '(no email on this account)';
+
+  const hasGoogle = userHasGoogleProvider();
+  const emailToGoogleSection = document.getElementById('account-email-to-google-section');
+  if (emailToGoogleSection) emailToGoogleSection.classList.toggle('hidden', !hasPassword || hasGoogle);
+
+  // Always land back in view mode when this re-renders (tab switched to,
+  // login, a live team-list update, ...) — an edit in progress showing now-
+  // stale field values would be confusing, and Cancel already does the same.
+  exitAccountCardEditMode();
+}
+
+function enterAccountCardEditMode() {
+  if (!currentUser) return;
+  const hasPassword = userHasPasswordProvider();
+
+  document.getElementById('input-account-card-name').value = (typeof getCurrentUserDisplayName === 'function') ? getCurrentUserDisplayName() : '';
+  document.getElementById('input-account-card-email').value = hasPassword ? (currentUser.email || '') : '';
+  document.getElementById('input-account-card-new-password').value = '';
+  document.getElementById('input-account-card-confirm-password').value = '';
+  document.getElementById('account-card-error').textContent = '';
+  document.getElementById('account-card-success').textContent = '';
+
+  // A Google-only account has no editable email or password here — its
+  // email comes from whichever Google account is linked (shown read-only in
+  // the "Switch to Email + Password Login" section instead), and its
+  // password is what that same section exists to add.
+  document.getElementById('account-card-email-field-group').classList.toggle('hidden', !hasPassword);
+  document.getElementById('account-card-new-password-group').classList.toggle('hidden', !hasPassword);
+  document.getElementById('account-card-confirm-password-group').classList.toggle('hidden', !hasPassword);
+
+  document.getElementById('account-card-view').classList.add('hidden');
+  document.getElementById('account-card-edit').classList.remove('hidden');
+}
+
+function exitAccountCardEditMode() {
+  const editEl = document.getElementById('account-card-edit');
+  const viewEl = document.getElementById('account-card-view');
+  if (editEl) editEl.classList.add('hidden');
+  if (viewEl) viewEl.classList.remove('hidden');
+}
+
+// ====== Edit-button reauth gate ======
+// Reauthenticates BEFORE the card ever enters edit mode — a Google-only
+// account gets an immediate popup; a password-provider account gets a small
+// modal asking for the current password. Edit mode only opens once that
+// succeeds; a failed or canceled reauth leaves the card in view mode.
+async function handleAccountCardEditClick() {
+  if (!currentUser) return;
+
+  if (userHasPasswordProvider()) {
+    openAccountReauthModal(enterAccountCardEditMode);
+    return;
+  }
+
+  showLoading('Verifying your identity...');
+  try {
+    const provider = new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    await currentUser.reauthenticateWithPopup(provider);
+    hideLoading();
+    enterAccountCardEditMode();
+  } catch (err) {
+    hideLoading();
+    console.error('Account edit reauth error:', err);
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({ title: 'Verification Failed', message: friendlyAuthError(err.code) });
+    }
+  }
+}
+
+// ====== Password-reauth gate modal ======
+// Generic: whoever opens it passes the callback to run once the current
+// password checks out — the Account tab Edit button (password-provider
+// accounts) and the Switch to Google Login flow (below) both use this same
+// "confirm your password first" step rather than each having their own copy.
+let pendingAccountReauthCallback = null;
+
+function openAccountReauthModal(onSuccess) {
+  pendingAccountReauthCallback = typeof onSuccess === 'function' ? onSuccess : null;
+  $('input-account-reauth-password').value = '';
+  $('account-reauth-error').textContent = '';
+  $('account-reauth-modal').classList.remove('hidden');
+}
+
+function closeAccountReauthModal() {
+  pendingAccountReauthCallback = null;
+  $('account-reauth-modal').classList.add('hidden');
+}
+
+async function confirmAccountReauth() {
+  const errorEl = $('account-reauth-error');
   errorEl.textContent = '';
-  successEl.textContent = '';
 
-  const currentPassword = $('input-change-password-current').value;
-  const newPassword = $('input-change-password-new').value;
-  const confirmPassword = $('input-change-password-confirm').value;
-
-  if (!currentPassword) {
+  const password = $('input-account-reauth-password').value;
+  if (!password) {
     errorEl.textContent = 'Please enter your current password.';
     return;
   }
-  if (!newPassword || newPassword.length < 6) {
-    errorEl.textContent = 'New password must be at least 6 characters.';
-    return;
-  }
-  if (newPassword !== confirmPassword) {
-    errorEl.textContent = 'New passwords do not match.';
-    return;
-  }
-  if (!currentUser || !currentUser.email) {
-    errorEl.textContent = 'You must be signed in to change your password.';
-    return;
-  }
+  if (!currentUser || !currentUser.email) return;
 
   showLoading('Verifying your identity...');
   try {
-    // Firebase requires a recent sign-in before allowing a password change —
-    // re-entering the current password is how we satisfy that here.
-    const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, currentPassword);
+    const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, password);
     await currentUser.reauthenticateWithCredential(cred);
-
-    showLoading('Updating password...');
-    await currentUser.updatePassword(newPassword);
-
     hideLoading();
-    successEl.textContent = 'Password updated!';
-    setTimeout(() => {
-      closeChangePasswordModal();
-    }, 1200);
+    const callback = pendingAccountReauthCallback;
+    closeAccountReauthModal();
+    if (callback) await callback();
   } catch (err) {
     hideLoading();
-    console.error('Change password error:', err);
-    errorEl.textContent = friendlyAuthError(err.code);
+    console.error('Account reauth error:', err);
+    errorEl.textContent = 'Incorrect password. Please try again.';
   }
 }
 
-$('btn-open-change-password').addEventListener('click', openChangePasswordModal);
-$('btn-change-password-close').addEventListener('click', closeChangePasswordModal);
-$('btn-change-password-cancel').addEventListener('click', closeChangePasswordModal);
-$('change-password-modal-overlay').addEventListener('click', closeChangePasswordModal);
-$('btn-change-password-save').addEventListener('click', saveNewPassword);
+$('btn-account-card-edit').addEventListener('click', handleAccountCardEditClick);
+$('btn-account-card-cancel').addEventListener('click', exitAccountCardEditMode);
+$('btn-account-reauth-close').addEventListener('click', closeAccountReauthModal);
+$('btn-account-reauth-cancel').addEventListener('click', closeAccountReauthModal);
+$('account-reauth-modal-overlay').addEventListener('click', closeAccountReauthModal);
+$('btn-account-reauth-confirm').addEventListener('click', confirmAccountReauth);
+$('input-account-reauth-password').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('btn-account-reauth-confirm').click();
+});
 
-// ====== Change Email (My Account tab) ======
-// Uses verifyBeforeUpdateEmail() rather than updateEmail() — this sends a
-// confirmation link to the NEW address and Firebase only actually changes the
-// account's email once that link is clicked, so no Firestore write happens here.
-// ensureUserProfile() already re-syncs private/contact.email from
-// currentUser.email on every login, so the next sign-in after confirming
-// picks up the change automatically — no extra sync code needed.
-function openChangeEmailModal() {
-  if (!currentUser) return;
-  const hasPasswordProvider = !!(currentUser.providerData &&
-    currentUser.providerData.some(p => p.providerId === 'password'));
-
-  $('input-change-email-password').value = '';
-  $('input-change-email-new').value = '';
-  $('change-email-error').textContent = '';
-  $('change-email-success').textContent = '';
-  $('change-email-password-field').classList.toggle('hidden', !hasPasswordProvider);
-  $('change-email-google-note').classList.toggle('hidden', hasPasswordProvider);
-
-  $('change-email-modal').classList.remove('hidden');
-}
-
-function closeChangeEmailModal() {
-  $('change-email-modal').classList.add('hidden');
-}
-
-async function saveNewEmail() {
-  const errorEl = $('change-email-error');
-  const successEl = $('change-email-success');
+// ====== Save the consolidated card ======
+// Reauth already happened up front, when Edit was clicked (see
+// handleAccountCardEditClick()) — Save just applies whatever changed, in
+// order name -> email -> password: cheapest and least externally-dependent
+// first, so if a later step fails the earlier ones are still saved rather
+// than losing everything to one error (the error message says so
+// explicitly). If Firebase decides the earlier reauth is no longer "recent"
+// enough by the time this runs (auth/requires-recent-login — the user left
+// the form open a while), friendlyAuthError() already has a message for
+// that; they'd need to click Edit again to re-gate.
+$('btn-account-card-save').addEventListener('click', async () => {
+  const errorEl = document.getElementById('account-card-error');
+  const successEl = document.getElementById('account-card-success');
   errorEl.textContent = '';
   successEl.textContent = '';
 
-  const newEmail = $('input-change-email-new').value.trim();
-  if (!newEmail) {
-    errorEl.textContent = 'Please enter a new email address.';
+  if (!currentUser) return;
+
+  const newName = document.getElementById('input-account-card-name').value.trim();
+  const hasPassword = userHasPasswordProvider();
+  // A Google-provider account's email isn't an editable field here — it's
+  // tied to whichever Google account is linked (see the read-only line in
+  // the "Switch to Email + Password Login" section instead) — so there's
+  // nothing to read/validate/save for it on this account type.
+  const newEmail = hasPassword ? document.getElementById('input-account-card-email').value.trim() : null;
+  const newPassword = hasPassword ? document.getElementById('input-account-card-new-password').value : '';
+  const confirmPassword = hasPassword ? document.getElementById('input-account-card-confirm-password').value : '';
+
+  if (!newName) {
+    errorEl.textContent = 'Please enter a name.';
     return;
   }
-  if (!currentUser) {
-    errorEl.textContent = 'You must be signed in to change your email.';
+  if (hasPassword) {
+    if (!newEmail) {
+      errorEl.textContent = 'Please enter an email address.';
+      return;
+    }
+    if (!EMAIL_FORMAT_REGEX.test(newEmail)) {
+      errorEl.textContent = 'Please enter a valid email address.';
+      return;
+    }
+  }
+  if (newPassword || confirmPassword) {
+    if (newPassword.length < 6) {
+      errorEl.textContent = 'New password must be at least 6 characters.';
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      errorEl.textContent = 'New passwords do not match.';
+      return;
+    }
+  }
+
+  const previousName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : '';
+  let emailChangePending = false;
+  try {
+    if (newName !== previousName) {
+      showLoading('Saving name...');
+      await saveDisplayName(newName);
+    }
+
+    if (hasPassword && currentUser.email && newEmail.toLowerCase() !== currentUser.email.toLowerCase()) {
+      showLoading('Sending confirmation email...');
+      await currentUser.verifyBeforeUpdateEmail(newEmail);
+      emailChangePending = true;
+    }
+
+    if (hasPassword && newPassword) {
+      showLoading('Updating password...');
+      await currentUser.updatePassword(newPassword);
+    }
+
+    hideLoading();
+    successEl.textContent = emailChangePending
+      ? `Saved! Check ${newEmail} to confirm your new email — it won't take effect until you click the link. (Check your spam/junk folder if you don't see it.)`
+      : 'Saved!';
+    // Stay in edit mode (showing the message above) briefly before
+    // renderAccountInfo() refreshes the view-mode fields and exits — longer
+    // when an email change is pending so there's time to actually read it,
+    // same distinction the old saveNewPassword (1200ms) / saveNewEmail
+    // (4000ms) split made.
+    setTimeout(() => { renderAccountInfo(); }, emailChangePending ? 4000 : 1200);
+  } catch (err) {
+    hideLoading();
+    console.error('Account card save error:', err);
+    errorEl.textContent = friendlyAuthError(err.code);
+  }
+});
+
+// ====== Switch to Email + Password Login (Google-linked accounts only) ======
+// Keeps the account's existing (already-verified) email rather than
+// accepting a new one — Firebase's linkWithCredential() behavior when the
+// credential's email differs from the account's current one isn't clearly
+// documented, whereas linking a credential whose email already matches
+// currentUser.email is unambiguous. A user who wants a different email can
+// still get one afterward through the consolidated card above, once they
+// have a password provider.
+// Sequence: confirm (showConfirmModal) -> collect a new password
+// (google-convert-modal) -> fresh Google reauth -> link the password
+// credential (same email) -> unlink Google -> delete the stored profile
+// picture ONLY if it's still exactly what Google supplied (never a
+// custom-uploaded one, once that feature exists — see the photoURL
+// comparison below).
+function openGoogleConvertConfirm() {
+  if (!currentUser || userHasPasswordProvider() || typeof showConfirmModal !== 'function') return;
+
+  showConfirmModal({
+    title: 'Switch to Email + Password Login?',
+    message: `You'll set a password for ${currentUser.email}. After this, you'll sign in with that email and password instead of "Sign in with Google" — this can't be undone from here.`,
+    confirmLabel: 'Continue',
+    danger: true,
+    onConfirm: openGoogleConvertModal
+  });
+}
+
+function openGoogleConvertModal() {
+  $('google-convert-email-display').textContent = currentUser.email || '';
+  $('input-google-convert-password').value = '';
+  $('input-google-convert-confirm').value = '';
+  $('google-convert-error').textContent = '';
+  $('google-convert-success').textContent = '';
+  $('google-convert-modal').classList.remove('hidden');
+}
+
+function closeGoogleConvertModal() {
+  $('google-convert-modal').classList.add('hidden');
+}
+
+async function saveGoogleConvert() {
+  const errorEl = $('google-convert-error');
+  const successEl = $('google-convert-success');
+  errorEl.textContent = '';
+  successEl.textContent = '';
+
+  const newPassword = $('input-google-convert-password').value;
+  const confirmPassword = $('input-google-convert-confirm').value;
+
+  if (!newPassword || newPassword.length < 6) {
+    errorEl.textContent = 'Password must be at least 6 characters.';
     return;
   }
-  if (currentUser.email && newEmail.toLowerCase() === currentUser.email.toLowerCase()) {
-    errorEl.textContent = "That's already your current email address.";
+  if (newPassword !== confirmPassword) {
+    errorEl.textContent = 'Passwords do not match.';
+    return;
+  }
+  if (!currentUser || !currentUser.email) {
+    errorEl.textContent = 'You must be signed in to do this.';
     return;
   }
 
-  const hasPasswordProvider = !!(currentUser.providerData &&
-    currentUser.providerData.some(p => p.providerId === 'password'));
-
-  // Reauth and the actual email update are handled as two separate try/catch
-  // stages — a wrong current password and a new-email-already-in-use error both
-  // used to fall through to the same generic "Invalid email or password"
-  // message, which is wrong for both: a reauth failure here is always a
-  // password problem (the email side of that credential is our own, already-
-  // correct one), and conflating it with the unrelated new-email conflict below
-  // was actively confusing.
   showLoading('Verifying your identity...');
   try {
-    if (hasPasswordProvider) {
-      const currentPassword = $('input-change-email-password').value;
-      if (!currentPassword) {
-        hideLoading();
-        errorEl.textContent = 'Please enter your current password.';
-        return;
-      }
-      const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, currentPassword);
-      await currentUser.reauthenticateWithCredential(cred);
-    } else {
-      // Google-only accounts have no password — reauthenticate with the same
-      // provider/popup flow used for Google sign-in.
-      const provider = new firebase.auth.GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-      await currentUser.reauthenticateWithPopup(provider);
-    }
+    const provider = new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    await currentUser.reauthenticateWithPopup(provider);
   } catch (err) {
     hideLoading();
-    console.error('Change email reauth error:', err);
-    if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/popup-blocked') {
-      errorEl.textContent = friendlyAuthError(err.code);
-    } else if (hasPasswordProvider) {
-      errorEl.textContent = 'Incorrect password. Please try again.';
-    } else {
-      errorEl.textContent = 'Could not verify your identity. Please try again.';
-    }
+    console.error('Google convert reauth error:', err);
+    errorEl.textContent = friendlyAuthError(err.code);
     return;
   }
 
-  showLoading('Sending confirmation email...');
-  try {
-    await currentUser.verifyBeforeUpdateEmail(newEmail);
+  // Capture Google's own profile-picture URL BEFORE unlinking — providerData
+  // only has a 'google.com' entry while it's still linked.
+  const googleEntry = currentUser.providerData.find(p => p.providerId === 'google.com');
+  const googlePhotoURL = googleEntry ? googleEntry.photoURL : null;
 
-    hideLoading();
-    successEl.textContent = `Check ${newEmail} to confirm the change. Your email here won't update until you click the link. (Check your spam/junk folder if you don't see it.)`;
-    setTimeout(() => {
-      closeChangeEmailModal();
-    }, 4000);
+  try {
+    showLoading('Setting your password...');
+    const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, newPassword);
+    await currentUser.linkWithCredential(cred);
   } catch (err) {
     hideLoading();
-    console.error('Change email update error:', err);
-    // friendlyAuthError() already keeps auth/email-already-in-use generic —
-    // it never confirms whether the new address has an existing account.
+    console.error('Google convert link error:', err);
     errorEl.textContent = friendlyAuthError(err.code);
+    return;
+  }
+
+  // The password is already set and working at this point — a failure below
+  // (unlink or the Firestore cleanup) is reported but nothing is rolled
+  // back; both are safe to leave half-done (Google stays linked as a second
+  // sign-in option; a leftover Firestore photoURL is cosmetic only).
+  try {
+    showLoading('Removing Google sign-in...');
+    await currentUser.unlink('google.com');
+
+    if (googlePhotoURL && currentUserProfile && currentUserProfile.photoURL === googlePhotoURL) {
+      await db.collection('users').doc(currentUser.uid).update({
+        photoURL: firebase.firestore.FieldValue.delete()
+      });
+      currentUserProfile.photoURL = null;
+    }
+
+    hideLoading();
+    renderAccountInfo();
+    successEl.textContent = 'Your account now signs in with email and password!';
+    setTimeout(() => { closeGoogleConvertModal(); }, 2000);
+  } catch (err) {
+    hideLoading();
+    console.error('Google convert unlink/cleanup error:', err);
+    renderAccountInfo(); // password provider is already active either way
+    errorEl.textContent = 'Password set, but removing Google sign-in failed. You can sign in with your new password now; try again to finish removing Google, or contact support.';
   }
 }
 
-$('btn-open-change-email').addEventListener('click', openChangeEmailModal);
-$('btn-change-email-close').addEventListener('click', closeChangeEmailModal);
-$('btn-change-email-cancel').addEventListener('click', closeChangeEmailModal);
-$('change-email-modal-overlay').addEventListener('click', closeChangeEmailModal);
-$('btn-change-email-save').addEventListener('click', saveNewEmail);
+$('btn-open-google-convert').addEventListener('click', openGoogleConvertConfirm);
+$('btn-google-convert-close').addEventListener('click', closeGoogleConvertModal);
+$('btn-google-convert-cancel').addEventListener('click', closeGoogleConvertModal);
+$('google-convert-modal-overlay').addEventListener('click', closeGoogleConvertModal);
+$('btn-google-convert-save').addEventListener('click', saveGoogleConvert);
+
+// ====== Switch to Google Login (email/password accounts only) ======
+// The reverse direction of the section above. Sequence: confirm
+// (showConfirmModal) -> straight to a Google popup on a SEPARATE, temporary
+// Firebase app instance (so it never touches currentUser or this tab's real
+// session) purely to find out which Google account the user picked and its
+// email -> if that email doesn't exactly match this account's email, abort
+// with a clear message (same match-required restriction chosen for the
+// other direction, applied here in reverse) -> only then link that
+// credential to the real currentUser and unlink the password provider. No
+// separate password-reauth step first — picking a Google account via the
+// popup already re-proves identity for this operation, the same way it does
+// for the equivalent Google-account-side flows elsewhere in this file.
+// Using a scratch app to inspect the credential first, rather than linking
+// immediately and unlinking again on a mismatch, avoids ever leaving the
+// real account in a transient "both providers linked" state for a
+// rejected attempt.
+function openEmailToGoogleConvertConfirm() {
+  if (!currentUser || !userHasPasswordProvider() || userHasGoogleProvider() || typeof showConfirmModal !== 'function') return;
+
+  showConfirmModal({
+    title: 'Switch to Google Login?',
+    message: `You'll sign in with Google to link it — that Google account's email must exactly match ${currentUser.email}. After this, you'll sign in with "Sign in with Google" instead of your password — this can't be undone from here.`,
+    confirmLabel: 'Continue',
+    danger: true,
+    onConfirm: startEmailToGoogleLinkPopup
+  });
+}
+
+async function startEmailToGoogleLinkPopup() {
+  if (!currentUser || !currentUser.email) return;
+
+  showLoading('Opening Google sign-in...');
+  let tempApp = null;
+  try {
+    tempApp = firebase.initializeApp(firebaseConfig, `email-to-google-check-${Date.now()}`);
+    const tempAuth = firebase.auth(tempApp);
+    const provider = new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const tempResult = await tempAuth.signInWithPopup(provider);
+    const googleEmail = tempResult.user.email;
+    const googlePhotoURL = tempResult.user.photoURL;
+    const googleCredential = firebase.auth.GoogleAuthProvider.credentialFromResult(tempResult);
+
+    // Done with the scratch sign-in either way — clear it before touching
+    // the real account, so a mismatch leaves nothing lingering.
+    await tempAuth.signOut();
+
+    if (!googleEmail || googleEmail.toLowerCase() !== currentUser.email.toLowerCase()) {
+      hideLoading();
+      if (typeof showNoticeModal === 'function') {
+        showNoticeModal({
+          title: 'Email Mismatch',
+          message: `That Google account's email (${googleEmail || 'unknown'}) doesn't match your account's email (${currentUser.email}). Sign in with the matching Google account, or change your account's email first (Edit, above), then try again.`
+        });
+      }
+      return;
+    }
+
+    showLoading('Linking your Google account...');
+    await currentUser.linkWithCredential(googleCredential);
+
+    // Import whatever Google-supplied profile data a normal Google sign-in
+    // captures (see ensureUserProfile()'s photoURL handling) — same field,
+    // same storage location, so this account looks identical to one that
+    // originally signed up via Google. Display name is deliberately left
+    // alone: unlike a brand-new Google signup, this account already has a
+    // display name the user chose, and Google's isn't more authoritative.
+    if (googlePhotoURL) {
+      try {
+        await db.collection('users').doc(currentUser.uid).set({ photoURL: googlePhotoURL }, { merge: true });
+        if (currentUserProfile) currentUserProfile.photoURL = googlePhotoURL;
+      } catch (err) {
+        console.warn('Failed to import Google profile photo:', err);
+      }
+    }
+
+    showLoading('Removing password sign-in...');
+    await currentUser.unlink('password');
+
+    hideLoading();
+    renderAccountInfo();
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({ title: 'Account Converted', message: 'Your account now signs in with Google!' });
+    }
+  } catch (err) {
+    hideLoading();
+    console.error('Email-to-Google conversion error:', err);
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({ title: 'Conversion Failed', message: friendlyAuthError(err.code) });
+    }
+  } finally {
+    if (tempApp) {
+      try { await tempApp.delete(); } catch (err) { console.warn('Failed to clean up temporary auth app:', err); }
+    }
+  }
+}
+
+$('btn-open-email-to-google-convert').addEventListener('click', openEmailToGoogleConvertConfirm);
 
 // ====== SIGN OUT ======
 async function signOut() {
@@ -949,24 +1298,162 @@ async function signOut() {
 $('btn-sign-out').addEventListener('click', signOut);
 $('btn-main-sign-out').addEventListener('click', signOut);
 
-// ====== My Account tab: email + Change Password gating ======
-// currentUser.email (Firebase Auth) is already the source of truth for the
-// signed-in user's own email — no need to read users/{uid}/private/contact,
-// which exists only so *other* people (the captain) can see a teammate's email.
-function renderAccountInfo() {
+// ====== My Account tab: list of every team this user currently belongs to.
+// Read-only summary (name + role) — distinct from the My Team tab's switcher
+// dropdown (select-active-team, members.js), which actually changes the
+// active team. Reads myTeams directly, same as renderTeamSwitcher(), so it
+// always reflects whatever's current whenever called. ======
+function renderAccountTeamsList() {
+  const container = document.getElementById('account-teams-list');
+  const status = document.getElementById('account-teams-status');
+  if (!container || !status) return;
+
+  const teams = (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) ? myTeams : [];
+  container.innerHTML = '';
+
+  if (teams.length === 0) {
+    status.textContent = "You're not currently on any team.";
+    return;
+  }
+
+  status.textContent = `${teams.length} team(s)`;
+
+  teams.forEach(t => {
+    const isCaptain = !!(currentUser && t.roles && t.roles[currentUser.uid] === 'captain');
+
+    const item = document.createElement('div');
+    item.className = 'team-item';
+
+    const nameEl = document.createElement('div');
+    nameEl.style.cssText = 'font-weight:600; font-size:0.9rem';
+    nameEl.textContent = t.name || 'Unnamed team';
+    item.appendChild(nameEl);
+
+    const badge = document.createElement('span');
+    badge.className = isCaptain ? 'member-role-badge' : 'member-role-badge member';
+    badge.textContent = isCaptain ? 'Captain' : 'Member';
+    item.appendChild(badge);
+
+    container.appendChild(item);
+  });
+}
+
+// ====== My Account tab: per-team display names ======
+// Independent of the account-level display name in the consolidated card
+// above — lets the user set a DIFFERENT name shown to just one team's
+// members (member list, scouting entry attribution), stored at
+// teams/{teamId}/memberDisplayNames/{uid}. Reads every team's current value
+// fresh each time this renders (no cross-team cache needed — this list is
+// small, and it's not read anywhere near as often as fetchMemberInfo()).
+async function renderPerTeamDisplayNames() {
+  const container = document.getElementById('account-per-team-names-list');
+  const status = document.getElementById('account-per-team-names-status');
+  if (!container || !status || !currentUser) return;
+
+  const teams = (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) ? myTeams : [];
+  container.innerHTML = '';
+
+  if (teams.length === 0) {
+    status.textContent = "You're not currently on any team.";
+    return;
+  }
+
+  status.textContent = '';
+  const uid = currentUser.uid;
+
+  const rows = teams.map(t => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex; gap:8px; align-items:flex-start; margin-bottom:12px';
+
+    const labelWrap = document.createElement('div');
+    labelWrap.style.cssText = 'flex:1; min-width:0';
+
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size:0.8rem; color:var(--text-muted); margin-bottom:4px';
+    label.textContent = t.name || 'Unnamed team';
+    labelWrap.appendChild(label);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.maxLength = 40;
+    input.placeholder = 'Same as account name';
+    input.style.marginBottom = '0';
+    labelWrap.appendChild(input);
+
+    const rowStatus = document.createElement('p');
+    rowStatus.className = 'help-text';
+    rowStatus.style.cssText = 'font-size:0.75rem; margin-top:4px; margin-bottom:0';
+    labelWrap.appendChild(rowStatus);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'btn btn-small btn-primary';
+    saveBtn.textContent = 'Save';
+    saveBtn.style.cssText = 'width:auto; white-space:nowrap; flex-shrink:0';
+    saveBtn.addEventListener('click', () => savePerTeamDisplayName(t.id, input, rowStatus));
+
+    row.appendChild(labelWrap);
+    row.appendChild(saveBtn);
+    container.appendChild(row);
+
+    return { teamId: t.id, input };
+  });
+
+  // Populate each row's current value independently, same "resolve then
+  // patch" pattern as fetchMemberInfo()'s callers — a slow team doesn't hold
+  // up the rest of the list.
+  rows.forEach(({ teamId, input }) => {
+    db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(uid).get()
+      .then(doc => {
+        if (doc.exists && doc.data().displayName) input.value = doc.data().displayName;
+      })
+      .catch(err => {
+        // Same "expected removal signal" reasoning as loadTeamMembers()'s
+        // own-override read (members.js) and watchMyTeams()'s listener
+        // (both this file) — a permission-denied for a team no longer in
+        // myTeams almost always means this read raced a leave/kick that's
+        // already been handled elsewhere, not a genuine problem.
+        const stillMember = typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.some(t => t.id === teamId);
+        if (err.code === 'permission-denied' && !stillMember) return;
+        console.warn(`Failed to load per-team display name for team ${teamId}:`, err);
+      });
+  });
+}
+
+async function savePerTeamDisplayName(teamId, input, statusEl) {
   if (!currentUser) return;
+  const name = input.value.trim();
 
-  const emailEl = document.getElementById('account-email-display');
-  if (emailEl) emailEl.textContent = currentUser.email || '(no email on this account)';
+  statusEl.textContent = 'Saving...';
+  statusEl.className = 'help-text';
+  try {
+    if (name) {
+      await db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(currentUser.uid)
+        .set({ displayName: name });
+    } else {
+      // Blank means "use my account name" — delete the override rather than
+      // storing an empty string, so fetchMemberInfo()'s `if (overrideName)`
+      // check (and the same logic for the self row here) falls through to
+      // the account-level name exactly as if it were never set.
+      await db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(currentUser.uid).delete();
+    }
 
-  const hasPasswordProvider = !!(currentUser.providerData &&
-    currentUser.providerData.some(p => p.providerId === 'password'));
+    statusEl.textContent = 'Saved!';
+    statusEl.className = 'success-message';
+    setTimeout(() => { statusEl.textContent = ''; }, 2000);
 
-  const changePwBtn = document.getElementById('btn-open-change-password');
-  const note = document.getElementById('account-password-note');
-  if (changePwBtn) changePwBtn.classList.toggle('hidden', !hasPasswordProvider);
-  if (note) {
-    note.textContent = hasPasswordProvider ? '' : 'Signed in with Google — no password to change.';
+    // If this is the currently active team, refresh the live override (and
+    // this user's own member-list row/future scoutedByName writes) right
+    // away rather than waiting for the next team switch.
+    if (teamId === currentTeamId) {
+      currentTeamDisplayNameOverride = name || null;
+      if (typeof loadTeamMembers === 'function' && currentTeamData) {
+        loadTeamMembers(currentTeamId, currentTeamData);
+      }
+    }
+  } catch (err) {
+    console.error(`Failed to save per-team display name for team ${teamId}:`, err);
+    statusEl.textContent = 'Failed to save. Please try again.';
+    statusEl.className = 'error-message';
   }
 }
 
@@ -981,6 +1468,8 @@ function openStandaloneMyAccount() {
   showScreen('screen-main');
   if (typeof activateDashboardTab === 'function') activateDashboardTab('account');
   renderAccountInfo();
+  renderAccountTeamsList();
+  if (typeof renderPerTeamDisplayNames === 'function') renderPerTeamDisplayNames();
   const backBtn = document.getElementById('btn-my-account-standalone-back');
   if (backBtn) backBtn.classList.remove('hidden');
 }
@@ -1085,6 +1574,8 @@ async function handleAuthenticatedUser(user) {
       // dashboard still only ever displays one team at a time.
       myTeams = teams;
       if (typeof watchMyTeams === 'function') watchMyTeams();
+      if (typeof renderAccountTeamsList === 'function') renderAccountTeamsList();
+      if (typeof renderPerTeamDisplayNames === 'function') renderPerTeamDisplayNames();
 
       // Resolve which team is "active": whatever was last stored for this
       // uid, if it's still a team they belong to, else just the first one
@@ -1296,10 +1787,8 @@ function canUserKickMembers() {
 
 function updatePermissionUI() {
   const canEditTmpl = canUserEditTemplates();
-  const pitSection = document.getElementById('pit-form-config-section');
-  const matchSection = document.getElementById('match-form-config-section');
-  if (pitSection) pitSection.style.display = canEditTmpl ? 'block' : 'none';
-  if (matchSection) matchSection.style.display = canEditTmpl ? 'block' : 'none';
+  const formSection = document.getElementById('form-config-section');
+  if (formSection) formSection.style.display = canEditTmpl ? 'block' : 'none';
 }
 
 /**
@@ -1539,6 +2028,12 @@ function watchMyTeams() {
 
       if (typeof renderTeamSwitcher === 'function') {
         renderTeamSwitcher();
+      }
+      if (typeof renderAccountTeamsList === 'function') {
+        renderAccountTeamsList();
+      }
+      if (typeof renderPerTeamDisplayNames === 'function') {
+        renderPerTeamDisplayNames();
       }
     }, (err) => {
       console.warn(`myTeams listener error for team ${teamId}:`, err);
