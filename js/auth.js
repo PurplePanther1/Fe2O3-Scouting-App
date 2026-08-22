@@ -1139,7 +1139,12 @@ async function saveGoogleConvert() {
   }
 }
 
-$('btn-open-google-convert').addEventListener('click', openGoogleConvertConfirm);
+// btn-open-google-convert's containing section is currently rolled back out
+// of the Account tab's HTML (see index.html) — guarded rather than assumed
+// present, unlike this file's other $(...) wiring, so the rest of this
+// script still runs when that button doesn't exist.
+const btnOpenGoogleConvert = document.getElementById('btn-open-google-convert');
+if (btnOpenGoogleConvert) btnOpenGoogleConvert.addEventListener('click', openGoogleConvertConfirm);
 $('btn-google-convert-close').addEventListener('click', closeGoogleConvertModal);
 $('btn-google-convert-cancel').addEventListener('click', closeGoogleConvertModal);
 $('google-convert-modal-overlay').addEventListener('click', closeGoogleConvertModal);
@@ -1242,7 +1247,10 @@ async function startEmailToGoogleLinkPopup() {
   }
 }
 
-$('btn-open-email-to-google-convert').addEventListener('click', openEmailToGoogleConvertConfirm);
+// Same rollback guard as btn-open-google-convert above — this button's
+// section is currently removed from index.html.
+const btnOpenEmailToGoogleConvert = document.getElementById('btn-open-email-to-google-convert');
+if (btnOpenEmailToGoogleConvert) btnOpenEmailToGoogleConvert.addEventListener('click', openEmailToGoogleConvertConfirm);
 
 // ====== SIGN OUT ======
 async function signOut() {

@@ -492,29 +492,14 @@
           </div>
         </div>
 
-        <!-- Switch to Email + Password Login — Google-linked accounts only
-             (hidden entirely once a password provider exists, including
-             right after a successful conversion). -->
-        <div id="account-google-convert-section" class="account-section-card hidden">
-          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">SWITCH TO EMAIL + PASSWORD LOGIN</h3>
-          <p class="help-text" style="margin-bottom:4px">Current email (from Google)</p>
-          <p id="account-google-convert-current-email" style="margin-bottom:12px"></p>
-          <p class="help-text" style="margin-bottom:12px">
-            Add a password so you can sign in with your email instead of Google. This can't be undone from here.
-          </p>
-          <button id="btn-open-google-convert" class="btn btn-outline" style="width:100%">Switch to Email + Password Login</button>
-        </div>
-
-        <!-- Switch to Google Login — email/password accounts only (the
-             reverse direction of the section above; mutually exclusive with
-             it, hidden once converted either way). -->
-        <div id="account-email-to-google-section" class="account-section-card hidden">
-          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">SWITCH TO GOOGLE LOGIN</h3>
-          <p class="help-text" style="margin-bottom:12px">
-            Link a Google account with the same email to sign in with Google instead of a password. This can't be undone from here.
-          </p>
-          <button id="btn-open-email-to-google-convert" class="btn btn-outline" style="width:100%">Switch to Google Login</button>
-        </div>
+        <!-- Google<->Email login-method conversion sections (rolled back from
+             the UI — known account-desync bugs found in the reverse-direction
+             flow after converting, see js/auth.js). Entry-point sections
+             removed here; the underlying flow functions (openGoogleConvertConfirm/
+             saveGoogleConvert, openEmailToGoogleConvertConfirm/
+             startEmailToGoogleLinkPopup, and their shared modals below) are
+             left intact for when this is revisited, just unreachable with no
+             button pointing to them. -->
 
         <!-- Your teams -->
         <div class="account-section-card">

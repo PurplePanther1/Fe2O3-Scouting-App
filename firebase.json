@@ -9,6 +9,8 @@
       "**/.*",
       ".git/**",
       ".claude/**",
+      ".wrangler/**",
+      ".firebase/**",
       "**/node_modules/**",
       "workers/**",
       "scripts/**"

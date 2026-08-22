@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"console.log\\(require.resolve\\('firebase-tools'\\)\\)\")",
+      "Bash(where firebase *)",
+      "Bash(find \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\" -iname \"*fileMatcher*\" -o -iname \"*listFiles*\" 2>/dev/null | head -20)",
+      "Read(//c/Users/tim/AppData/Roaming/npm/node_modules/firebase-tools/lib/**)",
+      "Bash(cd \"c:\\\\Users\\\\tim\\\\Documents\\\\Kid Sync5\\\\Levi 5\\\\Robotics\\\\Coding\\\\Scouting App\" && cat \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\\\\listFiles.js\" | head -40)",
+      "Bash(node -e ' *)",
+      "Bash(grep -rn \"listFiles\" \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\" --include=\"*.js\" 2>/dev/null)",
+      "Bash(grep -rn \"ignore\" \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\\\\hosting\\\\config.js\" \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\\\\deploy\\\\hosting\\\\prepare.js\" \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\\\\deploy\\\\hosting\\\\deploy.js\" 2>&1 | head -60)",
+      "Read(//c/Users/tim/AppData/Roaming/npm/node_modules/firebase-tools/lib/hosting/**)",
+      "Bash(grep -rln \"normalizedHostingConfigs\\\\|extractHostingConfig\\\\|hostingConfig\" \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\\\\hosting\" 2>&1)",
+      "Bash(grep -n \"ignore\" \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\\\\hosting\\\\normalizedHostingConfigs.js\" 2>&1)",
+      "Bash(grep -n \"ignore\" \"C:\\\\Users\\\\tim\\\\AppData\\\\Roaming\\\\npm\\\\node_modules\\\\firebase-tools\\\\lib\\\\hosting\\\\config.js\" 2>&1)",
+      "Read(//c/Users/tim/AppData/Roaming/npm/node_modules/firebase-tools/node_modules/glob/**)",
+      "Bash(git rm *)",
+      "Bash(npx wrangler *)",
+      "Bash(echo \"EXIT CODE: $?\")",
+      "Bash(curl -s -o /dev/null -w \"https://fe2o3scouting.pages.dev -> HTTP %{http_code}\\\\n\" https://fe2o3scouting.pages.dev/)",
+      "Bash(curl -s -o /dev/null -w \"https://850e6e6e.fe2o3scouting.pages.dev -> HTTP %{http_code}\\\\n\" https://850e6e6e.fe2o3scouting.pages.dev/)",
+      "Bash(curl -s https://fe2o3scouting.pages.dev/js/firebase-config.js)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" https://850e6e6e.fe2o3scouting.pages.dev/ --retry 2 --retry-delay 3)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" https://fe2o3scouting.pages.dev/index.html)"
+    ]
+  }
+}
