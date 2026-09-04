@@ -459,6 +459,15 @@ document.addEventListener('DOMContentLoaded', () => {
   // Set the scouted state change callback so first-api.js can notify us
   // This must be set after first-api.js has loaded (which it has, since pit-scout.js loads after it)
   if (typeof onScoutedStateChanged !== 'undefined') {
-    onScoutedStateChanged = refreshTeamListScoutedState;
+    onScoutedStateChanged = () => {
+      refreshTeamListScoutedState();
+      // refreshTeamListScoutedState() only patches scouted-state UI it already
+      // knows about (checkmarks, meta lines) — it never touches the
+      // team-level Delete button, which is why that button used to stay
+      // permanently absent until some unrelated full re-render happened to
+      // fire first. Patch it here too so it appears as soon as this event's
+      // first pit-scouting snapshot actually arrives, not only after that.
+      if (typeof refreshTeamRowDeleteButtons === 'function') refreshTeamRowDeleteButtons();
+    };
   }
 });

@@ -25,6 +25,21 @@ let currentEventSchedule = [];
 let expandedScheduleMatchNumber = null;
 let expandedSchedulePanelEl = null;
 
+// Same "live substring filter over rendered text" approach as
+// applyTeamSearchFilter() (first-api.js) for the Team View lists — kept as
+// its own query/function rather than reusing that one, since this filters
+// match ROWS (by team number/name OR match number/description), not team
+// items, and there's no second/third input to keep in sync with here.
+let currentMatchScheduleSearchQuery = '';
+
+// Which part of each row the query above is matched against — 'both' (the
+// row's full rendered text, the original combined behavior), 'match' (just
+// the match's own label, so e.g. "1" can't accidentally match team #1111
+// embedded in the same row), or 'team' (just the teams block: numbers +
+// names). Not reset on event change (unlike the query text) — it's a
+// standing preference for how to search, not per-event state.
+let currentMatchScheduleSearchMode = 'both';
+
 // ====== Show/hide the team-view vs match-view containers and sync the
 // toggle buttons' active state to matchViewMode. Safe to call any time —
 // e.g. after the toggle bar itself is shown, or after a toggle click. ======
@@ -75,6 +90,13 @@ function resetMatchScheduleView() {
   const list = document.getElementById('match-schedule-list');
   if (status) status.textContent = '';
   if (list) list.innerHTML = '';
+
+  // A new event means a fresh schedule — same "start clean" reasoning as
+  // clearSelectedEvent()'s other per-event state, so a search typed for the
+  // last event doesn't silently carry into a different one's match list.
+  currentMatchScheduleSearchQuery = '';
+  const searchInput = document.getElementById('input-match-schedule-search');
+  if (searchInput) searchInput.value = '';
 }
 
 // ====== Fetch this event's schedule and render it ======
@@ -121,6 +143,66 @@ function renderMatchScheduleList(schedule) {
   sorted.forEach(match => {
     list.appendChild(buildMatchScheduleRow(match));
   });
+
+  // Re-apply whatever search was already typed — this render just rebuilt
+  // every row from scratch (e.g. a fresh event load), which would otherwise
+  // silently drop the filter until the next keystroke.
+  applyMatchScheduleSearchFilter(currentMatchScheduleSearchQuery);
+}
+
+// ====== Filter match rows by team number/name OR match number/description —
+// same broad "does the rendered text contain this" substring match
+// applyTeamSearchFilter() (first-api.js) already uses for team lists, rather
+// than parsing the query into separate team-vs-match-number cases: a row's
+// text already includes every team's number+name and the match's own
+// label, so one substring check against it naturally satisfies both search
+// modes at once. ======
+function applyMatchScheduleSearchFilter(query) {
+  currentMatchScheduleSearchQuery = query || '';
+  const q = currentMatchScheduleSearchQuery.trim().toLowerCase();
+
+  const searchInput = document.getElementById('input-match-schedule-search');
+  if (searchInput && searchInput.value !== currentMatchScheduleSearchQuery) {
+    searchInput.value = currentMatchScheduleSearchQuery;
+  }
+
+  const list = document.getElementById('match-schedule-list');
+  if (!list) return;
+
+  list.querySelectorAll('.match-schedule-row').forEach(row => {
+    const matches = !q || getMatchScheduleRowSearchText(row).toLowerCase().includes(q);
+    row.style.display = matches ? '' : 'none';
+
+    // The expanded panel (if any) is this row's own next sibling, keyed by
+    // the same match number — kept in sync with its row's visibility here
+    // rather than filtered independently: the panel's own text is just
+    // team numbers/names, not the match number/description, so searching
+    // by match number would otherwise leave an orphaned panel visible under
+    // a hidden row.
+    const panel = row.nextElementSibling;
+    if (panel && panel.classList.contains('match-schedule-panel') && panel.dataset.matchNumber === row.dataset.matchNumber) {
+      panel.style.display = matches ? '' : 'none';
+    }
+  });
+}
+
+// ====== Text to match the query against for one row, scoped by
+// currentMatchScheduleSearchMode. 'match' reads only the row's own label
+// (.match-number — the match description, or "Match N" fallback, which
+// always embeds the real match number) so a query like "1" can't
+// accidentally hit team #1111 the way a full-row substring match would;
+// 'team' reads only the teams block (numbers + names); 'both' is the row's
+// full rendered text, same as the original combined-only behavior. ======
+function getMatchScheduleRowSearchText(row) {
+  if (currentMatchScheduleSearchMode === 'match') {
+    const numberEl = row.querySelector('.match-number');
+    return numberEl ? numberEl.textContent : '';
+  }
+  if (currentMatchScheduleSearchMode === 'team') {
+    const teamsEl = row.querySelector('.match-schedule-teams');
+    return teamsEl ? teamsEl.textContent : '';
+  }
+  return row.textContent;
 }
 
 // ====== Split a schedule match's teams into red/blue alliances, each
@@ -340,10 +422,32 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.match-view-toggle-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       matchViewMode = btn.dataset.view === 'match' ? 'match' : 'team';
+      // Team View <-> Match View is a third distinct switch point, inside
+      // the Match Scouting sub-tab, that the sub-tab-switch and main-tab-
+      // switch reset points (app.js's activateSubTab(), members.js's
+      // activateDashboardTab()) never cover — an in-progress bulk-select on
+      // Team View shouldn't survive flipping to Match View and back any more
+      // than it survives leaving the sub-tab entirely.
+      if (typeof exitAllBulkSelectModes === 'function') exitAllBulkSelectModes();
       applyMatchViewMode();
       if (typeof saveSessionState === 'function') saveSessionState();
     });
   });
+
+  const scheduleSearchInput = document.getElementById('input-match-schedule-search');
+  if (scheduleSearchInput) {
+    scheduleSearchInput.addEventListener('input', (e) => {
+      applyMatchScheduleSearchFilter(e.target.value);
+    });
+  }
+
+  const scheduleSearchModeSelect = document.getElementById('select-match-schedule-search-mode');
+  if (scheduleSearchModeSelect) {
+    scheduleSearchModeSelect.addEventListener('change', (e) => {
+      currentMatchScheduleSearchMode = (e.target.value === 'match' || e.target.value === 'team') ? e.target.value : 'both';
+      applyMatchScheduleSearchFilter(currentMatchScheduleSearchQuery);
+    });
+  }
 
   // Chain onto onMatchScoutedStateChanged (match-scout.js) rather than
   // reassign it outright — match-scout.js's own DOMContentLoaded handler

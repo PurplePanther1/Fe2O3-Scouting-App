@@ -46,11 +46,30 @@ function showEventError(message) {
   }, 5000);
 }
 
+// ====== The exact moment a given calendar year's FTC season kicks off: the
+// 2nd Saturday of September, 12:00 EST (a fixed UTC-5 offset, as specified —
+// not "Eastern time" generically, so this doesn't shift with DST). Returns a
+// UTC timestamp (ms since epoch). Mirrors workers/ftc-proxy.js's
+// getSeasonKickoffUTC() — duplicated rather than shared, same as every other
+// piece of season logic between the worker and this file, since there's no
+// build step / shared module to put it in. ======
+function getSeasonKickoffUTC(year) {
+  const sept1Dow = new Date(Date.UTC(year, 8, 1)).getUTCDay(); // month 8 = September
+  const firstSaturday = 1 + ((6 - sept1Dow + 7) % 7);
+  const secondSaturday = firstSaturday + 7;
+  return Date.UTC(year, 8, secondSaturday, 17, 0, 0); // 12:00 EST = 17:00 UTC
+}
+
 // ====== Compute the current FTC season ======
+// FTC seasons run September–April, named by the year they start, and don't
+// actually become "current" until that year's real kickoff (2nd Saturday of
+// September, 12:00 EST) — before that, the PRIOR season is still current,
+// even though the calendar month is already September. Mirrors
+// workers/ftc-proxy.js's getCurrentSeason().
 function getCurrentFtcSeason() {
-  const now = new Date();
-  const month = now.getMonth() + 1;
-  return month >= 9 ? now.getFullYear() : now.getFullYear() - 1;
+  const now = Date.now();
+  const thisYear = new Date(now).getUTCFullYear();
+  return now >= getSeasonKickoffUTC(thisYear) ? thisYear : thisYear - 1;
 }
 
 // ====== Format an FTC season number as its "YYYY-YYYY" label, plus the
@@ -506,6 +525,53 @@ function clearSelectedEvent() {
     renderPinnedEventsList();
   }
 
+  // Reset the Scouting tabs' own UI state — search filter, sort mode, and
+  // any active bulk-select mode/selections — so it never silently carries
+  // into whatever event/season gets selected next. This was previously only
+  // reset for event/team/scouted-status DATA (above); the UI state around it
+  // (search boxes, sort dropdowns, "Select" mode) was left stale, most
+  // noticeably across a season switch. currentEventTeams is already []
+  // by this point, so applyTeamSortMode() below only syncs the dropdowns —
+  // it doesn't attempt to re-render with stale data.
+  currentTeamSearchQuery = '';
+  ['input-team-search-info', 'input-team-search-pit', 'input-team-search-match'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  if (typeof applyTeamSortMode === 'function') {
+    applyTeamSortMode('number');
+  }
+  if (typeof pitBulkSelectMode !== 'undefined') {
+    pitBulkSelectMode = false;
+    clearBulkSelection(pitBulkSelectedDocIds, pitBulkRangeState);
+  }
+  if (typeof matchBulkSelectMode !== 'undefined') {
+    matchBulkSelectMode = false;
+    clearBulkSelection(matchBulkSelectedTeamNumbers, matchBulkRangeState);
+  }
+  if (typeof infoBulkSelectMode !== 'undefined') {
+    infoBulkSelectMode = false;
+    clearBulkSelection(infoBulkSelectedTeamNumbers, infoBulkRangeState);
+  }
+  if (typeof updatePitBulkSelectUI === 'function') updatePitBulkSelectUI();
+  if (typeof updateMatchTeamBulkSelectUI === 'function') updateMatchTeamBulkSelectUI();
+  if (typeof updateInfoBulkSelectUI === 'function') updateInfoBulkSelectUI();
+  // The Team Detail modal's/Matches Scouted modal's own per-panel bulk-select
+  // and search state (match-scout.js) — already closed by
+  // closeTeamDetailModal() above, but reset here too so a stale selection or
+  // search term isn't sitting there the next time either modal opens for a
+  // different team/event. resetAllMatchEntryBulkSelectStates() is the same
+  // reset those modals' own close handlers call — reused here rather than
+  // duplicating the mode/selectedIds clearing inline.
+  if (typeof resetAllMatchEntryBulkSelectStates === 'function') {
+    resetAllMatchEntryBulkSelectStates();
+  }
+  if (typeof matchEntrySearchQuery !== 'undefined') {
+    Object.keys(matchEntrySearchQuery).forEach(prefix => {
+      matchEntrySearchQuery[prefix] = '';
+    });
+  }
+
   if (typeof saveSessionState === 'function') {
     saveSessionState();
   }
@@ -658,7 +724,14 @@ async function selectEvent(eventData) {
     }
 
     hideLoading();
-    document.getElementById('selected-event-teams-count').textContent = `${ftcTeams.length} team(s) registered`;
+    // FIRST's API returns an identical empty list for "this event genuinely
+    // has zero teams" and "this event's roster isn't finalized/announced
+    // yet" (e.g. a future event) — there's no separate signal to tell those
+    // apart, so rather than risk a confident-looking "0 teams registered"
+    // being wrong, always caveat a zero result instead of asserting it.
+    document.getElementById('selected-event-teams-count').textContent = ftcTeams.length > 0
+      ? `${ftcTeams.length} team(s) registered`
+      : '0 teams registered — the roster may not be finalized yet, or this event may genuinely have none';
     renderTeamList(ftcTeams);
 
     // Start watching pit scouting status for this event (live snapshot listener)
@@ -706,11 +779,27 @@ function renderTeamList(teams) {
 let currentSelectedTeamNumber = null;
 let currentEventTeams = [];
 let currentTeamSearchQuery = '';
-let currentTeamSortMode = 'number'; // 'number' | 'name' | 'opr' — shared across Match & Pit tabs
+let currentTeamSortMode = 'number'; // 'number' | 'name' | 'opr' | 'scouted' — shared across Info/Pit/Match tabs
+// 1 = each mode's own natural/default order (number low-high, name A-Z, opr
+// high-low, scouted-first); -1 = that flipped. Deliberately a SEPARATE
+// variable from currentTeamSortMode, with its own reset boundary
+// (activateDashboardTab() in members.js, only on leaving the Scouting main
+// tab) — NOT reset by applyTeamSortMode() or clearSelectedEvent()'s
+// season/event-switch UI reset, unlike sort mode/search/bulk-select, which
+// DO reset there. See toggleTeamSortDirection() below.
+let currentTeamSortDirection = 1;
 
 // Bulk-select state for the Pit tab (captain / canEditOtherEntries only — see updatePitBulkSelectUI)
 let pitBulkSelectMode = false;
 let pitBulkSelectedDocIds = new Set();
+// Shift-click range-select support — order/checkboxEls are rebuilt on every
+// render (see renderPitTeamList()), so they always reflect the CURRENT sort
+// order; rangeState.lastClickedId is tracked by id rather than list
+// position, so a resort between clicks can't leave it pointing at the wrong
+// row. See handleBulkRangeClick() below.
+let pitBulkOrder = [];
+let pitBulkCheckboxEls = new Map();
+let pitBulkRangeState = { lastClickedId: null };
 
 // ====== Show/hide & label the pit bulk-select toolbar based on permission and selection ======
 function updatePitBulkSelectUI() {
@@ -718,13 +807,26 @@ function updatePitBulkSelectUI() {
   const deleteBtn = document.getElementById('btn-pit-bulk-delete');
   if (!toggleBtn || !deleteBtn) return;
 
-  const canBulkManage = (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false)
-    && (typeof canUserBulkDelete === 'function' ? canUserBulkDelete() : false);
+  const canBulkManage = typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false;
   if (!canBulkManage) {
     toggleBtn.classList.add('hidden');
     deleteBtn.classList.add('hidden');
+    const wasActive = pitBulkSelectMode;
     pitBulkSelectMode = false;
-    pitBulkSelectedDocIds.clear();
+    clearBulkSelection(pitBulkSelectedDocIds, pitBulkRangeState);
+    // Hiding the toolbar above doesn't remove the per-row checkboxes already
+    // sitting in the DOM from the last render while mode was still active —
+    // those are only ever added/omitted at render time based on
+    // pitBulkSelectMode. Force a rebuild so a live permission revocation
+    // actually collapses bulk-select mode, not just its toolbar chrome.
+    // Guarded on wasActive so this doesn't re-render on every unrelated
+    // team-doc change (e.g. another member's display name), only the
+    // true -> false transition. renderPitTeamList() calls back into this
+    // function at its own end, but by then wasActive is already false, so
+    // it's one extra render, not a loop.
+    if (wasActive && typeof currentEventTeams !== 'undefined' && currentEventTeams && currentEventTeams.length > 0 && typeof renderPitTeamList === 'function') {
+      renderPitTeamList(currentEventTeams);
+    }
     return;
   }
 
@@ -746,6 +848,12 @@ function updatePitBulkSelectUI() {
 // (gathered via getMatchEntriesForTeam() at delete time).
 let matchBulkSelectMode = false;
 let matchBulkSelectedTeamNumbers = new Set();
+// Shift-click range-select support — see the matching pitBulkOrder/
+// pitBulkCheckboxEls/pitBulkRangeState comment above and
+// handleBulkRangeClick() below.
+let matchBulkOrder = [];
+let matchBulkCheckboxEls = new Map();
+let matchBulkRangeState = { lastClickedId: null };
 
 // ====== Show/hide & label the match bulk-select toolbar based on permission and selection ======
 function updateMatchTeamBulkSelectUI() {
@@ -753,13 +861,20 @@ function updateMatchTeamBulkSelectUI() {
   const deleteBtn = document.getElementById('btn-match-bulk-delete');
   if (!toggleBtn || !deleteBtn) return;
 
-  const canBulkManage = (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false)
-    && (typeof canUserBulkDelete === 'function' ? canUserBulkDelete() : false);
+  const canBulkManage = typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false;
   if (!canBulkManage) {
     toggleBtn.classList.add('hidden');
     deleteBtn.classList.add('hidden');
+    const wasActive = matchBulkSelectMode;
     matchBulkSelectMode = false;
-    matchBulkSelectedTeamNumbers.clear();
+    clearBulkSelection(matchBulkSelectedTeamNumbers, matchBulkRangeState);
+    // Same reasoning as updatePitBulkSelectUI() — the toolbar hides
+    // immediately, but the per-row checkboxes already in the DOM need a
+    // rebuild to actually disappear. Guarded on wasActive so this only
+    // fires on the true -> false transition, not every team-doc change.
+    if (wasActive && typeof currentEventTeams !== 'undefined' && currentEventTeams && currentEventTeams.length > 0 && typeof renderMatchTeamList === 'function') {
+      renderMatchTeamList(currentEventTeams);
+    }
     return;
   }
 
@@ -774,23 +889,249 @@ function updateMatchTeamBulkSelectUI() {
   }
 }
 
-// ====== Sort a team list per the shared sort mode (number is the default, matching prior behavior) ======
-function sortTeams(teams) {
+// ====== Shared shift-click range-select handler for bulk-select checkboxes —
+// used by all three tabs with bulk-select (Team Information, Pit Scouting,
+// Match Scouting). By the time a checkbox's 'click' handler runs, the browser
+// has already applied the native toggle, so checkbox.checked here already IS
+// the row's new state — that's the state a shift-click range copies onto
+// every other row between the anchor and this one.
+//
+// `order` and `checkboxEls` are rebuilt from scratch on every render (by the
+// caller, right before this function can be invoked again), so they always
+// reflect whatever sort mode/direction is CURRENTLY active — a shift-click
+// range is always computed against the list as it looks right now, never
+// against whatever order was active when the anchor was first clicked.
+// `rangeState.lastClickedId` (an id, not an index) is what makes that safe:
+// an index would go stale the instant the list is resorted, silently
+// selecting the wrong rows; an id just gets looked up fresh in the current
+// `order` each time, or ignored if that row isn't rendered any more (mode
+// toggled off/on, team no longer has data, etc.).
+//
+// applyTeamSearchFilter() hides non-matching rows with inline display:none
+// rather than re-rendering, so `order`/`checkboxEls` still contain them while
+// a search is active — skip hidden rows when applying a range so a shift-
+// click can't silently select teams the search has hidden from view.
+//
+// The anchor (rangeState.lastClickedId) only moves on a plain click — never
+// on a shift-click — matching standard file-manager/Gmail range-select
+// behavior, where a run of consecutive shift-clicks all extend/recompute the
+// range from the SAME fixed anchor rather than walking it forward each time.
+// This is a deliberate choice over a "moving anchor" alternative; worth
+// revisiting later if it doesn't feel right in practice. A plain click
+// always becomes the new anchor regardless of whether it checked or
+// unchecked its own box — there's no separate "last selected" vs. "last
+// deselected" concept, just "last plain-clicked". The one exception is when
+// there's no anchor at all yet (e.g. the very first click in a session
+// happens to be a shift-click) — that click has to become the anchor, or
+// range selection could never start.
+//
+// A shift-click always SELECTS the full inclusive range, regardless of the
+// anchor's own current checked state or of what the native toggle just did
+// to the clicked box itself — it can never deselect, even when the anchor
+// (or the clicked box) happens to be unchecked going in. The clicked box's
+// own native toggle is therefore overridden back to checked here when
+// necessary; only a plain click ever respects/reflects the native toggle.
+//
+// Selections made outside the current range (by a prior click/range) are
+// never touched here, so range application is always additive with respect
+// to the rest of the list — only the [start, end] span this call computes
+// is written.
+//
+// The anchor also carries a visual marker (see the .bulk-anchor-checkbox
+// CSS class) so the user can always see where their next shift-click will
+// range from — set at render time for the current anchor (see e.g.
+// renderPitTeamList()) and moved here whenever a plain click changes it. ======
+function handleBulkRangeClick(e, id, order, checkboxEls, selectedIds, rangeState, updateUIFn) {
+  const checkbox = checkboxEls.get(id);
+  if (!checkbox) return;
+
+  const hasAnchor = rangeState.lastClickedId != null && rangeState.lastClickedId !== id && checkboxEls.has(rangeState.lastClickedId);
+  let rangeApplied = false;
+
+  if (e.shiftKey && hasAnchor) {
+    const fromIdx = order.indexOf(rangeState.lastClickedId);
+    const toIdx = order.indexOf(id);
+    if (fromIdx !== -1 && toIdx !== -1) {
+      rangeApplied = true;
+      const start = Math.min(fromIdx, toIdx);
+      const end = Math.max(fromIdx, toIdx);
+      for (let i = start; i <= end; i++) {
+        const itemId = order[i];
+        const cb = checkboxEls.get(itemId);
+        if (!cb) continue;
+        const row = typeof cb.closest === 'function' ? cb.closest('.team-item') : null;
+        if (row && row.style.display === 'none') continue;
+        cb.checked = true;
+        selectedIds.add(itemId);
+      }
+    }
+  }
+
+  if (!rangeApplied) {
+    // Plain click (or a shift-click with no usable anchor, which can't do a
+    // range) — respect whatever the native toggle already did.
+    if (checkbox.checked) selectedIds.add(id); else selectedIds.delete(id);
+  }
+
+  if (!e.shiftKey || rangeState.lastClickedId == null) {
+    const previousAnchorId = rangeState.lastClickedId;
+    if (previousAnchorId !== id) {
+      const previousAnchorCb = previousAnchorId != null ? checkboxEls.get(previousAnchorId) : null;
+      if (previousAnchorCb) previousAnchorCb.classList.remove('bulk-anchor-checkbox');
+      checkbox.classList.add('bulk-anchor-checkbox');
+    }
+    rangeState.lastClickedId = id;
+  }
+  updateUIFn();
+}
+
+// ====== Mark a freshly-rendered checkbox as the current shift-click anchor,
+// if it is one. checkboxEls/its DOM elements are rebuilt from scratch every
+// render, so any class handleBulkRangeClick() set on a PREVIOUS render's
+// checkbox is gone with it — this is what re-applies the marker after a
+// resort/re-render/reopen, using rangeState.lastClickedId (which, unlike the
+// DOM, persists across renders). ======
+function markBulkAnchorCheckbox(checkbox, id, rangeState) {
+  if (id === rangeState.lastClickedId) {
+    checkbox.classList.add('bulk-anchor-checkbox');
+  }
+}
+
+// ====== Clear a bulk-select tab/panel's checked state AND its shift-click
+// anchor together. Every EXISTING place that clears a bulk-select Set
+// (Cancel Select, a live permission revocation, a tab/sub-tab switch, an
+// event switch, or a bulk-delete completing) calls this instead of clearing
+// the Set directly, so the anchor is never left pointing at a stale/gone box
+// after any of those resets — see resolveBulkAnchor() below for the other
+// half: re-anchoring to the CURRENT first item next time the list actually
+// renders with select mode on. ======
+function clearBulkSelection(selectedIds, rangeState) {
+  selectedIds.clear();
+  rangeState.lastClickedId = null;
+}
+
+// ====== Re-anchor a bulk-select list to its current first item whenever the
+// existing anchor is missing or no longer in the list — called once at the
+// end of each render function, after order/checkboxEls have been rebuilt for
+// this render. Two cases converge here: select mode was just entered for the
+// first time ever (rangeState.lastClickedId was never set), or it was reset
+// by clearBulkSelection() (Cancel Select, a modal close, a tab/event switch,
+// a completed bulk delete) — either way, lastClickedId is null, and this
+// picks the CURRENT order's first entry as the new anchor. That's what makes
+// a team that scouting has just moved to the top of a re-sorted list become
+// the anchor on the next "Select", instead of wherever the old anchor used
+// to sit. A still-valid anchor (present in the current order) is left
+// untouched — this only kicks in when there's genuinely nothing to keep.
+// A completely empty list (order.length === 0) leaves no anchor at all,
+// which is fine: nothing rendered to highlight, and the first plain click
+// will set one normally. ======
+function resolveBulkAnchor(order, checkboxEls, rangeState) {
+  if (order.length === 0) return;
+  if (rangeState.lastClickedId != null && checkboxEls.has(rangeState.lastClickedId)) return;
+  rangeState.lastClickedId = order[0];
+  const cb = checkboxEls.get(order[0]);
+  if (cb) cb.classList.add('bulk-anchor-checkbox');
+}
+
+// ====== Force-exit ALL THREE tabs' bulk-select mode (Team Info/Pit/Match) —
+// called on every tab change (sub-tab switch in app.js, main dashboard tab
+// switch in members.js), not just a live permission revocation. Investigated
+// first: unlike the permission-revocation case (each update*BulkSelectUI()'s
+// own permission-denied branch), NOTHING previously reset bulk-select mode
+// on a plain tab switch — switching sub-tabs away and back left mode/
+// selections/the toggle button's label exactly as they were, still fully
+// active, just visually hidden while that panel wasn't showing. This is a
+// genuinely new reset point, not a fix to an existing one that only missed
+// syncing its button label.
+//
+// Guarded so it's a no-op (no render, no toolbar touch) when nothing was
+// actually active — this runs on every single tab switch, so it needs to
+// stay cheap in the overwhelmingly common case where bulk-select was never
+// on. ======
+function exitAllBulkSelectModes() {
+  let anyChanged = false;
+
+  if (typeof pitBulkSelectMode !== 'undefined' && pitBulkSelectMode) {
+    pitBulkSelectMode = false;
+    clearBulkSelection(pitBulkSelectedDocIds, pitBulkRangeState);
+    anyChanged = true;
+  }
+  if (typeof matchBulkSelectMode !== 'undefined' && matchBulkSelectMode) {
+    matchBulkSelectMode = false;
+    clearBulkSelection(matchBulkSelectedTeamNumbers, matchBulkRangeState);
+    anyChanged = true;
+  }
+  if (typeof infoBulkSelectMode !== 'undefined' && infoBulkSelectMode) {
+    infoBulkSelectMode = false;
+    clearBulkSelection(infoBulkSelectedTeamNumbers, infoBulkRangeState);
+    anyChanged = true;
+  }
+
+  if (!anyChanged) return;
+
+  // Syncs each toggle button back to "Select" / hides the delete button —
+  // the state above is already false by this point, so none of these three
+  // will re-enter their own permission-denied re-render branch; this just
+  // handles the toolbar chrome.
+  if (typeof updatePitBulkSelectUI === 'function') updatePitBulkSelectUI();
+  if (typeof updateMatchTeamBulkSelectUI === 'function') updateMatchTeamBulkSelectUI();
+  if (typeof updateInfoBulkSelectUI === 'function') updateInfoBulkSelectUI();
+
+  // Drops the now-stale checkboxes from the DOM — they're only ever added/
+  // omitted at render time based on the mode variables above.
+  if (typeof currentEventTeams !== 'undefined' && currentEventTeams && currentEventTeams.length > 0) {
+    if (typeof renderPitTeamList === 'function') renderPitTeamList(currentEventTeams);
+    if (typeof renderMatchTeamList === 'function') renderMatchTeamList(currentEventTeams);
+    if (typeof renderTeamInfoList === 'function') renderTeamInfoList(currentEventTeams);
+    if (typeof applyTeamSearchFilter === 'function' && typeof currentTeamSearchQuery !== 'undefined') {
+      applyTeamSearchFilter(currentTeamSearchQuery);
+    }
+  }
+}
+
+// ====== Is a team "scouted" for sort purposes, per tab scope ======
+// 'pit' checks only pit data (Pit Scouting tab), 'match' checks only match
+// data (Match Scouting tab's Team View), 'combined' (Team Information tab)
+// checks either. Mirrors the same per-tab data-type scoping used by the
+// team-level delete buttons (team-info.js's createTeamScoutingDeleteButton).
+function isTeamScoutedForSort(team, eventCode, scope) {
+  if (!eventCode) return false;
+  const pitDone = scope !== 'match' && typeof isTeamScouted === 'function' ? isTeamScouted(team.teamNumber, eventCode) : false;
+  const matchDone = scope !== 'pit' && typeof getMatchEntriesForTeam === 'function' ? getMatchEntriesForTeam(team.teamNumber, eventCode).length > 0 : false;
+  return pitDone || matchDone;
+}
+
+// ====== Sort a team list per the shared sort mode (number is the default,
+// matching prior behavior). `scope` ('pit' | 'match' | 'combined') only
+// matters for the 'scouted' mode, since scouted-status means something
+// different per tab — see isTeamScoutedForSort(). ======
+function sortTeams(teams, scope = 'combined') {
   const sorted = [...teams];
+  // Applied to the WHOLE comparator result (primary key and its tiebreaker
+  // together), so a flip is a true mirror of the natural order rather than
+  // just reversing the primary key — see currentTeamSortDirection above.
+  const dir = typeof currentTeamSortDirection !== 'undefined' ? currentTeamSortDirection : 1;
   if (currentTeamSortMode === 'name') {
     sorted.sort((a, b) => {
       const nameA = a.name || a.nameFull || a.nameShort || a.schoolName || a.teamNameCalc || '';
       const nameB = b.name || b.nameFull || b.nameShort || b.schoolName || b.teamNameCalc || '';
-      return nameA.localeCompare(nameB) || (a.teamNumber || 0) - (b.teamNumber || 0);
+      return dir * (nameA.localeCompare(nameB) || (a.teamNumber || 0) - (b.teamNumber || 0));
     });
   } else if (currentTeamSortMode === 'opr') {
     sorted.sort((a, b) => {
       const oprA = typeof a.opr === 'number' ? a.opr : -Infinity;
       const oprB = typeof b.opr === 'number' ? b.opr : -Infinity;
-      return oprB - oprA || (a.teamNumber || 0) - (b.teamNumber || 0);
+      return dir * ((oprB - oprA) || (a.teamNumber || 0) - (b.teamNumber || 0));
+    });
+  } else if (currentTeamSortMode === 'scouted') {
+    const eventCode = selectedEvent?.code;
+    sorted.sort((a, b) => {
+      const scoutedA = isTeamScoutedForSort(a, eventCode, scope) ? 1 : 0;
+      const scoutedB = isTeamScoutedForSort(b, eventCode, scope) ? 1 : 0;
+      return dir * ((scoutedB - scoutedA) || (a.teamNumber || 0) - (b.teamNumber || 0));
     });
   } else {
-    sorted.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+    sorted.sort((a, b) => dir * ((a.teamNumber || 0) - (b.teamNumber || 0)));
   }
   return sorted;
 }
@@ -816,6 +1157,45 @@ function applyTeamSortMode(mode) {
   }
 }
 
+// ====== Sync all three sort-direction buttons' icon/title to the current
+// currentTeamSortDirection — called after every toggle, reset, or restore so
+// they never show a stale arrow relative to the actual applied order. ======
+function updateSortDirectionButtons() {
+  const flipped = currentTeamSortDirection === -1;
+  ['info', 'pit', 'match'].forEach(scope => {
+    const btn = document.getElementById(`btn-team-sort-direction-${scope}`);
+    if (!btn) return;
+    btn.textContent = flipped ? '↓' : '↑';
+    btn.title = flipped ? 'Sort direction reversed — click to restore default' : 'Default sort direction — click to reverse';
+    btn.classList.toggle('sort-direction-flipped', flipped);
+  });
+}
+
+// ====== Flip currentTeamSortDirection and re-render — shared by all three
+// tabs' direction buttons (Team Info/Pit/Match Team View only; NOT Match
+// View's search bar, which is a search, not a sort). Persists across a sort
+// MODE switch and a Scouting sub-tab switch for free, since it's a separate
+// variable from currentTeamSortMode that neither applyTeamSortMode() nor
+// activateSubTab() (app.js) ever touches. Explicitly saves session state
+// here (unlike mode/search/bulk-select changes, which only get saved as a
+// side effect of a later tab switch) since toggling direction alone,
+// without switching anything else, still needs to survive a refresh. ======
+function toggleTeamSortDirection() {
+  currentTeamSortDirection = currentTeamSortDirection === 1 ? -1 : 1;
+  updateSortDirectionButtons();
+  if (currentEventTeams && currentEventTeams.length > 0) {
+    renderMatchTeamList(currentEventTeams);
+    renderPitTeamList(currentEventTeams);
+    if (typeof renderTeamInfoList === 'function') {
+      renderTeamInfoList(currentEventTeams);
+    }
+    applyTeamSearchFilter(currentTeamSearchQuery);
+  }
+  if (typeof saveSessionState === 'function') {
+    saveSessionState();
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const matchSortSelect = document.getElementById('select-team-sort-match');
   if (matchSortSelect) {
@@ -830,12 +1210,18 @@ document.addEventListener('DOMContentLoaded', () => {
     infoSortSelect.addEventListener('change', (e) => applyTeamSortMode(e.target.value));
   }
 
+  ['info', 'pit', 'match'].forEach(scope => {
+    const btn = document.getElementById(`btn-team-sort-direction-${scope}`);
+    if (btn) btn.addEventListener('click', () => toggleTeamSortDirection());
+  });
+  updateSortDirectionButtons();
+
   // Pit bulk-select toggle
   const pitBulkToggleBtn = document.getElementById('btn-pit-bulk-select-toggle');
   if (pitBulkToggleBtn) {
     pitBulkToggleBtn.addEventListener('click', () => {
       pitBulkSelectMode = !pitBulkSelectMode;
-      pitBulkSelectedDocIds.clear();
+      clearBulkSelection(pitBulkSelectedDocIds, pitBulkRangeState);
       if (currentEventTeams && currentEventTeams.length > 0) {
         renderPitTeamList(currentEventTeams);
         applyTeamSearchFilter(currentTeamSearchQuery);
@@ -882,7 +1268,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }
 
           pitBulkSelectMode = false;
-          pitBulkSelectedDocIds.clear();
+          clearBulkSelection(pitBulkSelectedDocIds, pitBulkRangeState);
           if (currentEventTeams && currentEventTeams.length > 0) {
             renderPitTeamList(currentEventTeams);
             applyTeamSearchFilter(currentTeamSearchQuery);
@@ -897,7 +1283,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (matchBulkToggleBtn) {
     matchBulkToggleBtn.addEventListener('click', () => {
       matchBulkSelectMode = !matchBulkSelectMode;
-      matchBulkSelectedTeamNumbers.clear();
+      clearBulkSelection(matchBulkSelectedTeamNumbers, matchBulkRangeState);
       if (currentEventTeams && currentEventTeams.length > 0) {
         renderMatchTeamList(currentEventTeams);
         applyTeamSearchFilter(currentTeamSearchQuery);
@@ -951,7 +1337,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }
 
           matchBulkSelectMode = false;
-          matchBulkSelectedTeamNumbers.clear();
+          clearBulkSelection(matchBulkSelectedTeamNumbers, matchBulkRangeState);
           if (currentEventTeams && currentEventTeams.length > 0) {
             renderMatchTeamList(currentEventTeams);
             applyTeamSearchFilter(currentTeamSearchQuery);
@@ -1064,7 +1450,12 @@ function renderMatchTeamList(teams) {
 
   currentEventTeams = teams;
   status.textContent = `${teams.length} team(s)`;
-  const sorted = sortTeams(teams);
+  const sorted = sortTeams(teams, 'match');
+
+  // Rebuilt every render so shift-click range-select always reflects the
+  // CURRENT sort order/direction — see handleBulkRangeClick().
+  matchBulkOrder = [];
+  matchBulkCheckboxEls = new Map();
 
   sorted.forEach(team => {
     const item = document.createElement('div');
@@ -1091,7 +1482,19 @@ function renderMatchTeamList(teams) {
     leftGroup.appendChild(oprSpan);
 
     const btnGroup = document.createElement('div');
-    btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
+    btnGroup.className = 'team-item-actions';
+    btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end;';
+
+    // Team-level Delete — appended FIRST so it renders on the left side of
+    // the button group, before the other buttons (see
+    // refreshTeamRowDeleteButtons() in team-info.js, which relies on this
+    // same "insert as first child" placement for its own incremental
+    // add/remove). 'match' scope: this tab only ever deletes this team's
+    // match entries, never its pit data.
+    const teamDeleteBtnMatch = typeof createTeamScoutingDeleteButton === 'function'
+      ? createTeamScoutingDeleteButton(team, selectedEvent?.code || '', 'match')
+      : null;
+    if (teamDeleteBtnMatch) btnGroup.appendChild(teamDeleteBtnMatch);
 
     // Match scout quick button (+ Match Scout)
     const scoutBtn = document.createElement('button');
@@ -1147,14 +1550,13 @@ function renderMatchTeamList(teams) {
       checkbox.type = 'checkbox';
       checkbox.style.cssText = 'width:18px; height:18px; flex-shrink:0; cursor:pointer;';
       checkbox.checked = matchBulkSelectedTeamNumbers.has(teamKey);
-      checkbox.addEventListener('change', (e) => {
+      matchBulkOrder.push(teamKey);
+      matchBulkCheckboxEls.set(teamKey, checkbox);
+      markBulkAnchorCheckbox(checkbox, teamKey, matchBulkRangeState);
+      // 'click' (not 'change') so shiftKey is available — see handleBulkRangeClick().
+      checkbox.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (checkbox.checked) {
-          matchBulkSelectedTeamNumbers.add(teamKey);
-        } else {
-          matchBulkSelectedTeamNumbers.delete(teamKey);
-        }
-        updateMatchTeamBulkSelectUI();
+        handleBulkRangeClick(e, teamKey, matchBulkOrder, matchBulkCheckboxEls, matchBulkSelectedTeamNumbers, matchBulkRangeState, updateMatchTeamBulkSelectUI);
       });
       leftGroup.insertBefore(checkbox, leftGroup.firstChild);
     }
@@ -1167,6 +1569,7 @@ function renderMatchTeamList(teams) {
   if (typeof refreshMatchTeamListCounts === 'function') {
     refreshMatchTeamListCounts();
   }
+  resolveBulkAnchor(matchBulkOrder, matchBulkCheckboxEls, matchBulkRangeState);
   updateMatchTeamBulkSelectUI();
   console.timeEnd('[Timing] renderMatchTeamList');
 }
@@ -1214,7 +1617,12 @@ function renderPitTeamList(teams) {
   }
 
   status.textContent = `${teams.length} team(s)`;
-  const sorted = sortTeams(teams);
+  const sorted = sortTeams(teams, 'pit');
+
+  // Rebuilt every render so shift-click range-select always reflects the
+  // CURRENT sort order/direction — see handleBulkRangeClick().
+  pitBulkOrder = [];
+  pitBulkCheckboxEls = new Map();
 
   sorted.forEach(team => {
     const item = document.createElement('div');
@@ -1248,7 +1656,17 @@ function renderPitTeamList(teams) {
     leftGroup.appendChild(oprSpan);
 
     const btnGroup = document.createElement('div');
-    btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0;';
+    btnGroup.className = 'team-item-actions';
+    btnGroup.style.cssText = 'display:flex; align-items:center; gap:6px; flex-shrink:0; flex-wrap:wrap; justify-content:flex-end;';
+
+    // Team-level Delete — appended FIRST so it renders on the left side of
+    // the button group, before the other buttons (see
+    // refreshTeamRowDeleteButtons() in team-info.js). 'pit' scope: this tab
+    // only ever deletes this team's pit entry, never its match data.
+    const teamDeleteBtnPit = typeof createTeamScoutingDeleteButton === 'function'
+      ? createTeamScoutingDeleteButton(team, selectedEvent?.code || '', 'pit')
+      : null;
+    if (teamDeleteBtnPit) btnGroup.appendChild(teamDeleteBtnPit);
 
     const scoutBtn = document.createElement('button');
     // btn-pit-quick-scout is a style-neutral hook (no CSS rule targets it) — it just
@@ -1294,14 +1712,13 @@ function renderPitTeamList(teams) {
       checkbox.type = 'checkbox';
       checkbox.style.cssText = 'width:18px; height:18px; flex-shrink:0; cursor:pointer;';
       checkbox.checked = pitBulkSelectedDocIds.has(docId);
-      checkbox.addEventListener('change', (e) => {
+      pitBulkOrder.push(docId);
+      pitBulkCheckboxEls.set(docId, checkbox);
+      markBulkAnchorCheckbox(checkbox, docId, pitBulkRangeState);
+      // 'click' (not 'change') so shiftKey is available — see handleBulkRangeClick().
+      checkbox.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (checkbox.checked) {
-          pitBulkSelectedDocIds.add(docId);
-        } else {
-          pitBulkSelectedDocIds.delete(docId);
-        }
-        updatePitBulkSelectUI();
+        handleBulkRangeClick(e, docId, pitBulkOrder, pitBulkCheckboxEls, pitBulkSelectedDocIds, pitBulkRangeState, updatePitBulkSelectUI);
       });
       leftGroup.insertBefore(checkbox, leftGroup.firstChild);
     }
@@ -1344,6 +1761,7 @@ function renderPitTeamList(teams) {
   if (typeof refreshTeamListScoutedState === 'function') {
     refreshTeamListScoutedState();
   }
+  resolveBulkAnchor(pitBulkOrder, pitBulkCheckboxEls, pitBulkRangeState);
   updatePitBulkSelectUI();
   console.timeEnd('[Timing] renderPitTeamList');
 }

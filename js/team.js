@@ -157,31 +157,16 @@ function setupCopyButton(btnId, codeId) {
 setupCopyButton('btn-copy-created-code', 'created-join-code');
 setupCopyButton('btn-copy-dashboard-code', 'dashboard-code-value');
 
-// ====== Require a display name before finishing create/join. The field is always
-// shown and pre-filled with any known name (see auth.js' handleAuthenticatedUser),
-// but the user must still press Create/Join to confirm it — an auto-filled Google
-// name is never used silently. Reuses the same saveDisplayName() write as the My
-// Team tab's field. ======
-async function ensureDisplayNameSet(errorElementId) {
-  const input = document.getElementById('input-screen-team-display-name');
-  const name = input ? input.value.trim() : '';
-  if (!name) {
-    showError(errorElementId, 'Please enter your display name to continue.');
-    return false;
-  }
-
-  try {
-    await saveDisplayName(name);
-    return true;
-  } catch (err) {
-    console.error('Failed to save display name:', err);
-    showError(errorElementId, 'Failed to save your display name. Please try again.');
-    return false;
-  }
-}
-
 // ====== Create Team ======
-$('btn-create-team').addEventListener('click', async () => {
+// Account-level display name is already confirmed before a user can reach
+// this screen at all (see auth.js' handleAuthenticatedUser() and the
+// screen-set-display-name gate) — this handler doesn't need to check it.
+//
+// The team name is already typed into the input, so the per-team-name popup
+// can show immediately, BEFORE any write — clicking Create just opens it;
+// the actual team-creation write only happens once THAT'S confirmed (inside
+// onConfirm below). Cancelling the popup creates nothing at all.
+$('btn-create-team').addEventListener('click', () => {
   clearErrors();
   const teamName = $('input-team-name').value.trim();
 
@@ -195,95 +180,119 @@ $('btn-create-team').addEventListener('click', async () => {
     return;
   }
 
-  if (!(await ensureDisplayNameSet('create-error'))) return;
+  if (typeof openTeamDisplayNameModal !== 'function') return;
 
-  showLoading('Creating your team...');
-  try {
-    const joinCode = generateJoinCode(teamName);
+  openTeamDisplayNameModal({
+    teamName,
+    confirmLabel: 'Create Team',
+    onConfirm: async (chosenName) => {
+      showLoading('Creating your team...');
+      try {
+        const joinCode = generateJoinCode(teamName);
 
-    // Check if join code is unique via the public lookup collection (a plain
-    // query against `teams` can't be used for this anymore now that team reads
-    // are member-gated — a brand new team's creator isn't a member of anything yet)
-    const codeDoc = await db.collection('joinCodes').doc(joinCode).get();
-    if (codeDoc.exists) {
-      // Extremely unlikely collision — just regenerate
-      hideLoading();
-      showError('create-error', 'Please try again (code collision).');
-      return;
+        // Check if join code is unique via the public lookup collection (a plain
+        // query against `teams` can't be used for this anymore now that team reads
+        // are member-gated — a brand new team's creator isn't a member of anything yet)
+        const codeDoc = await db.collection('joinCodes').doc(joinCode).get();
+        if (codeDoc.exists) {
+          // Extremely unlikely collision — just ask them to retry. Marked so
+          // the catch below preserves this specific message instead of
+          // overwriting it with the generic one.
+          const collisionErr = new Error('Please try again (code collision).');
+          collisionErr.isKnownMessage = true;
+          throw collisionErr;
+        }
+
+        // Pre-generate the ID so we can create the team doc, then the joinCodes
+        // lookup that validates against it, sequentially (avoids any ambiguity
+        // around rules reading same-batch pending writes).
+        const teamRef = db.collection('teams').doc();
+        await teamRef.set({
+          name: teamName,
+          joinCode: joinCode,
+          members: [currentUser.uid],
+          roles: { [currentUser.uid]: 'captain' },
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          createdBy: currentUser.uid
+        });
+
+        await db.collection('joinCodes').doc(joinCode).set({ teamId: teamRef.id, name: teamName });
+        await ensureMemberContact(teamRef.id, currentUser.uid, currentUserProfile?.email || currentUser.email || '');
+
+        // Per-team name override — only if it differs from the account
+        // default they were shown, same "blank/unchanged means inherit the
+        // account name" reasoning as savePerTeamDisplayName() (auth.js).
+        const accountName = (currentUserProfile && currentUserProfile.displayName) || '';
+        if (chosenName && chosenName !== accountName) {
+          await db.collection('teams').doc(teamRef.id).collection('memberDisplayNames').doc(currentUser.uid).set({ displayName: chosenName });
+        }
+
+        // Re-read the full team doc so currentTeamData gets the same complete
+        // shape handleAuthenticatedUser() populates on login (members/roles/
+        // permissions included). The previous {id, name, joinCode}-only object
+        // left currentTeamId unset (only loadTeamMembers() sets it) and
+        // permission checks reading an empty currentTeamData — silently broken
+        // until the next refresh re-ran the full login flow.
+        const createdSnap = await teamRef.get();
+        const fullTeamData = { id: teamRef.id, ...createdSnap.data() };
+        currentTeamData = fullTeamData;
+
+        if (typeof loadTeamMembers === 'function') {
+          loadTeamMembers(teamRef.id, fullTeamData);
+        }
+        if (typeof updatePermissionUI === 'function') {
+          updatePermissionUI();
+        }
+        if (typeof watchTeamDoc === 'function') {
+          watchTeamDoc(teamRef.id);
+        }
+
+        // This is the initial (zero-teams) onboarding flow — createAnotherTeam()
+        // (members.js) already does this for an account that already has ≥1
+        // team, but this path never did, leaving myTeams stale/empty and
+        // watchMyTeams() (auth.js) without a listener for this team at all until
+        // the next full login re-ran getUserTeams(). That's what let a kick (or
+        // any other live team-doc change) on a team created this way go
+        // undetected: watchTeamDoc() alone doesn't cover removal detection
+        // anymore (see watchMyTeams()'s error callback) since that's now
+        // centralized in watchMyTeams(), which had nothing registered here.
+        if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+          myTeams = [...myTeams, fullTeamData];
+        }
+        if (typeof watchMyTeams === 'function') watchMyTeams();
+        if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+        if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
+
+        // Show the join code on the create tab
+        const joinCodeCreated = document.getElementById('join-code-created');
+        const createdJoinCode = document.getElementById('created-join-code');
+        createdJoinCode.textContent = joinCode;
+        joinCodeCreated.classList.remove('hidden');
+
+        hideLoading();
+        $('main-team-name').textContent = teamName;
+        showJoinCodeOnDashboard(joinCode);
+        showScreen('screen-main');
+        resetDashboardOnEnterTeam();
+      } catch (err) {
+        hideLoading();
+        console.error('Create team error:', err);
+        throw (err && err.isKnownMessage) ? err : new Error('Failed to create team. Please try again.');
+      }
+    },
+    onCancel: () => {
+      // Nothing was written — stay on screen-team, name still in the input.
     }
-
-    // Pre-generate the ID so we can create the team doc, then the joinCodes
-    // lookup that validates against it, sequentially (avoids any ambiguity
-    // around rules reading same-batch pending writes).
-    const teamRef = db.collection('teams').doc();
-    await teamRef.set({
-      name: teamName,
-      joinCode: joinCode,
-      members: [currentUser.uid],
-      roles: { [currentUser.uid]: 'captain' },
-      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      createdBy: currentUser.uid
-    });
-
-    await db.collection('joinCodes').doc(joinCode).set({ teamId: teamRef.id });
-    await ensureMemberContact(teamRef.id, currentUser.uid, currentUserProfile?.email || currentUser.email || '');
-
-    // Re-read the full team doc so currentTeamData gets the same complete
-    // shape handleAuthenticatedUser() populates on login (members/roles/
-    // permissions included). The previous {id, name, joinCode}-only object
-    // left currentTeamId unset (only loadTeamMembers() sets it) and
-    // permission checks reading an empty currentTeamData — silently broken
-    // until the next refresh re-ran the full login flow.
-    const createdSnap = await teamRef.get();
-    const fullTeamData = { id: teamRef.id, ...createdSnap.data() };
-    currentTeamData = fullTeamData;
-
-    if (typeof loadTeamMembers === 'function') {
-      loadTeamMembers(teamRef.id, fullTeamData);
-    }
-    if (typeof updatePermissionUI === 'function') {
-      updatePermissionUI();
-    }
-    if (typeof watchTeamDoc === 'function') {
-      watchTeamDoc(teamRef.id);
-    }
-
-    // This is the initial (zero-teams) onboarding flow — createAnotherTeam()
-    // (members.js) already does this for an account that already has ≥1
-    // team, but this path never did, leaving myTeams stale/empty and
-    // watchMyTeams() (auth.js) without a listener for this team at all until
-    // the next full login re-ran getUserTeams(). That's what let a kick (or
-    // any other live team-doc change) on a team created this way go
-    // undetected: watchTeamDoc() alone doesn't cover removal detection
-    // anymore (see watchMyTeams()'s error callback) since that's now
-    // centralized in watchMyTeams(), which had nothing registered here.
-    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
-      myTeams = [...myTeams, fullTeamData];
-    }
-    if (typeof watchMyTeams === 'function') watchMyTeams();
-    if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
-    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
-
-    // Show the join code on the create tab
-    const joinCodeCreated = document.getElementById('join-code-created');
-    const createdJoinCode = document.getElementById('created-join-code');
-    createdJoinCode.textContent = joinCode;
-    joinCodeCreated.classList.remove('hidden');
-
-    hideLoading();
-    // Navigate to main app
-    $('main-team-name').textContent = teamName;
-    showJoinCodeOnDashboard(joinCode);
-    showScreen('screen-main');
-    resetDashboardOnEnterTeam();
-  } catch (err) {
-    hideLoading();
-    console.error('Create team error:', err);
-    showError('create-error', 'Failed to create team. Please try again.');
-  }
+  });
 });
 
 // ====== Join Team ======
+// Same account-name reasoning as Create Team above.
+//
+// The join code is resolved to a team id (and, when available, its name —
+// see joinCodes/{code}'s "name" field) via a READ-ONLY lookup first — the
+// membership-adding write only happens inside the popup's onConfirm below,
+// same "nothing committed until confirmed" structure as Create Team.
 $('btn-join-team').addEventListener('click', async () => {
   clearErrors();
   const joinCode = $('input-join-code').value.trim().toUpperCase();
@@ -298,8 +307,6 @@ $('btn-join-team').addEventListener('click', async () => {
     return;
   }
 
-  if (!(await ensureDisplayNameSet('join-error'))) return;
-
   showLoading('Joining team...');
   try {
     // Resolve the join code to a team ID via the public lookup collection —
@@ -312,96 +319,127 @@ $('btn-join-team').addEventListener('click', async () => {
     }
 
     const teamId = codeDoc.data().teamId;
+    // Only present on joinCodes docs written after the name field was added
+    // (this create-team flow, and the ensureJoinCodeDoc() backfill) — older
+    // codes fall back to the modal's own generic wording.
+    const resolvedTeamName = codeDoc.data().name || null;
     const teamRef = db.collection('teams').doc(teamId);
 
-    // If we're already a member, we can read the doc directly and just go to the dashboard.
+    // If we're already a member, we can read the doc directly and just go to
+    // the dashboard — this isn't a fresh join, so no name popup here at all.
+    let existingFullTeamData = null;
     try {
       const existingSnap = await teamRef.get();
       const existingData = existingSnap.data();
       if (existingData.members && existingData.members.includes(currentUser.uid)) {
-        hideLoading();
-        const fullTeamData = { id: teamId, ...existingData };
-        currentTeamData = fullTeamData;
-        if (typeof loadTeamMembers === 'function') {
-          loadTeamMembers(teamId, fullTeamData);
-        }
-        if (typeof updatePermissionUI === 'function') {
-          updatePermissionUI();
-        }
-        if (typeof watchTeamDoc === 'function') {
-          watchTeamDoc(teamId);
-        }
-        // Same myTeams/watchMyTeams gap as the create-team flow above — see
-        // that block's comment for why this matters (live removal
-        // detection has nothing to detect with otherwise).
-        if (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && !myTeams.some(t => t.id === teamId)) {
-          myTeams = [...myTeams, fullTeamData];
-        }
-        if (typeof watchMyTeams === 'function') watchMyTeams();
-        if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
-        if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
-        $('main-team-name').textContent = existingData.name;
-        showJoinCodeOnDashboard(existingData.joinCode);
-        showScreen('screen-main');
-        resetDashboardOnEnterTeam();
-        return;
+        existingFullTeamData = { id: teamId, ...existingData };
       }
     } catch (notYetMemberErr) {
       // Expected: reading the full team doc is denied until we're actually a member — fall through to join.
     }
 
-    // Scoped self-join: rules only allow this specific update (appending our own uid
-    // and nothing else) for a non-member, which is exactly what's happening here.
-    await teamRef.update({
-      members: firebase.firestore.FieldValue.arrayUnion(currentUser.uid)
-    });
-
-    // A genuine (re)join is always a fresh start for this team's saved
-    // event/search state (session-state.js) — clearing here, not just on
-    // the way out, is what makes this hold even when the PRIOR departure
-    // was a kick (whose leave-time clear can only ever run on the KICKED
-    // member's own client, and kickMember() has no way to reach into it —
-    // sessionStorage is per-browser-tab) or somehow skipped its own
-    // leave-time clear. A no-op if this team was never joined before.
-    if (typeof clearTeamSessionState === 'function') {
-      clearTeamSessionState(teamId);
-    }
-
-    // Now that we're a member, we can read the full doc.
-    const joinedSnap = await teamRef.get();
-    const teamData = joinedSnap.data();
-
-    await ensureMemberContact(teamId, currentUser.uid, currentUserProfile?.email || currentUser.email || '');
-
-    // Use the full team doc (members/roles/permissions included) rather than
-    // just {id, name, joinCode} — same reason as the create-team flow above.
-    const fullTeamData = { id: teamId, ...teamData };
-    currentTeamData = fullTeamData;
-
-    if (typeof loadTeamMembers === 'function') {
-      loadTeamMembers(teamId, fullTeamData);
-    }
-    if (typeof updatePermissionUI === 'function') {
-      updatePermissionUI();
-    }
-    if (typeof watchTeamDoc === 'function') {
-      watchTeamDoc(teamId);
-    }
-
-    // Same myTeams/watchMyTeams gap as the create-team flow — see that
-    // block's comment for why this matters.
-    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
-      myTeams = [...myTeams, fullTeamData];
-    }
-    if (typeof watchMyTeams === 'function') watchMyTeams();
-    if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
-    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
-
     hideLoading();
-    $('main-team-name').textContent = teamData.name;
-    showJoinCodeOnDashboard(teamData.joinCode);
-    showScreen('screen-main');
-    resetDashboardOnEnterTeam();
+
+    if (existingFullTeamData) {
+      currentTeamData = existingFullTeamData;
+      if (typeof loadTeamMembers === 'function') loadTeamMembers(teamId, existingFullTeamData);
+      if (typeof updatePermissionUI === 'function') updatePermissionUI();
+      if (typeof watchTeamDoc === 'function') watchTeamDoc(teamId);
+      // Same myTeams/watchMyTeams gap as the create-team flow above — see
+      // that block's comment for why this matters (live removal
+      // detection has nothing to detect with otherwise).
+      if (typeof myTeams !== 'undefined' && Array.isArray(myTeams) && !myTeams.some(t => t.id === teamId)) {
+        myTeams = [...myTeams, existingFullTeamData];
+      }
+      if (typeof watchMyTeams === 'function') watchMyTeams();
+      if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+      if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
+      $('main-team-name').textContent = existingFullTeamData.name;
+      showJoinCodeOnDashboard(existingFullTeamData.joinCode);
+      showScreen('screen-main');
+      resetDashboardOnEnterTeam();
+      return;
+    }
+
+    if (typeof openTeamDisplayNameModal !== 'function') return;
+
+    openTeamDisplayNameModal({
+      teamName: resolvedTeamName,
+      confirmLabel: 'Join Team',
+      onConfirm: async (chosenName) => {
+        showLoading('Joining team...');
+        try {
+          // Scoped self-join: rules only allow this specific update (appending
+          // our own uid and nothing else) for a non-member, which is exactly
+          // what's happening here. This is the actual join — the first write
+          // in this whole flow.
+          await teamRef.update({
+            members: firebase.firestore.FieldValue.arrayUnion(currentUser.uid)
+          });
+
+          // A genuine (re)join is always a fresh start for this team's saved
+          // event/search state (session-state.js) — clearing here, not just on
+          // the way out, is what makes this hold even when the PRIOR departure
+          // was a kick (whose leave-time clear can only ever run on the KICKED
+          // member's own client, and kickMember() has no way to reach into it —
+          // sessionStorage is per-browser-tab) or somehow skipped its own
+          // leave-time clear. A no-op if this team was never joined before.
+          if (typeof clearTeamSessionState === 'function') {
+            clearTeamSessionState(teamId);
+          }
+
+          // Now that we're a member, we can read the full doc.
+          const joinedSnap = await teamRef.get();
+          const teamData = joinedSnap.data();
+
+          await ensureMemberContact(teamId, currentUser.uid, currentUserProfile?.email || currentUser.email || '');
+
+          // Per-team name override — only if it differs from the account
+          // default they were shown.
+          const accountName = (currentUserProfile && currentUserProfile.displayName) || '';
+          if (chosenName && chosenName !== accountName) {
+            await db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(currentUser.uid).set({ displayName: chosenName });
+          }
+
+          // Use the full team doc (members/roles/permissions included) rather than
+          // just {id, name, joinCode} — same reason as the create-team flow above.
+          const fullTeamData = { id: teamId, ...teamData };
+          currentTeamData = fullTeamData;
+
+          if (typeof loadTeamMembers === 'function') {
+            loadTeamMembers(teamId, fullTeamData);
+          }
+          if (typeof updatePermissionUI === 'function') {
+            updatePermissionUI();
+          }
+          if (typeof watchTeamDoc === 'function') {
+            watchTeamDoc(teamId);
+          }
+
+          // Same myTeams/watchMyTeams gap as the create-team flow — see that
+          // block's comment for why this matters.
+          if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+            myTeams = [...myTeams, fullTeamData];
+          }
+          if (typeof watchMyTeams === 'function') watchMyTeams();
+          if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+          if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
+
+          hideLoading();
+          $('main-team-name').textContent = teamData.name;
+          showJoinCodeOnDashboard(teamData.joinCode);
+          showScreen('screen-main');
+          resetDashboardOnEnterTeam();
+        } catch (err) {
+          hideLoading();
+          console.error('Join team error:', err);
+          throw new Error('Failed to join team. Please try again.');
+        }
+      },
+      onCancel: () => {
+        // Nothing was written — stay on screen-team.
+      }
+    });
   } catch (err) {
     hideLoading();
     console.error('Join team error:', err);

@@ -1,0 +1,14 @@
+# Cloudflare Pages cache-control config. This project has no build step and
+# no content-hashed filenames anywhere (css/style.css, js/*.js, etc. keep the
+# same name forever) — so any URL Cloudflare's edge caches with a long TTL
+# can silently keep serving stale content for up to that TTL after a real
+# deploy changes it, with no filename change to bust the cache. Confirmed
+# this exact failure mode on /about after the site restructure: a 7-day
+# edge-cached copy of the pre-restructure page kept being served long after
+# the file was removed. This blanket rule makes every response cacheable but
+# always revalidated against the origin first (matches the max-age=0,
+# must-revalidate behavior Cloudflare already applies by default to literal
+# .html paths — this just extends it to every path, including the
+# extensionless "clean URL" routes that were defaulting to a 7-day s-maxage).
+/*
+  Cache-Control: public, max-age=0, must-revalidate

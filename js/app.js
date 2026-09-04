@@ -6,6 +6,15 @@ console.log('Firebase SDK loaded:', typeof firebase !== 'undefined');
 console.log('Auth:', typeof auth !== 'undefined');
 console.log('Firestore:', typeof db !== 'undefined');
 
+// A refresh should always start scrolled to the top, same as every other
+// screen/tab transition (see showScreen()/activateDashboardTab() in
+// auth.js/members.js) — without this, the browser's own scroll restoration
+// can put a refreshed page back wherever it was left scrolled to.
+if ('scrollRestoration' in history) {
+  history.scrollRestoration = 'manual';
+}
+window.scrollTo(0, 0);
+
 // Service Worker registration (for PWA — will be implemented in a later step)
 if ('serviceWorker' in navigator) {
   // Registration will be added when we build the PWA step
@@ -87,12 +96,36 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!subtabs[subtab]) return;
     lastActiveScoutingSubTab = subtab;
 
+    // An in-progress bulk-select (Team Info/Pit/Match) shouldn't survive ANY
+    // tab change, not just a live permission revocation — see
+    // exitAllBulkSelectModes() (first-api.js) for why this didn't already
+    // happen. No-ops cheaply when nothing was active.
+    if (typeof exitAllBulkSelectModes === 'function') exitAllBulkSelectModes();
+
     Object.entries(subtabs).forEach(([name, { tab, view }]) => {
       const isActive = name === subtab;
       if (tab) tab.classList.toggle('active', isActive);
       if (view) {
         view.classList.toggle('hidden', !isActive);
         view.classList.toggle('active', isActive);
+        // CORRECTION from the last round: .subtab-content (this wrapper)
+        // losing its own bounded scroll region (see style.css — removed to
+        // fix a 3-layer nested scrollbar: page / this wrapper / .team-list)
+        // does NOT mean "the sub-tab's own scroll" responsibility should
+        // move to the outer page scroll — that was wrong, and regressed the
+        // original spec (a sub-tab switch must reset ONLY that sub-tab's own
+        // scroll, never the page's). It moves to resetNestedScrollContainers()
+        // below instead, which was ALREADY here and already resets the real
+        // remaining inner scroll regions (team-list-info/pit/match,
+        // match-schedule-list, pinned-events-list) — nothing extra was
+        // actually needed once the middle layer was removed; the outer page
+        // scroll was never this function's concern (see
+        // activateDashboardTab()/switchActiveTeam() in members.js/auth.js,
+        // which own that, on main-tab switches / team switches / refresh /
+        // sign-out-in / leave-rejoin — none of which route through here).
+        if (isActive) {
+          if (typeof resetNestedScrollContainers === 'function') resetNestedScrollContainers(view);
+        }
       }
     });
 

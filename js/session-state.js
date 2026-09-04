@@ -34,9 +34,18 @@ function saveSessionState() {
       };
     }
 
+    // Global, not per-team — same reasoning as dashboardTab/scoutingSubtab
+    // above (a UI arrangement preference, not team/event-specific data). By
+    // the time this is saved, activateDashboardTab() (members.js) has
+    // already reset it to 1 if the user has since left the Scouting tab, so
+    // this always reflects the correctly-scoped current value with no extra
+    // logic needed here.
+    const sortDirection = typeof currentTeamSortDirection !== 'undefined' ? currentTeamSortDirection : 1;
+
     sessionStorage.setItem(SESSION_STATE_KEY, JSON.stringify({
       dashboardTab,
       scoutingSubtab,
+      sortDirection,
       perTeam
     }));
   } catch (err) {
@@ -146,6 +155,21 @@ async function restoreOrDefaultSessionState() {
   const saved = loadSessionState();
   const dashboardTab = (saved && saved.dashboardTab) || 'scouting';
   const scoutingSubtab = (saved && saved.scoutingSubtab) || 'info';
+
+  // Restored before restorePerTeamEventState() below, so if that ends up
+  // calling selectEvent() (and therefore rendering the team lists), it
+  // already renders with the correct direction from the start rather than
+  // rendering once at the default (1) and again once this catches up.
+  // activateDashboardTab(dashboardTab) below will reset this right back to 1
+  // if the saved dashboardTab isn't 'scouting' — correctly so: that only
+  // happens if the user's session actually left Scouting before refreshing,
+  // in which case the live reset already fired and 1 is what got saved here
+  // in the first place, so this is a same-value no-op in that case, not a
+  // real conflict.
+  if (typeof currentTeamSortDirection !== 'undefined') {
+    currentTeamSortDirection = (saved && (saved.sortDirection === 1 || saved.sortDirection === -1)) ? saved.sortDirection : 1;
+    if (typeof updateSortDirectionButtons === 'function') updateSortDirectionButtons();
+  }
 
   // Must run BEFORE activateDashboardTab()/activateScoutingSubTab() below —
   // both trigger their own saveSessionState() as a side effect, which would

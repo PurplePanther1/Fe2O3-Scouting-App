@@ -43,6 +43,13 @@ function closeMatchScoutedModal() {
   if (exportErrorEl) exportErrorEl.textContent = '';
   const exportSuccessEl = document.getElementById('msm-export-match-success');
   if (exportSuccessEl) exportSuccessEl.textContent = '';
+
+  // This modal's own match-entry bulk-select toolbar (match-scout.js) isn't
+  // covered by exitAllBulkSelectModes() (that's only the three main tabs) —
+  // reset it here too, so reopening later (for this team or another) never
+  // shows a stale selection or a "Cancel Select" toggle left on. Same
+  // reasoning as closeTeamDetailModal() (team-info.js).
+  if (typeof resetMatchBulkSelectState === 'function') resetMatchBulkSelectState('msm-');
 }
 
 document.addEventListener('DOMContentLoaded', () => {

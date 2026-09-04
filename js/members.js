@@ -18,16 +18,48 @@ let currentTeamPermissions = {};
 // cache entry per team rather than one shared/stale entry across all of them.
 let memberInfoCache = {};
 
+// ====== Reset every bounded-scroll list nested inside a tab/subtab, not
+// just that tab/subtab's own outer container. .team-list/.event-list/
+// .match-schedule-list each have their OWN independent overflow-y:auto
+// region (max-height-capped) — resetting only the outer .dtab-content
+// scrollTop, or the page's own window scroll (which activateDashboardTab()/
+// activateSubTab() already do), leaves these still scrolled wherever they
+// were left, since they're a SEPARATE scroll container nested inside it, not
+// the same one. (.subtab-content itself has no scroll region of its own to
+// reset at all anymore — see style.css.) Shared by both tab-switch paths
+// (main dashboard tabs here, sub-tabs in app.js) rather than each
+// reimplementing this query. ======
+function resetNestedScrollContainers(container) {
+  if (!container) return;
+  container.querySelectorAll('.team-list, .event-list, .match-schedule-list').forEach(el => {
+    el.scrollTop = 0;
+  });
+}
+
 // ====== Dashboard tab switching ======
 // Exposed globally so a fresh login can reset to the default tab (Scouting)
 // the same way a page refresh does, instead of duplicating this logic.
 function activateDashboardTab(name) {
+  // An in-progress bulk-select (Team Info/Pit/Match) shouldn't survive ANY
+  // tab change, including this one (main dashboard tab) — see
+  // exitAllBulkSelectModes() (first-api.js). Unconditional (not gated on
+  // name), matching this function's existing precedent of resetting
+  // My-Team-tab-only state on every call, even a re-click of the
+  // already-active tab (see the join/create-team input clearing below).
+  if (typeof exitAllBulkSelectModes === 'function') exitAllBulkSelectModes();
+
   document.querySelectorAll('#dashboard-tabs .tab').forEach(t => {
     t.classList.toggle('active', t.dataset.dtab === name);
   });
   document.querySelectorAll('.dtab-content').forEach(tc => tc.classList.remove('active'));
   const content = document.getElementById('dtab-' + name);
   if (content) content.classList.add('active');
+  resetNestedScrollContainers(content);
+
+  // The page's own (window-level) scroll — deliberately separate from a
+  // scouting sub-tab's own scroll reset (activateSubTab(), app.js), which
+  // targets that sub-tab's own bounded container instead, never this.
+  window.scrollTo(0, 0);
 
   // Refresh the My Account tab's own info/teams list every time it's
   // switched to, not just on login — e.g. a team created/left elsewhere in
@@ -35,7 +67,6 @@ function activateDashboardTab(name) {
   if (name === 'account') {
     if (typeof renderAccountInfo === 'function') renderAccountInfo();
     if (typeof renderAccountTeamsList === 'function') renderAccountTeamsList();
-    if (typeof renderPerTeamDisplayNames === 'function') renderPerTeamDisplayNames();
   }
 
   // The My Team tab's "Join Another Team" input/status belong to whatever
@@ -52,6 +83,31 @@ function activateDashboardTab(name) {
   const createAnotherTeamInput = document.getElementById('input-create-another-team-name');
   if (createAnotherTeamInput) createAnotherTeamInput.value = '';
   if (typeof clearStatusMessage === 'function') clearStatusMessage('create-another-team');
+
+  // The Scouting tabs' sort DIRECTION deliberately persists through
+  // everything else (switching sort field, switching Scouting sub-tabs, a
+  // season/event switch — see clearSelectedEvent()'s separate UI-state
+  // reset in first-api.js, which intentionally leaves this alone) — it only
+  // resets here, the single boundary every other "leaving Scouting
+  // entirely" reset already uses. Only on the way OUT of Scouting (name !==
+  // 'scouting'), never merely re-clicking Scouting itself or switching its
+  // sub-tabs, both of which call this same function with name === 'scouting'.
+  if (name !== 'scouting' && typeof currentTeamSortDirection !== 'undefined' && currentTeamSortDirection !== 1) {
+    currentTeamSortDirection = 1;
+    if (typeof updateSortDirectionButtons === 'function') updateSortDirectionButtons();
+    // Not visible while away from Scouting, but rebuilt now anyway so the
+    // lists already reflect the reset the moment the user comes back,
+    // rather than showing a stale flipped order until some unrelated event
+    // happens to trigger a re-render.
+    if (typeof currentEventTeams !== 'undefined' && currentEventTeams && currentEventTeams.length > 0) {
+      if (typeof renderMatchTeamList === 'function') renderMatchTeamList(currentEventTeams);
+      if (typeof renderPitTeamList === 'function') renderPitTeamList(currentEventTeams);
+      if (typeof renderTeamInfoList === 'function') renderTeamInfoList(currentEventTeams);
+      if (typeof applyTeamSearchFilter === 'function' && typeof currentTeamSearchQuery !== 'undefined') {
+        applyTeamSearchFilter(currentTeamSearchQuery);
+      }
+    }
+  }
 
   if (typeof saveSessionState === 'function') {
     saveSessionState();
@@ -383,15 +439,21 @@ async function fetchMemberInfo(teamId, uid) {
 }
 
 // ====== Edit Permissions Modal ======
-const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canBulkDelete', 'canPinEvents', 'canViewMemberEmails', 'canKickMembers'];
+// canBulkDelete used to be a separate key here — retired as redundant (it was
+// UI-only, never enforced by firestore.rules, and every surface that checked
+// it already required canEditOtherEntries too). canEditOtherEntries alone now
+// gates every bulk/team-level delete surface as well as per-entry edit/delete
+// of others' entries — see auth.js's canUserEditOtherEntries(). Old team docs
+// may still carry a stale permissions[uid].canBulkDelete field; it's simply
+// never read.
+const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canPinEvents', 'canViewMemberEmails', 'canKickMembers'];
 
 // Human-readable labels, matching the Edit Permissions modal's checkbox
 // labels exactly — reused by the read-only "My Permissions" modal (below)
 // so the two never drift apart.
 const MEMBER_PERMISSION_LABELS = {
   canEditTemplates: 'Edit templates',
-  canEditOtherEntries: "Edit others' entries",
-  canBulkDelete: 'Bulk-delete entries',
+  canEditOtherEntries: "Edit/delete others' entries (incl. bulk & team deletes)",
   canPinEvents: 'Pin/unpin events',
   canViewMemberEmails: 'View member emails',
   canKickMembers: 'Kick members'
@@ -611,6 +673,11 @@ function transferCaptaincy(newCaptainUid) {
 // teams. Reuses the same self-join write teams/{teamId}'s update rule
 // already allows for any non-member, regardless of how many other teams
 // they're already on. ======
+// The join code is resolved (and, when available, its name — see
+// joinCodes/{code}'s "name" field) via a READ-ONLY lookup first — the
+// membership-adding write only happens inside the popup's onConfirm below,
+// same "nothing committed until confirmed" structure as team.js's initial
+// join flow.
 async function joinAnotherTeam() {
   const input = document.getElementById('input-join-another-team-code');
   const setStatus = (type, message) => {
@@ -630,7 +697,7 @@ async function joinAnotherTeam() {
     return;
   }
 
-  showLoading('Joining team...');
+  showLoading('Looking up team...');
   try {
     const codeDoc = await db.collection('joinCodes').doc(joinCode).get();
     if (!codeDoc.exists) {
@@ -640,6 +707,7 @@ async function joinAnotherTeam() {
     }
 
     const teamId = codeDoc.data().teamId;
+    const resolvedTeamName = codeDoc.data().name || null;
 
     // Already a member? The self-join write below only applies to a
     // non-member (see firestore.rules) — without this check, re-submitting
@@ -652,68 +720,91 @@ async function joinAnotherTeam() {
       return;
     }
 
-    const teamRef = db.collection('teams').doc(teamId);
-
-    // Scoped self-join: rules only allow this specific update (appending our
-    // own uid and nothing else) for a non-member — same write team.js's
-    // initial join flow uses.
-    await teamRef.update({
-      members: firebase.firestore.FieldValue.arrayUnion(currentUser.uid)
-    });
-
-    // A genuine (re)join is always a fresh start for this team's saved
-    // event/search state — see team.js's initial join flow for the fuller
-    // reasoning (this matters most for a team you were previously KICKED
-    // from, since that leave-time clear can only ever run on the kicked
-    // member's own client, never the kicker's).
-    if (typeof clearTeamSessionState === 'function') {
-      clearTeamSessionState(teamId);
-    }
-
-    const joinedSnap = await teamRef.get();
-    const fullTeamData = { id: teamId, ...joinedSnap.data() };
-
-    if (typeof ensureMemberContact === 'function') {
-      await ensureMemberContact(teamId, currentUser.uid, (currentUserProfile && currentUserProfile.email) || currentUser.email || '');
-    }
-
-    // Add to myTeams and switch to it immediately — per design, joining
-    // shouldn't leave the user looking at whichever team was already active.
-    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
-      myTeams = [...myTeams, fullTeamData];
-    }
-    // The set of teams changed — rebuild the per-team live listeners
-    // (watchMyTeams(), auth.js) so the newly joined team's entry stays live too.
-    if (typeof watchMyTeams === 'function') watchMyTeams();
-    // Render the switcher synchronously off the myTeams array we just updated,
-    // rather than waiting on watchMyTeams()'s listeners (async — their first
-    // event can lag a moment behind a just-completed write) or switchActiveTeam()
-    // below (which only re-renders it as a side effect of watchTeamDoc's own
-    // snapshot). Without this the switcher stayed hidden until either of those
-    // eventually fired, which in practice could look like it needed a refresh.
-    if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
-    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
-
     hideLoading();
 
-    // Switch first, THEN show the success message — landing on the new
-    // team's My Team tab already clears any leftover input/status as part
-    // of activateDashboardTab()'s centralized clearing, so setting the
-    // message after that (not before) is what keeps it from being wiped out
-    // by the very switch this join triggers. The input field itself doesn't
-    // need clearing here either, for the same reason. Awaited — switchActiveTeam()
-    // is async now (it awaits restoring the new team's own event/search
-    // state before its own activateDashboardTab() call), so without
-    // awaiting it here, setStatus() below could still run before that
-    // clearing happens and get wiped out by it arriving late.
-    if (typeof switchActiveTeam === 'function') {
-      await switchActiveTeam(teamId);
-    }
-    setStatus('success', `Joined "${fullTeamData.name || 'the team'}"!`);
+    if (typeof openTeamDisplayNameModal !== 'function') return;
+
+    const teamRef = db.collection('teams').doc(teamId);
+    openTeamDisplayNameModal({
+      teamName: resolvedTeamName,
+      confirmLabel: 'Join Team',
+      onConfirm: async (chosenName) => {
+        showLoading('Joining team...');
+        try {
+          // Scoped self-join: rules only allow this specific update (appending
+          // our own uid and nothing else) for a non-member — same write
+          // team.js's initial join flow uses. This is the actual join.
+          await teamRef.update({
+            members: firebase.firestore.FieldValue.arrayUnion(currentUser.uid)
+          });
+
+          // A genuine (re)join is always a fresh start for this team's saved
+          // event/search state — see team.js's initial join flow for the fuller
+          // reasoning (this matters most for a team you were previously KICKED
+          // from, since that leave-time clear can only ever run on the kicked
+          // member's own client, never the kicker's).
+          if (typeof clearTeamSessionState === 'function') {
+            clearTeamSessionState(teamId);
+          }
+
+          const joinedSnap = await teamRef.get();
+          const fullTeamData = { id: teamId, ...joinedSnap.data() };
+
+          if (typeof ensureMemberContact === 'function') {
+            await ensureMemberContact(teamId, currentUser.uid, (currentUserProfile && currentUserProfile.email) || currentUser.email || '');
+          }
+
+          // Per-team name override — only if it differs from the account
+          // default they were shown.
+          const accountName = (currentUserProfile && currentUserProfile.displayName) || '';
+          if (chosenName && chosenName !== accountName) {
+            await db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(currentUser.uid).set({ displayName: chosenName });
+          }
+
+          // Add to myTeams and switch to it immediately — per design, joining
+          // shouldn't leave the user looking at whichever team was already active.
+          if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+            myTeams = [...myTeams, fullTeamData];
+          }
+          // The set of teams changed — rebuild the per-team live listeners
+          // (watchMyTeams(), auth.js) so the newly joined team's entry stays live too.
+          if (typeof watchMyTeams === 'function') watchMyTeams();
+          // Render the switcher synchronously off the myTeams array we just updated,
+          // rather than waiting on watchMyTeams()'s listeners (async — their first
+          // event can lag a moment behind a just-completed write) or switchActiveTeam()
+          // below (which only re-renders it as a side effect of watchTeamDoc's own
+          // snapshot). Without this the switcher stayed hidden until either of those
+          // eventually fired, which in practice could look like it needed a refresh.
+          if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+          if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
+
+          hideLoading();
+
+          // Switch first, THEN show the success message — landing on the new
+          // team's My Team tab already clears any leftover input/status as part
+          // of activateDashboardTab()'s centralized clearing, so setting the
+          // message after that (not before) is what keeps it from being wiped out
+          // by the very switch this join triggers. Awaited — switchActiveTeam()
+          // is async now (it awaits restoring the new team's own event/search
+          // state before its own activateDashboardTab() call).
+          if (typeof switchActiveTeam === 'function') {
+            await switchActiveTeam(teamId);
+          }
+          setStatus('success', `Joined "${fullTeamData.name || 'the team'}"!`);
+        } catch (err) {
+          hideLoading();
+          console.error('Join another team error:', err);
+          throw new Error('Failed to join team. Please try again.');
+        }
+      },
+      onCancel: () => {
+        // Nothing was written.
+      }
+    });
   } catch (err) {
     hideLoading();
     console.error('Join another team error:', err);
-    setStatus('error', 'Failed to join team. Please try again.');
+    setStatus('error', 'Failed to look up team. Please try again.');
   }
 }
 
@@ -728,6 +819,10 @@ document.getElementById('input-join-another-team-code').addEventListener('keydow
 // but folds the result into myTeams and switches to it immediately instead of
 // going through showScreen('screen-main')/resetDashboardOnEnterTeam(), same
 // pattern as joinAnotherTeam() above. ======
+// The team name is already typed into the input, so the popup can show
+// immediately, BEFORE any write — the actual creation only happens once
+// that's confirmed (onConfirm below), same "nothing committed until
+// confirmed" structure as team.js's initial create flow.
 async function createAnotherTeam() {
   const input = document.getElementById('input-create-another-team-name');
   const setStatus = (type, message) => {
@@ -747,63 +842,81 @@ async function createAnotherTeam() {
     return;
   }
 
-  showLoading('Creating your team...');
-  try {
-    const joinCode = generateJoinCode(teamName);
+  if (typeof openTeamDisplayNameModal !== 'function') return;
 
-    const codeDoc = await db.collection('joinCodes').doc(joinCode).get();
-    if (codeDoc.exists) {
-      // Extremely unlikely collision — just ask them to try again, same as
-      // the onboarding create-team flow.
-      hideLoading();
-      setStatus('error', 'Please try again (code collision).');
-      return;
+  openTeamDisplayNameModal({
+    teamName,
+    confirmLabel: 'Create Team',
+    onConfirm: async (chosenName) => {
+      showLoading('Creating your team...');
+      try {
+        const joinCode = generateJoinCode(teamName);
+
+        const codeDoc = await db.collection('joinCodes').doc(joinCode).get();
+        if (codeDoc.exists) {
+          // Extremely unlikely collision — just ask them to try again, same
+          // as the onboarding create-team flow. Marked so the catch below
+          // preserves this specific message instead of overwriting it.
+          const collisionErr = new Error('Please try again (code collision).');
+          collisionErr.isKnownMessage = true;
+          throw collisionErr;
+        }
+
+        const teamRef = db.collection('teams').doc();
+        await teamRef.set({
+          name: teamName,
+          joinCode: joinCode,
+          members: [currentUser.uid],
+          roles: { [currentUser.uid]: 'captain' },
+          createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+          createdBy: currentUser.uid
+        });
+
+        await db.collection('joinCodes').doc(joinCode).set({ teamId: teamRef.id, name: teamName });
+        if (typeof ensureMemberContact === 'function') {
+          await ensureMemberContact(teamRef.id, currentUser.uid, (currentUserProfile && currentUserProfile.email) || currentUser.email || '');
+        }
+
+        // Per-team name override — only if it differs from the account
+        // default they were shown.
+        const accountName = (currentUserProfile && currentUserProfile.displayName) || '';
+        if (chosenName && chosenName !== accountName) {
+          await db.collection('teams').doc(teamRef.id).collection('memberDisplayNames').doc(currentUser.uid).set({ displayName: chosenName });
+        }
+
+        const createdSnap = await teamRef.get();
+        const fullTeamData = { id: teamRef.id, ...createdSnap.data() };
+
+        // Add to myTeams and switch to it immediately — same pattern as
+        // joinAnotherTeam() above, including rendering the switcher synchronously
+        // rather than waiting on watchMyTeams()'s async listeners.
+        if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
+          myTeams = [...myTeams, fullTeamData];
+        }
+        if (typeof watchMyTeams === 'function') watchMyTeams();
+        if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
+        if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
+
+        hideLoading();
+
+        // Switch first, THEN show the success message — same reasoning as
+        // joinAnotherTeam(): switching triggers activateDashboardTab()'s
+        // centralized clearing, so setting the message after avoids it being
+        // wiped out by the very switch this creation triggers.
+        if (typeof switchActiveTeam === 'function') {
+          await switchActiveTeam(teamRef.id);
+        }
+        setStatus('success', `Created "${fullTeamData.name || 'the team'}"!`);
+      } catch (err) {
+        hideLoading();
+        console.error('Create another team error:', err);
+        throw (err && err.isKnownMessage) ? err : new Error('Failed to create team. Please try again.');
+      }
+    },
+    onCancel: () => {
+      // Nothing was written.
     }
-
-    const teamRef = db.collection('teams').doc();
-    await teamRef.set({
-      name: teamName,
-      joinCode: joinCode,
-      members: [currentUser.uid],
-      roles: { [currentUser.uid]: 'captain' },
-      createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-      createdBy: currentUser.uid
-    });
-
-    await db.collection('joinCodes').doc(joinCode).set({ teamId: teamRef.id });
-    if (typeof ensureMemberContact === 'function') {
-      await ensureMemberContact(teamRef.id, currentUser.uid, (currentUserProfile && currentUserProfile.email) || currentUser.email || '');
-    }
-
-    const createdSnap = await teamRef.get();
-    const fullTeamData = { id: teamRef.id, ...createdSnap.data() };
-
-    // Add to myTeams and switch to it immediately — same pattern as
-    // joinAnotherTeam() above, including rendering the switcher synchronously
-    // rather than waiting on watchMyTeams()'s async listeners.
-    if (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) {
-      myTeams = [...myTeams, fullTeamData];
-    }
-    if (typeof watchMyTeams === 'function') watchMyTeams();
-    if (typeof renderTeamSwitcher === 'function') renderTeamSwitcher();
-    if (typeof persistKnownTeamIds === 'function') persistKnownTeamIds();
-
-    hideLoading();
-
-    // Switch first, THEN show the success message — same reasoning as
-    // joinAnotherTeam(): switching triggers activateDashboardTab()'s
-    // centralized clearing, so setting the message after avoids it being
-    // wiped out by the very switch this creation triggers. Awaited for the
-    // same reason as joinAnotherTeam() — switchActiveTeam() is async now.
-    if (typeof switchActiveTeam === 'function') {
-      await switchActiveTeam(teamRef.id);
-    }
-    setStatus('success', `Created "${fullTeamData.name || 'the team'}"!`);
-  } catch (err) {
-    hideLoading();
-    console.error('Create another team error:', err);
-    setStatus('error', 'Failed to create team. Please try again.');
-  }
+  });
 }
 
 document.getElementById('btn-create-another-team').addEventListener('click', createAnotherTeam);
@@ -876,6 +989,22 @@ async function performLeaveTeam(isSoleMember, leftTeamId, leftTeamData) {
     if (typeof watchPitScoutStatus === 'function') watchPitScoutStatus(null);
     if (typeof watchMatchScoutStatus === 'function') watchMatchScoutStatus(null);
 
+    // Mark this team as an expected self-removal right before the write that
+    // triggers it, in BOTH branches — see markExpectedSelfRemoval()'s
+    // docblock. This used to be skipped for the sole-member (deleteEntireTeam())
+    // branch on the assumption that a deleted team doc always makes
+    // watchMyTeams()'s listener see a clean doc.exists === false (its normal
+    // success path, a silent no-op) rather than a permission-denied error.
+    // That assumption doesn't hold in practice: Firestore doesn't guarantee
+    // a member-gated listener sees a graceful "not found" when the document
+    // it depends on for its own read-rule check is deleted out from under
+    // it — a permission-denied can (and does) fire instead, which routed
+    // into handleRemovedFromTeam() unguarded here, producing a bogus
+    // "removed from "this team"" notice (myTeams had already been pruned by
+    // this function's own navigateAwayFromRemovedTeam() call below by the
+    // time that async error arrived, so the team name was gone by then too).
+    markExpectedSelfRemoval(leftTeamId);
+
     if (isSoleMember) {
       if (typeof deleteEntireTeam === 'function') {
         await deleteEntireTeam(leftTeamId, currentUser.uid, leftTeamData);
@@ -889,13 +1018,6 @@ async function performLeaveTeam(isSoleMember, leftTeamId, leftTeamData) {
       if (typeof anonymizeOwnScoutingEntries === 'function') {
         await anonymizeOwnScoutingEntries(leftTeamId, currentUser.uid);
       }
-      // Mark this team as an expected self-removal right before the write
-      // that triggers it — see markExpectedSelfRemoval()'s docblock. The
-      // sole-member (deleteEntireTeam()) branch above doesn't need this: a
-      // deleted team doc makes watchMyTeams()'s listener see doc.exists ===
-      // false (its normal success path, already a silent no-notice no-op),
-      // never a permission-denied error.
-      markExpectedSelfRemoval(leftTeamId);
       if (typeof selfLeaveTeam === 'function') {
         await selfLeaveTeam(leftTeamId, currentUser.uid);
       }
@@ -951,9 +1073,6 @@ function navigateAwayFromRemovedTeam(removedTeamId) {
     currentTeamPermissions = {};
     if (typeof clearSelectedEvent === 'function') clearSelectedEvent();
     if (typeof clearSessionState === 'function') clearSessionState();
-
-    const nameInput = document.getElementById('input-screen-team-display-name');
-    if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
 
     showScreen('screen-team');
   }

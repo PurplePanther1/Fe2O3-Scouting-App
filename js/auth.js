@@ -118,6 +118,7 @@ async function ensureMemberContact(teamId, uid, email) {
  * edit, a pinned event) only show up for everyone else after a manual refresh.
  */
 let teamDocUnsubscribe = null;
+let memberDisplayNamesUnsubscribe = null;
 
 /**
  * Point currentTeamData (and everything derived from it: member list,
@@ -152,6 +153,18 @@ function refreshActiveTeamData(teamId, teamData) {
   if (typeof updateMatchTeamBulkSelectUI === 'function') {
     updateMatchTeamBulkSelectUI();
   }
+  if (typeof updateInfoBulkSelectUI === 'function') {
+    updateInfoBulkSelectUI();
+  }
+  // Permission grants/revokes (canEditOtherEntries) land here live via the
+  // team-doc listener above, but that alone never re-renders each team row's
+  // Delete button — without this it only ever picked up a permission change
+  // after switching tabs away and back (whatever else happened to force a
+  // full re-render), not live like every other permission-gated control this
+  // function already refreshes.
+  if (typeof refreshTeamRowDeleteButtons === 'function') {
+    refreshTeamRowDeleteButtons();
+  }
   if (typeof updatePinButtonUI === 'function') {
     updatePinButtonUI();
   }
@@ -164,6 +177,10 @@ function watchTeamDoc(teamId) {
   if (teamDocUnsubscribe) {
     teamDocUnsubscribe();
     teamDocUnsubscribe = null;
+  }
+  if (memberDisplayNamesUnsubscribe) {
+    memberDisplayNamesUnsubscribe();
+    memberDisplayNamesUnsubscribe = null;
   }
   if (!teamId) return;
 
@@ -179,6 +196,33 @@ function watchTeamDoc(teamId) {
     // is handled, rather than duplicating it here too.
     console.warn('Team doc listener error:', err);
   });
+
+  // A per-team display-name override (teams/{teamId}/memberDisplayNames/{uid})
+  // lives in its own subcollection, so a teammate changing theirs never
+  // touches the team doc above and the listener there never fires for it —
+  // without this, another member's name change was invisible to everyone
+  // else on the team until they refreshed the page. Same start/stop
+  // lifecycle as the team-doc listener (this function is the single
+  // entry/exit point for both), so every existing watchTeamDoc() call site
+  // gets this for free instead of needing a second paired call added
+  // everywhere. On any change, just invalidate this team's cached names
+  // (memberInfoCache, members.js) and re-render the whole list — cheaper
+  // than diffing individual docChanges() given how small/infrequent this
+  // collection is, same "just refresh" approach the team-doc listener above
+  // already takes.
+  memberDisplayNamesUnsubscribe = db.collection('teams').doc(teamId).collection('memberDisplayNames')
+    .onSnapshot(() => {
+      if (memberInfoCache) {
+        Object.keys(memberInfoCache).forEach(key => {
+          if (key.startsWith(`${teamId}_`)) delete memberInfoCache[key];
+        });
+      }
+      if (currentTeamId === teamId && currentTeamData && typeof loadTeamMembers === 'function') {
+        loadTeamMembers(teamId, currentTeamData);
+      }
+    }, (err) => {
+      console.warn('memberDisplayNames listener error:', err);
+    });
 }
 
 /**
@@ -186,13 +230,13 @@ function watchTeamDoc(teamId) {
  * existed, so new members can still join it by code. Only the captain can do
  * this (matches the joinCodes create rule), and it's a no-op once it exists.
  */
-async function ensureJoinCodeDoc(teamId, joinCode) {
+async function ensureJoinCodeDoc(teamId, joinCode, teamName) {
   if (!joinCode) return;
   try {
     const ref = db.collection('joinCodes').doc(joinCode);
     const doc = await ref.get();
     if (!doc.exists) {
-      await ref.set({ teamId });
+      await ref.set({ teamId, name: teamName || '' });
     }
   } catch (err) {
     console.warn('Failed to sync joinCodes entry:', err);
@@ -256,6 +300,12 @@ function hideLoading() {
 function showScreen(screenId) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(screenId).classList.add('active');
+
+  // Every screen transition (sign-in landing on the dashboard, sign-out
+  // landing on login, creating/joining a team, leaving your last team, ...)
+  // starts scrolled to the top — a single centralized reset here instead of
+  // repeating it at every one of showScreen()'s many call sites.
+  window.scrollTo(0, 0);
 
   // screen-team's join-code/team-name fields and "team created" card belong
   // to whatever create/join attempt was last in progress — stale if a
@@ -934,6 +984,79 @@ $('input-account-reauth-password').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') $('btn-account-reauth-confirm').click();
 });
 
+// ====== Team Display Name popup — a REQUIRED confirmation gate before
+// joining or creating a team (the first one AND any additional one), not
+// optional post-join customization. The caller supplies the actual
+// join/create Firestore write(s) as onConfirm(chosenName) — nothing is
+// written until the user confirms. Closing the modal (X, overlay click, or
+// Cancel) calls onCancel() instead and performs no write at all: no team
+// created, no membership added. This also means the dashboard/member list
+// never paints (under the account-name fallback or anything else) before
+// the user has had a chance to pick a name for this specific team, since
+// showScreen('screen-main')/switchActiveTeam() live INSIDE onConfirm, run
+// only after it succeeds — not before this modal even opens. ======
+let pendingTeamDisplayNameOnConfirm = null;
+let pendingTeamDisplayNameOnCancel = null;
+
+function openTeamDisplayNameModal({ teamName, confirmLabel, onConfirm, onCancel } = {}) {
+  const modal = $('team-display-name-modal');
+  pendingTeamDisplayNameOnConfirm = typeof onConfirm === 'function' ? onConfirm : null;
+  pendingTeamDisplayNameOnCancel = typeof onCancel === 'function' ? onCancel : null;
+  $('team-display-name-modal-team').textContent = teamName || 'this team';
+  $('input-team-display-name-modal').value = (currentUserProfile && currentUserProfile.displayName) || '';
+  $('team-display-name-modal-error').textContent = '';
+  $('btn-team-display-name-save').textContent = confirmLabel || 'Continue';
+  $('btn-team-display-name-save').disabled = false;
+  modal.classList.remove('hidden');
+}
+
+function cancelTeamDisplayNameModal() {
+  $('team-display-name-modal').classList.add('hidden');
+  const onCancel = pendingTeamDisplayNameOnCancel;
+  pendingTeamDisplayNameOnConfirm = null;
+  pendingTeamDisplayNameOnCancel = null;
+  if (onCancel) onCancel();
+}
+
+async function confirmTeamDisplayNameModal() {
+  const errorEl = $('team-display-name-modal-error');
+  errorEl.textContent = '';
+
+  const name = $('input-team-display-name-modal').value.trim();
+  if (!name) {
+    errorEl.textContent = 'Please enter a name.';
+    return;
+  }
+
+  const onConfirm = pendingTeamDisplayNameOnConfirm;
+  if (!onConfirm) return;
+
+  const saveBtn = $('btn-team-display-name-save');
+  saveBtn.disabled = true;
+  try {
+    // The caller's job: perform the actual join/create write(s), the
+    // per-team name override (if `name` differs from the account default),
+    // and the dashboard-entry navigation — all of it, only now.
+    await onConfirm(name);
+    $('team-display-name-modal').classList.add('hidden');
+    pendingTeamDisplayNameOnConfirm = null;
+    pendingTeamDisplayNameOnCancel = null;
+  } catch (err) {
+    console.error('Team display name confirm error:', err);
+    errorEl.textContent = (err && err.message) || 'Failed to complete. Please try again.';
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+$('btn-team-display-name-close').addEventListener('click', cancelTeamDisplayNameModal);
+$('btn-team-display-name-cancel').addEventListener('click', cancelTeamDisplayNameModal);
+$('team-display-name-modal-overlay').addEventListener('click', cancelTeamDisplayNameModal);
+$('btn-team-display-name-save').addEventListener('click', confirmTeamDisplayNameModal);
+$('input-team-display-name-modal').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('btn-team-display-name-save').click();
+});
+
 // ====== Save the consolidated card ======
 // Reauth already happened up front, when Edit was clicked (see
 // handleAccountCardEditClick()) — Save just applies whatever changed, in
@@ -1303,59 +1426,42 @@ async function signOut() {
   }
 }
 
-$('btn-sign-out').addEventListener('click', signOut);
-$('btn-main-sign-out').addEventListener('click', signOut);
-
-// ====== My Account tab: list of every team this user currently belongs to.
-// Read-only summary (name + role) — distinct from the My Team tab's switcher
-// dropdown (select-active-team, members.js), which actually changes the
-// active team. Reads myTeams directly, same as renderTeamSwitcher(), so it
-// always reflects whatever's current whenever called. ======
-function renderAccountTeamsList() {
-  const container = document.getElementById('account-teams-list');
-  const status = document.getElementById('account-teams-status');
-  if (!container || !status) return;
-
-  const teams = (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) ? myTeams : [];
-  container.innerHTML = '';
-
-  if (teams.length === 0) {
-    status.textContent = "You're not currently on any team.";
+// Confirm before actually signing out — same shared confirm-modal pattern
+// used for Leave Team/Delete Account, so an accidental click doesn't
+// immediately end the session. Scoped to the two visible "Sign Out" buttons
+// (screen-team and the dashboard); the verify-email screen's "Use a
+// different account" button is a different, lower-stakes action and isn't
+// part of this.
+function confirmSignOut() {
+  if (typeof showConfirmModal !== 'function') {
+    signOut();
     return;
   }
-
-  status.textContent = `${teams.length} team(s)`;
-
-  teams.forEach(t => {
-    const isCaptain = !!(currentUser && t.roles && t.roles[currentUser.uid] === 'captain');
-
-    const item = document.createElement('div');
-    item.className = 'team-item';
-
-    const nameEl = document.createElement('div');
-    nameEl.style.cssText = 'font-weight:600; font-size:0.9rem';
-    nameEl.textContent = t.name || 'Unnamed team';
-    item.appendChild(nameEl);
-
-    const badge = document.createElement('span');
-    badge.className = isCaptain ? 'member-role-badge' : 'member-role-badge member';
-    badge.textContent = isCaptain ? 'Captain' : 'Member';
-    item.appendChild(badge);
-
-    container.appendChild(item);
+  showConfirmModal({
+    title: 'Sign Out?',
+    message: 'Are you sure you want to sign out?',
+    confirmLabel: 'Sign Out',
+    danger: true,
+    onConfirm: () => signOut()
   });
 }
 
-// ====== My Account tab: per-team display names ======
-// Independent of the account-level display name in the consolidated card
-// above — lets the user set a DIFFERENT name shown to just one team's
-// members (member list, scouting entry attribution), stored at
-// teams/{teamId}/memberDisplayNames/{uid}. Reads every team's current value
-// fresh each time this renders (no cross-team cache needed — this list is
-// small, and it's not read anywhere near as often as fetchMemberInfo()).
-async function renderPerTeamDisplayNames() {
-  const container = document.getElementById('account-per-team-names-list');
-  const status = document.getElementById('account-per-team-names-status');
+$('btn-sign-out').addEventListener('click', confirmSignOut);
+$('btn-main-sign-out').addEventListener('click', confirmSignOut);
+
+// ====== My Account tab: list of every team this user currently belongs to,
+// each with an inline (optional) per-team display-name override — merged
+// into one section rather than two disconnected ones, since it's the same
+// underlying "your teams" data either way. Distinct from the My Team tab's
+// switcher dropdown (select-active-team, members.js), which actually changes
+// the active team. Reads myTeams directly, same as renderTeamSwitcher(), so
+// it always reflects whatever's current whenever called. The per-team-name
+// write path (savePerTeamDisplayName()) is shared with
+// openTeamDisplayNameModal()'s popup below — same Firestore doc, two entry
+// points into it. ======
+function renderAccountTeamsList() {
+  const container = document.getElementById('account-teams-list');
+  const status = document.getElementById('account-teams-status');
   if (!container || !status || !currentUser) return;
 
   const teams = (typeof myTeams !== 'undefined' && Array.isArray(myTeams)) ? myTeams : [];
@@ -1366,67 +1472,75 @@ async function renderPerTeamDisplayNames() {
     return;
   }
 
-  status.textContent = '';
+  status.textContent = `${teams.length} team(s)`;
   const uid = currentUser.uid;
 
-  const rows = teams.map(t => {
-    const row = document.createElement('div');
-    row.style.cssText = 'display:flex; gap:8px; align-items:flex-start; margin-bottom:12px';
+  teams.forEach(t => {
+    const isCaptain = !!(t.roles && t.roles[uid] === 'captain');
 
-    const labelWrap = document.createElement('div');
-    labelWrap.style.cssText = 'flex:1; min-width:0';
+    const item = document.createElement('div');
+    item.className = 'team-item';
+    item.style.cssText = 'flex-direction:column; align-items:stretch; gap:8px';
 
-    const label = document.createElement('div');
-    label.style.cssText = 'font-size:0.8rem; color:var(--text-muted); margin-bottom:4px';
-    label.textContent = t.name || 'Unnamed team';
-    labelWrap.appendChild(label);
+    const topRow = document.createElement('div');
+    topRow.style.cssText = 'display:flex; align-items:center; justify-content:space-between';
+    const nameEl = document.createElement('div');
+    nameEl.style.cssText = 'font-weight:600; font-size:0.9rem';
+    nameEl.textContent = t.name || 'Unnamed team';
+    topRow.appendChild(nameEl);
+    const badge = document.createElement('span');
+    badge.className = isCaptain ? 'member-role-badge' : 'member-role-badge member';
+    badge.textContent = isCaptain ? 'Captain' : 'Member';
+    topRow.appendChild(badge);
+    item.appendChild(topRow);
 
+    const nameRow = document.createElement('div');
+    nameRow.style.cssText = 'display:flex; gap:8px; align-items:flex-start';
     const input = document.createElement('input');
     input.type = 'text';
     input.maxLength = 40;
-    input.placeholder = 'Same as account name';
-    input.style.marginBottom = '0';
-    labelWrap.appendChild(input);
-
-    const rowStatus = document.createElement('p');
-    rowStatus.className = 'help-text';
-    rowStatus.style.cssText = 'font-size:0.75rem; margin-top:4px; margin-bottom:0';
-    labelWrap.appendChild(rowStatus);
-
+    input.placeholder = 'Display name for this team (same as account name)';
+    input.style.cssText = 'margin-bottom:0; font-size:0.85rem';
     const saveBtn = document.createElement('button');
-    saveBtn.className = 'btn btn-small btn-primary';
+    saveBtn.className = 'btn btn-small btn-outline';
     saveBtn.textContent = 'Save';
     saveBtn.style.cssText = 'width:auto; white-space:nowrap; flex-shrink:0';
+    const rowStatus = document.createElement('p');
+    rowStatus.className = 'help-text';
+    rowStatus.style.cssText = 'font-size:0.7rem; margin:0';
     saveBtn.addEventListener('click', () => savePerTeamDisplayName(t.id, input, rowStatus));
+    nameRow.appendChild(input);
+    nameRow.appendChild(saveBtn);
+    item.appendChild(nameRow);
+    item.appendChild(rowStatus);
 
-    row.appendChild(labelWrap);
-    row.appendChild(saveBtn);
-    container.appendChild(row);
+    container.appendChild(item);
 
-    return { teamId: t.id, input };
-  });
-
-  // Populate each row's current value independently, same "resolve then
-  // patch" pattern as fetchMemberInfo()'s callers — a slow team doesn't hold
-  // up the rest of the list.
-  rows.forEach(({ teamId, input }) => {
-    db.collection('teams').doc(teamId).collection('memberDisplayNames').doc(uid).get()
+    // Populate this row's current override independently — a slow team
+    // doesn't hold up the rest of the list, same "resolve then patch"
+    // pattern as fetchMemberInfo()'s callers.
+    db.collection('teams').doc(t.id).collection('memberDisplayNames').doc(uid).get()
       .then(doc => {
         if (doc.exists && doc.data().displayName) input.value = doc.data().displayName;
       })
       .catch(err => {
-        // Same "expected removal signal" reasoning as loadTeamMembers()'s
-        // own-override read (members.js) and watchMyTeams()'s listener
-        // (both this file) — a permission-denied for a team no longer in
-        // myTeams almost always means this read raced a leave/kick that's
-        // already been handled elsewhere, not a genuine problem.
-        const stillMember = typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.some(t => t.id === teamId);
+        // Same "expected removal signal" reasoning as loadTeamMembers()'s own-
+        // override read (members.js) and watchMyTeams()'s listener (auth.js) —
+        // a permission-denied for a team no longer in myTeams almost always
+        // means this read raced a leave/kick that's already been handled
+        // elsewhere, not a genuine problem.
+        const stillMember = typeof myTeams !== 'undefined' && Array.isArray(myTeams) && myTeams.some(mt => mt.id === t.id);
         if (err.code === 'permission-denied' && !stillMember) return;
-        console.warn(`Failed to load per-team display name for team ${teamId}:`, err);
+        console.warn(`Failed to load per-team display name for team ${t.id}:`, err);
       });
   });
 }
 
+// ====== My Account tab: per-team display names ======
+// Write path for a per-team display-name override (independent of the
+// account-level name in the consolidated card above) — shared by the merged
+// "YOUR TEAMS" rows (renderAccountTeamsList() above) and
+// openTeamDisplayNameModal()'s popup below.
 async function savePerTeamDisplayName(teamId, input, statusEl) {
   if (!currentUser) return;
   const name = input.value.trim();
@@ -1477,7 +1591,6 @@ function openStandaloneMyAccount() {
   if (typeof activateDashboardTab === 'function') activateDashboardTab('account');
   renderAccountInfo();
   renderAccountTeamsList();
-  if (typeof renderPerTeamDisplayNames === 'function') renderPerTeamDisplayNames();
   const backBtn = document.getElementById('btn-my-account-standalone-back');
   if (backBtn) backBtn.classList.remove('hidden');
 }
@@ -1552,21 +1665,23 @@ async function handleAuthenticatedUser(user) {
       showNoticeModal({ title: 'Removed from Team', message });
     };
 
-    if (teams.length > 0) {
-      // Existing users who haven't explicitly confirmed a display name yet must
-      // do so before reaching the dashboard — same blocking pattern as the
-      // email-verification gate above. This also catches an auto-filled Google
-      // name the user never actually chose, not just a genuinely blank one.
-      // Brand-new users without a team yet are prompted inline on the create/join
-      // screen instead (see the branch below), not here.
-      if (!currentUserProfile || !currentUserProfile.displayNameConfirmed) {
-        hideLoading();
-        const nameInput = document.getElementById('input-set-display-name');
-        if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
-        showScreen('screen-set-display-name');
-        return;
-      }
+    // Any user (brand-new signup with zero teams, or an existing member) who
+    // hasn't explicitly confirmed an account-level display name yet must do
+    // so before reaching either the dashboard or the create/join-team screen
+    // — same blocking pattern as the email-verification gate above. This also
+    // catches an auto-filled Google name the user never actually chose, not
+    // just a genuinely blank one. Once confirmed here, a *per-team* name
+    // (defaulting to this one) is offered separately at join/create time —
+    // see openTeamDisplayNameModal() in team.js/members.js.
+    if (!currentUserProfile || !currentUserProfile.displayNameConfirmed) {
+      hideLoading();
+      const nameInput = document.getElementById('input-set-display-name');
+      if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
+      showScreen('screen-set-display-name');
+      return;
+    }
 
+    if (teams.length > 0) {
       // Keep this user's per-team email copy fresh for EVERY team they
       // belong to, not just whichever one is shown below — a captain on a
       // different team than the one displayed here still needs to see an
@@ -1583,7 +1698,6 @@ async function handleAuthenticatedUser(user) {
       myTeams = teams;
       if (typeof watchMyTeams === 'function') watchMyTeams();
       if (typeof renderAccountTeamsList === 'function') renderAccountTeamsList();
-      if (typeof renderPerTeamDisplayNames === 'function') renderPerTeamDisplayNames();
 
       // Resolve which team is "active": whatever was last stored for this
       // uid, if it's still a team they belong to, else just the first one
@@ -1601,7 +1715,7 @@ async function handleAuthenticatedUser(user) {
         // Legacy backfill for teams created before joinCodes existed —
         // nothing in this render path depends on it, and it already
         // swallows its own errors — fire-and-forget.
-        ensureJoinCodeDoc(team.id, team.joinCode);
+        ensureJoinCodeDoc(team.id, team.joinCode, team.name);
       }
 
       $('main-team-name').textContent = team.name || 'Your Team';
@@ -1656,12 +1770,16 @@ async function handleAuthenticatedUser(user) {
     } else {
       hideLoading();
       clearErrors();
-      // Always shown — pre-filled with whatever name is already known (Google or
-      // a prior save), if any, but the user must still press Create/Join to
-      // proceed, so an unconfirmed auto-filled name is never used silently.
-      const nameInput = document.getElementById('input-screen-team-display-name');
-      if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
-      showScreen('screen-team');
+      // A refresh while viewing My Account with zero teams (openStandaloneMyAccount()
+      // above) must land back there, not on the Join/Create screen — the saved
+      // dashboardTab is the only signal of that, since this branch has no team
+      // to key a real per-team session entry off of.
+      const savedState = (typeof loadSessionState === 'function') ? loadSessionState() : null;
+      if (savedState && savedState.dashboardTab === 'account' && typeof openStandaloneMyAccount === 'function') {
+        openStandaloneMyAccount();
+      } else {
+        showScreen('screen-team');
+      }
       showRemovedTeamsNoticeIfAny();
     }
   } catch (err) {
@@ -1742,6 +1860,15 @@ function canUserEditTemplates() {
   return false;
 }
 
+// Also the single gate for every bulk/team-level delete surface in the app
+// (per-entry deletes, the Pit/Match/Team-Info bulk-select toolbars, and the
+// team-row combined-delete buttons) — canBulkDelete used to exist as a
+// separate flag for those, but it was UI-only (firestore.rules'
+// canEditOrDeleteEntry() only ever checked canEditOtherEntries) and every
+// call site already required both together, so it was retired as pure
+// redundancy. Existing team docs may still carry a stale
+// permissions[uid].canBulkDelete field from before the merge; it's simply
+// never read anymore, and doesn't need to be cleaned up.
 function canUserEditOtherEntries(entry) {
   if (!currentUser || !currentTeamData) return false;
   if (entry && entry.scoutedBy === currentUser.uid) return true;
@@ -1749,20 +1876,6 @@ function canUserEditOtherEntries(entry) {
   if (currentTeamData.permissions &&
       currentTeamData.permissions[currentUser.uid] &&
       currentTeamData.permissions[currentUser.uid].canEditOtherEntries === true) {
-    return true;
-  }
-  return false;
-}
-
-// UI-only gate for the bulk-select/delete toolbar — the underlying deletes still go
-// through canEditOrDeleteEntry() in firestore.rules, which only cares about
-// canEditOtherEntries, so this has no rules-side counterpart.
-function canUserBulkDelete() {
-  if (!currentUser || !currentTeamData) return false;
-  if (getCurrentUserRole() === 'captain') return true;
-  if (currentTeamData.permissions &&
-      currentTeamData.permissions[currentUser.uid] &&
-      currentTeamData.permissions[currentUser.uid].canBulkDelete === true) {
     return true;
   }
   return false;
@@ -2039,9 +2152,6 @@ function watchMyTeams() {
       }
       if (typeof renderAccountTeamsList === 'function') {
         renderAccountTeamsList();
-      }
-      if (typeof renderPerTeamDisplayNames === 'function') {
-        renderPerTeamDisplayNames();
       }
     }, (err) => {
       console.warn(`myTeams listener error for team ${teamId}:`, err);

@@ -5,14 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <meta name="theme-color" content="#1a1a2e" />
   <meta name="description" content="Fe2O3 FTC Scouting App" />
-  <link rel="manifest" href="manifest.json" />
-  <link rel="apple-touch-icon" href="icons/icon-192.svg" />
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
   <title>Fe2O3 Scouting</title>
-  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="/css/style.css" />
 </head>
 <body>
+  <header class="site-header">
+    <a href="/" class="site-logo">
+      <span class="site-logo-mark">Fe₂O₃</span>
+      <span class="site-logo-text">Scouting</span>
+    </a>
+  </header>
+
   <!-- ====== SCREEN: Login ====== -->
-  <section id="screen-login" class="screen active">
+  <section id="screen-login" class="screen screen--narrow active">
     <div class="card login-card">
       <div class="logo">
         <h1>Fe₂O₃</h1>
@@ -65,7 +72,7 @@
   </section>
 
   <!-- ====== SCREEN: Email Verification (interstitial) ====== -->
-  <section id="screen-verify-email" class="screen">
+  <section id="screen-verify-email" class="screen screen--narrow">
     <div class="card" style="text-align:center">
       <div class="logo">
         <h1 style="font-size:3rem; margin-bottom:8px">📧</h1>
@@ -84,14 +91,18 @@
   </section>
 
   <!-- ====== SCREEN: Set Display Name (interstitial for existing users with a blank name) ====== -->
-  <section id="screen-set-display-name" class="screen">
+  <section id="screen-set-display-name" class="screen screen--narrow">
     <div class="card" style="text-align:center">
       <div class="logo">
         <h1 style="font-size:3rem; margin-bottom:8px">👋</h1>
         <p class="subtitle" style="margin-bottom:16px">Set your display name</p>
       </div>
       <p class="help-text" style="margin-bottom:16px">
-        Choose a name your teammates will see on the member list and your scouting entries.
+        This is your ACCOUNT name — not an official or legal name, a nickname
+        or anything else is fine. It's just the default name shown to a team
+        when you join or create it; you can always set a different name for
+        any specific team, either right when you join/create it or later from
+        the Account tab.
       </p>
       <input type="text" id="input-set-display-name" placeholder="e.g. Alex P." maxlength="40" />
       <button id="btn-set-display-name-continue" class="btn btn-primary" style="margin-top:8px">Continue</button>
@@ -100,7 +111,7 @@
   </section>
 
   <!-- ====== SCREEN: Forgot Password (enter email to get reset link) ====== -->
-  <section id="screen-forgot-password" class="screen">
+  <section id="screen-forgot-password" class="screen screen--narrow">
     <div class="card" style="text-align:center">
       <div class="logo">
         <p class="subtitle" style="margin-bottom:16px">Reset your password</p>
@@ -115,7 +126,7 @@
   </section>
 
   <!-- ====== SCREEN: Set New Password (from reset link oobCode) ====== -->
-  <section id="screen-set-password" class="screen">
+  <section id="screen-set-password" class="screen screen--narrow">
     <div class="card" style="text-align:center">
       <div class="logo">
         <p class="subtitle" style="margin-bottom:16px">Create a new password</p>
@@ -136,7 +147,7 @@
   </section>
 
   <!-- ====== SCREEN: Team Join / Create ====== -->
-  <section id="screen-team" class="screen">
+  <section id="screen-team" class="screen screen--narrow">
     <div class="card">
       <h2>Join or Create a Team</h2>
       <div class="user-info" id="user-info">
@@ -144,13 +155,6 @@
         <span id="user-name"></span>
         <button id="btn-open-my-account-standalone" class="btn btn-small btn-outline">My Account</button>
         <button id="btn-sign-out" class="btn btn-small btn-outline">Sign Out</button>
-      </div>
-
-      <!-- Always shown — pre-filled with any known name, but must be confirmed via Create/Join -->
-      <div id="screen-team-display-name-section" style="margin-bottom:20px; padding-bottom:20px; border-bottom:1px solid var(--border)">
-        <label for="input-screen-team-display-name" class="help-text" style="margin-bottom:4px; display:block">Your Display Name</label>
-        <p class="help-text" style="margin-bottom:8px">Teammates will see this on the member list and your scouting entries.</p>
-        <input type="text" id="input-screen-team-display-name" placeholder="e.g. Alex P." maxlength="40" />
       </div>
 
       <div class="tabs">
@@ -186,7 +190,7 @@
 
   <!-- ====== SCREEN: Main App / Dashboard ====== -->
   <section id="screen-main" class="screen">
-    <div class="card dashboard-card">
+    <div class="page-shell">
       <!-- Dashboard header with team name + sign out -->
       <div id="dashboard-header">
         <div id="dashboard-team-info">
@@ -250,11 +254,18 @@
             <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (INFO)</h3>
             <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
               <input type="text" id="input-team-search-info" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
-              <select id="select-team-sort-info" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
+              <select id="select-team-sort-info" class="awards-season-select team-list-filter-control" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
                 <option value="number">Sort: Number (low-high)</option>
                 <option value="name">Sort: Name (A-Z)</option>
                 <option value="opr">Sort: OPR (high-low)</option>
+                <option value="scouted">Sort: Scouted Status</option>
               </select>
+              <button id="btn-team-sort-direction-info" type="button" class="btn btn-small btn-outline team-list-filter-control" style="flex-shrink:0; width:auto; padding:4px 10px;" title="Default sort direction — click to reverse">↑</button>
+            </div>
+            <div id="info-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+              <button id="btn-info-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
+              <button id="btn-info-bulk-delete" class="btn btn-small hidden" style="background:var(--error); color:#fff; border-color:var(--error);">Delete Selected (0)</button>
+              <span id="info-bulk-delete-status" style="font-size:0.8rem;"></span>
             </div>
             <p class="help-text" id="team-list-status-info">Select an event above to load teams.</p>
             <div id="team-list-info" class="team-list"></div>
@@ -283,11 +294,13 @@
               <p id="event-export-match-success" class="success-message"></p>
               <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
                 <input type="text" id="input-team-search-match" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
-                <select id="select-team-sort-match" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
+                <select id="select-team-sort-match" class="awards-season-select team-list-filter-control" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
                   <option value="number">Sort: Number (low-high)</option>
                   <option value="name">Sort: Name (A-Z)</option>
                   <option value="opr">Sort: OPR (high-low)</option>
+                  <option value="scouted">Sort: Scouted Status</option>
                 </select>
+                <button id="btn-team-sort-direction-match" type="button" class="btn btn-small btn-outline team-list-filter-control" style="flex-shrink:0; width:auto; padding:4px 10px;" title="Default sort direction — click to reverse">↑</button>
               </div>
               <div id="match-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
                 <button id="btn-match-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
@@ -300,6 +313,14 @@
 
             <!-- ====== MATCH-BASED VIEW (new) ====== -->
             <div id="match-schedule-view" class="hidden">
+              <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
+                <input type="text" id="input-match-schedule-search" placeholder="Filter by team number/name or match number..." autocomplete="off" style="flex:1; min-width:200px;" />
+                <select id="select-match-schedule-search-mode" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
+                  <option value="both" selected>Search: Match or Team Name/Number</option>
+                  <option value="match">Search: Match Number</option>
+                  <option value="team">Search: Team Name/Number</option>
+                </select>
+              </div>
               <p class="help-text" id="match-schedule-status"></p>
               <div id="match-schedule-list" class="match-schedule-list"></div>
             </div>
@@ -316,11 +337,13 @@
             <p id="event-export-pit-success" class="success-message"></p>
             <div style="margin-bottom:10px; display:flex; gap:8px; flex-wrap:wrap;">
               <input type="text" id="input-team-search-pit" placeholder="Filter teams by number or name..." autocomplete="off" style="flex:1; min-width:200px;" />
-              <select id="select-team-sort-pit" class="awards-season-select" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
+              <select id="select-team-sort-pit" class="awards-season-select team-list-filter-control" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px;">
                 <option value="number">Sort: Number (low-high)</option>
                 <option value="name">Sort: Name (A-Z)</option>
                 <option value="opr">Sort: OPR (high-low)</option>
+                <option value="scouted">Sort: Scouted Status</option>
               </select>
+              <button id="btn-team-sort-direction-pit" type="button" class="btn btn-small btn-outline team-list-filter-control" style="flex-shrink:0; width:auto; padding:4px 10px;" title="Default sort direction — click to reverse">↑</button>
             </div>
             <div id="pit-bulk-delete-bar" style="display:flex; gap:8px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
               <button id="btn-pit-bulk-select-toggle" class="btn btn-small btn-outline hidden">Select</button>
@@ -360,24 +383,26 @@
           </div>
         </div>
 
-        <!-- Join another team -->
+        <!-- Join or create another team — two related options in one
+             section (both keep your membership on your other team(s) too),
+             rather than two separate bordered blocks for what's really one
+             choice. Reuses the existing .divider "or" pattern from the login
+             screen rather than a new style. -->
         <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
-          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">JOIN ANOTHER TEAM</h3>
-          <p class="help-text" style="margin-bottom:12px">Enter a join code to join an additional team — you'll keep your membership on your other team(s) too.</p>
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">JOIN OR CREATE ANOTHER TEAM</h3>
+          <p class="help-text" style="margin-bottom:12px">You'll keep your membership on your other team(s) too.</p>
+
           <div style="display:flex; gap:8px; align-items:flex-start">
-            <input type="text" id="input-join-another-team-code" placeholder="e.g. FE2O3-AB12" maxlength="20" style="margin-bottom:0; text-transform:uppercase" />
+            <input type="text" id="input-join-another-team-code" placeholder="Join code, e.g. FE2O3-AB12" maxlength="20" style="margin-bottom:0; text-transform:uppercase" />
             <button id="btn-join-another-team" class="btn btn-primary" style="width:auto; white-space:nowrap">Join</button>
           </div>
           <p id="join-another-team-error" class="error-message"></p>
           <p id="join-another-team-success" class="success-message"></p>
-        </div>
 
-        <!-- Create a new team -->
-        <div style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px">
-          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">CREATE A NEW TEAM</h3>
-          <p class="help-text" style="margin-bottom:12px">Start a brand-new team — you'll be its captain, and you'll keep your membership on your other team(s) too.</p>
+          <div class="divider" style="margin:8px 0"><span>or</span></div>
+
           <div style="display:flex; gap:8px; align-items:flex-start">
-            <input type="text" id="input-create-another-team-name" placeholder="Team name" maxlength="60" style="margin-bottom:0" />
+            <input type="text" id="input-create-another-team-name" placeholder="New team name" maxlength="60" style="margin-bottom:0" />
             <button id="btn-create-another-team" class="btn btn-primary" style="width:auto; white-space:nowrap">Create</button>
           </div>
           <p id="create-another-team-error" class="error-message"></p>
@@ -501,21 +526,15 @@
              left intact for when this is revisited, just unreachable with no
              button pointing to them. -->
 
-        <!-- Your teams -->
+        <!-- Your teams — each row also carries an inline, optional per-team
+             display-name override (teams/{teamId}/memberDisplayNames/{uid}),
+             merged in here rather than living in its own separate section;
+             see renderAccountTeamsList() in js/auth.js. -->
         <div class="account-section-card">
           <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">YOUR TEAMS</h3>
+          <p class="help-text" style="margin-bottom:12px">Each team's display-name field is optional — leave it blank to use your account name above.</p>
           <div id="account-teams-list"></div>
           <p id="account-teams-status" class="help-text"></p>
-        </div>
-
-        <!-- Per-team display names — independent of the account-level name
-             in the card above; each team shows this override (if set) to
-             that team's other members instead. -->
-        <div class="account-section-card">
-          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">PER-TEAM DISPLAY NAMES</h3>
-          <p class="help-text" style="margin-bottom:12px">Override your name on a specific team — otherwise your account name above is shown there.</p>
-          <div id="account-per-team-names-list"></div>
-          <p id="account-per-team-names-status" class="help-text"></p>
         </div>
 
         <!-- Delete account -->
@@ -580,7 +599,7 @@
   <!-- ====== Team Detail Modal (Team Information tab) ====== -->
   <div id="team-detail-modal" class="modal-overlay hidden">
     <div id="team-detail-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:600px">
+    <div class="modal-card modal-card--lg">
       <div class="modal-header">
         <h3 id="team-detail-modal-title">Team Detail</h3>
         <button id="btn-team-detail-close" class="btn-modal-close">&times;</button>
@@ -646,7 +665,7 @@
        just this panel, with no team profile/awards/pit sections. ====== -->
   <div id="match-scouted-modal" class="modal-overlay hidden">
     <div id="match-scouted-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:600px">
+    <div class="modal-card modal-card--lg">
       <div class="modal-header">
         <h3 id="match-scouted-modal-title">Matches Scouted</h3>
         <button id="btn-match-scouted-close" class="btn-modal-close">&times;</button>
@@ -674,7 +693,7 @@
   <!-- ====== Form Builder Modal (Captain only) ====== -->
   <div id="builder-modal" class="modal-overlay hidden">
     <div id="builder-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:560px">
+    <div class="modal-card modal-card--lg">
       <div class="modal-header">
         <h3 id="builder-modal-title">Form Builder</h3>
         <button id="btn-builder-close" class="btn-modal-close">&times;</button>
@@ -699,7 +718,7 @@
   <!-- ====== Field Editor Sub-Modal (inside builder) ====== -->
   <div id="field-editor-modal" class="modal-overlay hidden">
     <div id="field-editor-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:480px">
+    <div class="modal-card">
       <div class="modal-header">
         <h3 id="field-editor-title">Edit Field</h3>
         <button id="btn-bld-cancel" class="btn-modal-close">&times;</button>
@@ -781,7 +800,7 @@
   <!-- Edit Member Permissions Modal -->
   <div id="member-permissions-modal" class="modal-overlay hidden">
     <div id="member-permissions-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:420px">
+    <div class="modal-card modal-card--md">
       <div class="modal-header">
         <h3 id="member-permissions-title">Edit Permissions</h3>
         <button id="btn-member-perms-cancel" class="btn-modal-close">&times;</button>
@@ -793,11 +812,7 @@
         </div>
         <div class="pit-field" style="display:flex; align-items:center; gap:8px">
           <input type="checkbox" id="perm-canEditOtherEntries" style="width:auto; margin:0" />
-          <label for="perm-canEditOtherEntries" style="margin:0">Edit others' entries</label>
-        </div>
-        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
-          <input type="checkbox" id="perm-canBulkDelete" style="width:auto; margin:0" />
-          <label for="perm-canBulkDelete" style="margin:0">Bulk-delete entries</label>
+          <label for="perm-canEditOtherEntries" style="margin:0">Edit/delete others' entries (incl. bulk &amp; team deletes)</label>
         </div>
         <div class="pit-field" style="display:flex; align-items:center; gap:8px">
           <input type="checkbox" id="perm-canPinEvents" style="width:auto; margin:0" />
@@ -830,7 +845,7 @@
        no modal needed — see js/auth.js's handleAccountCardEditClick()). -->
   <div id="account-reauth-modal" class="modal-overlay hidden">
     <div id="account-reauth-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:380px">
+    <div class="modal-card modal-card--sm">
       <div class="modal-header">
         <h3>Confirm It's You</h3>
         <button id="btn-account-reauth-close" class="btn-modal-close">&times;</button>
@@ -853,6 +868,37 @@
     </div>
   </div>
 
+  <!-- Team Display Name popup — a REQUIRED confirmation step before joining
+       or creating a team (the very first team AND any additional team), not
+       just optional post-join customization: the actual join/create write
+       doesn't happen until this is confirmed (see openTeamDisplayNameModal()
+       in js/auth.js). Closing it (X, overlay click, or Cancel) aborts the
+       join/create entirely — nothing is written. Pre-filled with the
+       account-level name from screen-set-display-name; only stored as a
+       per-team override (teams/{teamId}/memberDisplayNames/{uid}) if the
+       user actually changes it. -->
+  <div id="team-display-name-modal" class="modal-overlay hidden">
+    <div id="team-display-name-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--sm">
+      <div class="modal-header">
+        <h3>Your Name on <span id="team-display-name-modal-team"></span></h3>
+        <button id="btn-team-display-name-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <p class="help-text" style="margin-bottom:12px">This is what teammates on this team will see — defaults to your account name, but you can use something different just for this team.</p>
+        <div class="pit-field">
+          <label for="input-team-display-name-modal">Display Name for This Team</label>
+          <input type="text" id="input-team-display-name-modal" maxlength="40" />
+        </div>
+        <p id="team-display-name-modal-error" class="error-message"></p>
+        <div class="pit-modal-actions" style="margin-top:12px">
+          <button type="button" id="btn-team-display-name-cancel" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-team-display-name-save" class="btn btn-primary">Continue</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Switch to Email + Password Login — step 2 (set a password), reached
        after the confirmation step (a generic showConfirmModal() call) from
        the Account tab's "Switch to Email + Password Login" button. Keeps the
@@ -860,7 +906,7 @@
        here, see js/auth.js's convertGoogleAccountToPassword(). -->
   <div id="google-convert-modal" class="modal-overlay hidden">
     <div id="google-convert-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:400px">
+    <div class="modal-card modal-card--md">
       <div class="modal-header">
         <h3>Set a Password</h3>
         <button id="btn-google-convert-close" class="btn-modal-close">&times;</button>
@@ -894,7 +940,7 @@
   <!-- Delete Account Modal (My Account tab) -->
   <div id="delete-account-modal" class="modal-overlay hidden">
     <div id="delete-account-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:420px">
+    <div class="modal-card modal-card--md">
       <div class="modal-header">
         <h3>Delete Account</h3>
         <button id="btn-delete-account-close" class="btn-modal-close">&times;</button>
@@ -955,7 +1001,7 @@
   <!-- Export Choice Modal (Excel download vs Google Sheets) -->
   <div id="export-choice-modal" class="modal-overlay hidden">
     <div id="export-choice-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:360px">
+    <div class="modal-card modal-card--sm">
       <div class="modal-header">
         <h3 id="export-choice-title">Export Pit + Match Data</h3>
         <button id="btn-export-choice-close" class="btn-modal-close">&times;</button>
@@ -974,7 +1020,7 @@
        unaffected by this modal. -->
   <div id="leave-team-confirm-modal" class="modal-overlay hidden">
     <div id="leave-team-confirm-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:400px">
+    <div class="modal-card modal-card--md">
       <div class="modal-header">
         <h3>Leave Team?</h3>
         <button id="btn-leave-team-confirm-close" class="btn-modal-close">&times;</button>
@@ -997,7 +1043,7 @@
        markup itself has no action-specific text baked in. -->
   <div id="generic-confirm-modal" class="modal-overlay hidden">
     <div id="generic-confirm-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:400px">
+    <div class="modal-card modal-card--md">
       <div class="modal-header">
         <h3 id="generic-confirm-title">Confirm</h3>
         <button id="btn-generic-confirm-close" class="btn-modal-close">&times;</button>
@@ -1017,7 +1063,7 @@
        from refreshActiveTeamData() same as every other live-permission UI). -->
   <div id="my-permissions-modal" class="modal-overlay hidden">
     <div id="my-permissions-modal-overlay" class="modal-overlay-bg"></div>
-    <div class="modal-card" style="max-width:380px">
+    <div class="modal-card modal-card--sm">
       <div class="modal-header">
         <h3>My Permissions</h3>
         <button id="btn-my-permissions-close" class="btn-modal-close">&times;</button>
@@ -1035,6 +1081,11 @@
     <p id="loading-text">Loading...</p>
   </div>
 
+  <footer class="site-footer">
+    <p>&copy; <span id="site-footer-year">2026</span> Fe2O3 Scouting &middot; <a href="/privacy.html">Privacy Policy</a> &middot; <a href="https://www.fe21865.com" target="_blank" rel="noopener">Made by Fe2O3</a></p>
+  </footer>
+  <script>document.getElementById('site-footer-year').textContent = new Date().getFullYear();</script>
+
   <!-- Firebase App (compat) -->
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
@@ -1045,23 +1096,23 @@
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <!-- JSZip (bundles one .xlsx per event into a single ZIP — "Export Whole Team Data") -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-  <script src="js/firebase-config.js"></script>
-  <script src="js/auth.js"></script>
-  <script src="js/team.js"></script>
-  <script src="js/members.js"></script>
-  <script src="js/first-api.js"></script>
-  <script src="js/session-state.js"></script>
-  <script src="js/pinned-events.js"></script>
-  <script src="js/ftcscout.js"></script>
-  <script src="js/dynamic-form.js"></script>
-  <script src="js/pit-scout.js"></script>
-  <script src="js/match-scout.js"></script>
-  <script src="js/match-schedule-view.js"></script>
-  <script src="js/team-info.js"></script>
-  <script src="js/match-scouted-modal.js"></script>
-  <script src="js/form-builder.js"></script>
-  <script src="js/app.js"></script>
-  <script src="js/sheets-export.js"></script>
-  <script src="js/delete-account.js"></script>
+  <script src="/js/firebase-config.js"></script>
+  <script src="/js/auth.js"></script>
+  <script src="/js/team.js"></script>
+  <script src="/js/members.js"></script>
+  <script src="/js/first-api.js"></script>
+  <script src="/js/session-state.js"></script>
+  <script src="/js/pinned-events.js"></script>
+  <script src="/js/ftcscout.js"></script>
+  <script src="/js/dynamic-form.js"></script>
+  <script src="/js/pit-scout.js"></script>
+  <script src="/js/match-scout.js"></script>
+  <script src="/js/match-schedule-view.js"></script>
+  <script src="/js/team-info.js"></script>
+  <script src="/js/match-scouted-modal.js"></script>
+  <script src="/js/form-builder.js"></script>
+  <script src="/js/app.js"></script>
+  <script src="/js/sheets-export.js"></script>
+  <script src="/js/delete-account.js"></script>
 </body>
 </html>

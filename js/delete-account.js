@@ -365,7 +365,7 @@ async function deleteEntireTeam(teamId, uid, teamData) {
   await db.collection('teams').doc(teamId).delete();
 }
 
-function confirmDeleteAccount() {
+async function confirmDeleteAccount() {
   const errorEl = document.getElementById('delete-account-error');
   const successEl = document.getElementById('delete-account-success');
   errorEl.textContent = '';
@@ -376,55 +376,58 @@ function confirmDeleteAccount() {
     return;
   }
 
+  const hasPasswordProvider = !!(currentUser.providerData &&
+    currentUser.providerData.some(p => p.providerId === 'password'));
+
+  // Reauth FIRST, before showing the "are you sure" confirmation below — a
+  // wrong password (or a cancelled/failed Google popup) now fails right
+  // here, immediately, instead of only surfacing after the user has already
+  // clicked through a confirmation for a deletion that a bad credential was
+  // never going to allow anyway.
+  showLoading('Verifying your identity...');
+  try {
+    if (hasPasswordProvider) {
+      const currentPassword = document.getElementById('input-delete-account-password').value;
+      if (!currentPassword) {
+        hideLoading();
+        errorEl.textContent = 'Please enter your current password.';
+        return;
+      }
+      const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, currentPassword);
+      await currentUser.reauthenticateWithCredential(cred);
+    } else {
+      // Google-only accounts have no password — reauthenticate with the same
+      // provider/popup flow used for Google sign-in.
+      const provider = new firebase.auth.GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      await currentUser.reauthenticateWithPopup(provider);
+    }
+  } catch (err) {
+    hideLoading();
+    console.error('Delete account reauth error:', err);
+    if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/popup-blocked') {
+      errorEl.textContent = friendlyAuthError(err.code);
+    } else if (hasPasswordProvider) {
+      errorEl.textContent = 'Incorrect password. Please try again.';
+    } else {
+      errorEl.textContent = 'Could not verify your identity. Please try again.';
+    }
+    return;
+  }
+  hideLoading();
+
   if (typeof showConfirmModal !== 'function') return;
   // Stacks above delete-account-modal (see #generic-confirm-modal's z-index
   // in style.css) rather than closing it first — same nested-modal pattern
   // as the export-choice modal opening on top of Leave Team's confirmation.
-  // Everything after the original confirm() line moves into onConfirm,
-  // including the password field read below, which still works fine since
-  // the modal underneath (and its DOM) never actually closes.
+  // Reauth already succeeded by this point, so onConfirm below goes
+  // straight into the actual deletion — no credentials left to check.
   showConfirmModal({
     title: 'Delete Account?',
     message: 'This will permanently delete your account. This cannot be undone. Continue?',
     confirmLabel: 'Delete Account',
     danger: true,
     onConfirm: async () => {
-      const hasPasswordProvider = !!(currentUser.providerData &&
-        currentUser.providerData.some(p => p.providerId === 'password'));
-
-      // Reauth first, before any Firestore mutation, so a cancelled/failed reauth
-      // leaves nothing half-changed.
-      showLoading('Verifying your identity...');
-      try {
-        if (hasPasswordProvider) {
-          const currentPassword = document.getElementById('input-delete-account-password').value;
-          if (!currentPassword) {
-            hideLoading();
-            errorEl.textContent = 'Please enter your current password.';
-            return;
-          }
-          const cred = firebase.auth.EmailAuthProvider.credential(currentUser.email, currentPassword);
-          await currentUser.reauthenticateWithCredential(cred);
-        } else {
-          // Google-only accounts have no password — reauthenticate with the same
-          // provider/popup flow used for Google sign-in.
-          const provider = new firebase.auth.GoogleAuthProvider();
-          provider.setCustomParameters({ prompt: 'select_account' });
-          await currentUser.reauthenticateWithPopup(provider);
-        }
-      } catch (err) {
-        hideLoading();
-        console.error('Delete account reauth error:', err);
-        if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/popup-blocked') {
-          errorEl.textContent = friendlyAuthError(err.code);
-        } else if (hasPasswordProvider) {
-          errorEl.textContent = 'Incorrect password. Please try again.';
-        } else {
-          errorEl.textContent = 'Could not verify your identity. Please try again.';
-        }
-        return;
-      }
-
       const uid = currentUser.uid;
       // Every team this account belongs to, not just the active one — deleting
       // the account has to clean up all of them, or it'd leave the departed
@@ -446,6 +449,17 @@ function confirmDeleteAccount() {
         for (const team of teams) {
           const teamLabel = team.name || team.id;
           const isSoleMember = Array.isArray(team.members) && team.members.length === 1;
+
+          // watchMyTeams() (auth.js) still has a live per-team listener on
+          // EVERY one of these teams at this point — only the active team's
+          // watchTeamDoc() listener was stopped above. Without marking each
+          // one as an expected self-removal first, the membership-removing
+          // write below (deleteEntireTeam() or selfLeaveTeam()) can trigger
+          // that listener's permission-denied path and pop a bogus "Removed
+          // from Team" notice mid-deletion — this is a deliberate,
+          // self-initiated action, same category as an ordinary Leave Team,
+          // not a surprise removal. Same fix as performLeaveTeam() (members.js).
+          if (typeof markExpectedSelfRemoval === 'function') markExpectedSelfRemoval(team.id);
 
           if (isSoleMember) {
             // Last member — the whole team (and its data) goes with them, not

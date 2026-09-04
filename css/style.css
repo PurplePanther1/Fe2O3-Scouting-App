@@ -41,17 +41,91 @@ html, body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* ====== Screens ====== */
+/* Every page is a header/content/footer flex column so the footer sits at
+   the bottom even on short pages, and the active .screen (below) can fill
+   the remaining space via flex:1 instead of forcing its own 100vh. */
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+/* ====== Site-wide header/footer (persistent on every page) ====== */
+.site-header {
+  display: flex;
+  align-items: center;
+  padding: 16px 20px;
+  flex-shrink: 0;
+}
+
+.site-logo {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  text-decoration: none;
+}
+
+.site-logo-mark {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--primary);
+  letter-spacing: 1px;
+}
+
+.site-logo:hover .site-logo-mark {
+  color: var(--primary-hover);
+}
+
+.site-logo-text {
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.site-footer {
+  flex-shrink: 0;
+  text-align: center;
+  padding: 24px 20px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.site-footer a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.site-footer a:hover {
+  color: var(--primary-hover);
+  text-decoration: underline;
+}
+
+/* ====== Screens ======
+   Base .screen is a flex:1 child of body's column layout, filling whatever
+   space is left between the header and footer. Full-width screens (the
+   dashboard) lay their children out top-to-bottom via plain block flow;
+   .screen--narrow (short auth-flow forms: login, verify-email, etc.) opts
+   back into the old centered-card look, scoped to just those screens. */
 .screen {
   display: none;
-  min-height: 100vh;
+  flex: 1;
+  width: 100%;
   padding: 20px;
-  align-items: center;
-  justify-content: center;
 }
 
 .screen.active {
   display: flex;
+  flex-direction: column;
+}
+
+.screen--narrow.active {
+  align-items: center;
+  justify-content: center;
+}
+
+#screen-main.active {
+  display: block;
 }
 
 /* ====== Card ====== */
@@ -134,6 +208,15 @@ html, body {
 .btn-outline:hover {
   border-color: var(--text-muted);
   color: var(--text);
+}
+
+/* Sort-direction toggle button (Team Info/Pit/Match tabs) when flipped from
+   its default direction — same tint used elsewhere for an active/non-default
+   toggle state, so it reads as "on" at a glance. */
+.sort-direction-flipped {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
 }
 
 .btn-small {
@@ -306,6 +389,19 @@ input[type="password"]::placeholder {
   display: block;
 }
 
+/* Scouting sub-tabs (Team Information/Pit Scouting/Match Scouting/Pinned
+   Events) — deliberately NOT its own bounded/scrollable region. It used to
+   be (max-height:70vh; overflow-y:auto), which stacked a third scrollbar
+   between the page's own scroll and .team-list's (below): outer page scroll,
+   this wrapper's scroll, inner list scroll. Removed so this wrapper's
+   content just flows into the outer page scroll instead — .team-list's own
+   bounded scroll (max-height:400px) is still there and still the intended
+   inner scroll region. Since this element no longer has anything of its own
+   TO scroll, "reset this sub-tab's scroll position on switch" moved to the
+   page-level window.scrollTo(0,0) instead (see activateSubTab() in app.js) —
+   the same boundary activateDashboardTab() (members.js) already uses for
+   main-tab switches, rather than this element's now-meaningless scrollTop. */
+
 /* ====== Tabs ====== */
 .tabs {
   display: flex;
@@ -403,6 +499,30 @@ input[type="password"]::placeholder {
   font-size: 0.85rem;
   margin-top: 12px;
   min-height: 1.2em;
+}
+
+/* My Team tab: collapse reserved space for error/success lines when they
+   have nothing to show. Several sections end with one or two of these, and
+   reserving their height even while empty is what made the gap after
+   "Export Team Data" (two trailing lines) visibly bigger than the gap after
+   "Scouting Forms" (none), despite every section using the exact same
+   margin-top/padding-top/border-top. Scoped to this tab rather than
+   changing .error-message/.success-message everywhere — elsewhere that
+   reserved height is deliberately preventing layout shift right above a
+   button, which is still worth keeping. */
+#dtab-myteam .error-message:empty,
+#dtab-myteam .success-message:empty {
+  margin-top: 0;
+  min-height: 0;
+}
+
+/* Join/Create Another Team: both buttons share one width regardless of
+   their label length ("Join" vs "Create"), so the two rows — and the
+   divider between them — read as symmetric instead of the button (and the
+   input shrinking to make room for it) differing row to row. */
+#btn-join-another-team,
+#btn-create-another-team {
+  min-width: 100px;
 }
 
 /* ====== Loading Overlay ====== */
@@ -567,6 +687,25 @@ input[type="password"]::placeholder {
 .awards-season-select:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Scouting sub-tabs' filter/sort row (search input + sort dropdown +
+   reverse-direction button, Team Info/Pit/Match Team View) — the dropdown
+   and button used .awards-season-select's/.btn-small's own natural (much
+   shorter) height, visibly mismatched against input[type="text"]'s height
+   (12px vertical padding + 1rem font-size + border ≈ 50px) sitting right
+   next to them in the same flex row. Explicit height match rather than
+   relying on the row's default align-items:stretch, which only equalizes
+   items sharing the same flex LINE — these wrap onto their own line below
+   the search input on narrower widths, where stretch has nothing taller to
+   match against. Scoped to this one class (not .awards-season-select or
+   .btn-small themselves) so their other, correctly-shorter usages elsewhere
+   (e.g. the Team Detail popup's Awards season picker) are untouched. No
+   extra wrapper/fixed-height container involved, so the team list below
+   still just flows immediately after this row's own natural height — no
+   leftover gap to "reclaim". */
+.team-list-filter-control {
+  height: 50px;
 }
 
 /* Same visual language as .awards-season-select, sized up for a standalone,
@@ -758,6 +897,18 @@ input[type="password"]::placeholder {
   margin-bottom: 6px;
 }
 
+/* Bulk-select shift-click anchor marker — shows which checkbox the next
+   shift-click will range from. Not tied to :checked, since the anchor can
+   be either state; applied/removed by handleBulkRangeClick() and
+   markBulkAnchorCheckbox() (first-api.js), shared by all four bulk-select
+   surfaces (Team Information, Pit Scouting, Match Scouting, and the Team
+   Detail/Matches Scouted modals' match-entry lists). */
+.bulk-anchor-checkbox {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
 .team-item .team-number {
   font-weight: 700;
   font-size: 1rem;
@@ -776,8 +927,19 @@ input[type="password"]::placeholder {
 }
 
 /* ====== Match Schedule View (Match Scouting tab's match-based view) ====== */
+/* Bounded, independently-scrollable region — same pattern as .team-list
+   (Team Info/Pit/Match Team View) and .event-list (search results/Pinned
+   Events), so Match View's match list stops growing the outer page and gets
+   its own inner scrollbar instead, matching every other list in the
+   Scouting tab. Already covered by resetNestedScrollContainers()
+   (members.js) via its existing '.match-schedule-list' selector — no JS
+   change needed for it to participate in the sub-tab scroll-reset system;
+   that selector was written for exactly this list, it just had nothing to
+   reset until now. */
 .match-schedule-list {
   margin-top: 8px;
+  max-height: 400px;
+  overflow-y: auto;
 }
 
 .match-schedule-row {
@@ -994,6 +1156,17 @@ input[type="password"]::placeholder {
   z-index: 1;
   padding: 0;
 }
+
+/* Size variants, replacing what used to be one-off inline max-width styles
+   on individual modals — same pixel values, now theme-consistent classes.
+   Written as compound selectors (.modal-card.modal-card--sm, not just
+   .modal-card--sm) so they reliably outrank the responsive @media rules
+   below regardless of source order — those rules also target plain
+   .modal-card at the same specificity, and would otherwise win on wider
+   viewports and silently override these on every variant modal. */
+.modal-card.modal-card--sm { max-width: 380px; }
+.modal-card.modal-card--md { max-width: 420px; }
+.modal-card.modal-card--lg { max-width: 600px; }
 
 .modal-header {
   display: flex;
@@ -1358,9 +1531,69 @@ input[type="password"]::placeholder {
   display: none !important;
 }
 
-/* ====== Dashboard Card (main app screen) ====== */
-.dashboard-card {
-  max-width: 560px;
+/* ====== Page Shell — replaces the old centered fixed-width "card floating
+   on black" pattern for full-width screens/pages (main dashboard, homepage,
+   privacy policy). No background/border/shadow of its own: it's a width+
+   padding container, not a visual card. */
+.page-shell {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px;
+}
+
+/* Narrower reading column, for prose-heavy content (homepage hero, privacy
+   policy) where 1100px of line length would hurt readability. */
+.page-shell--marketing {
+  max-width: 860px;
+}
+
+/* ====== Homepage hero + features ====== */
+.hero {
+  width: 100%;
+  padding: 64px 20px;
+  text-align: center;
+}
+
+.hero .logo h1 {
+  font-size: 3rem;
+}
+
+.hero-subhead {
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  max-width: 640px;
+  margin: 0 auto 28px;
+}
+
+.features {
+  width: 100%;
+  background: var(--surface);
+  padding: 48px 20px;
+}
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 20px;
+}
+
+.feature-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+
+.feature-card h3 {
+  color: var(--primary);
+  font-size: 1.05rem;
+  margin-bottom: 8px;
+}
+
+.feature-card p {
+  color: var(--text-muted);
+  font-size: 0.9rem;
 }
 
 /* ====== Responsive ====== */
@@ -1375,14 +1608,9 @@ input[type="password"]::placeholder {
   }
 }
 
-/* Wider viewports (tablet/desktop): the app is still a single centered column,
-   but a 560px cap reads as a skinny banner on a full browser window — let the
-   main dashboard (and the forms/modals opened from it) breathe more. */
+/* Wider viewports (tablet/desktop): let modals opened from the dashboard
+   breathe more. */
 @media (min-width: 700px) {
-  .dashboard-card {
-    max-width: 760px;
-  }
-
   .modal-card {
     max-width: 620px;
   }
@@ -1394,14 +1622,78 @@ input[type="password"]::placeholder {
   .event-list {
     max-height: 320px;
   }
+
+  .match-schedule-list {
+    max-height: 520px;
+  }
 }
 
 @media (min-width: 1100px) {
-  .dashboard-card {
-    max-width: 960px;
-  }
-
   .modal-card {
     max-width: 680px;
   }
+}
+
+/* ====== Static page prose (privacy.html) — long-form text inside the
+   .page-shell/.page-shell--marketing shell, using the same color variables
+   as the rest of the app rather than a separate style system. */
+.static-page-content {
+  text-align: left;
+}
+
+.static-page-content h2 {
+  font-size: 1.1rem;
+  color: var(--text);
+  margin: 24px 0 8px;
+}
+
+.static-page-content h2:first-child {
+  margin-top: 0;
+}
+
+.static-page-content p {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin-bottom: 12px;
+}
+
+.static-page-content ul {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  margin: 0 0 12px 20px;
+}
+
+.static-page-content li {
+  margin-bottom: 6px;
+}
+
+.static-page-content a {
+  color: var(--primary);
+}
+
+.static-page-content a:hover {
+  color: var(--primary-hover);
+}
+
+.static-page-content .updated {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-bottom: 20px;
+}
+
+.placeholder-todo {
+  color: var(--error);
+  font-weight: 700;
+}
+
+.static-page-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 20px;
+  flex-wrap: wrap;
+}
+
+.static-page-actions .btn {
+  width: auto;
+  text-decoration: none;
 }

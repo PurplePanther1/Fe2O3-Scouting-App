@@ -54,10 +54,42 @@ async function findExistingMatchDoc(teamId, eventCode, matchNumber, teamNumber) 
 // Detail modal, 'msm-' for the "View Matches Scouted" modal) so the two
 // modals never share select-mode or selections, even if both happen to be
 // showing different teams' entries at once.
+// order/checkboxEls/rangeState (shift-click range-select support, shared
+// with the three main tabs — see handleBulkRangeClick() in first-api.js) are
+// namespaced by prefix here too, so the Team Detail modal and Matches
+// Scouted modal each get their own independent anchor/order, exactly like
+// their mode/selectedIds already are.
 const matchBulkState = {
-  'td-': { mode: false, selectedIds: new Set() },
-  'msm-': { mode: false, selectedIds: new Set() }
+  'td-': { mode: false, selectedIds: new Set(), order: [], checkboxEls: new Map(), rangeState: { lastClickedId: null } },
+  'msm-': { mode: false, selectedIds: new Set(), order: [], checkboxEls: new Map(), rangeState: { lastClickedId: null } }
 };
+
+// ====== Reset one match-entry-list bulk-select context (the Team Detail
+// modal's 'td-', or the Matches Scouted modal's 'msm-') back to its default:
+// mode off, nothing selected, shift-click anchor cleared, toolbar synced back
+// to "Select" with the delete button hidden. Mirrors exactly what
+// exitAllBulkSelectModes() (first-api.js) does for the three main tabs' own
+// bulk-select — shared here (by both modals' close handlers, and by
+// clearSelectedEvent()'s event-switch reset) rather than duplicated at each
+// call site. ======
+function resetMatchBulkSelectState(prefix) {
+  const state = matchBulkState[prefix];
+  if (!state) return;
+  state.mode = false;
+  if (typeof clearBulkSelection === 'function') {
+    clearBulkSelection(state.selectedIds, state.rangeState);
+  } else {
+    state.selectedIds.clear();
+    state.rangeState.lastClickedId = null;
+  }
+  state.order = [];
+  state.checkboxEls = new Map();
+  if (typeof updateMatchBulkSelectUI === 'function') updateMatchBulkSelectUI(prefix);
+}
+
+function resetAllMatchEntryBulkSelectStates() {
+  Object.keys(matchBulkState).forEach(resetMatchBulkSelectState);
+}
 
 // ====== Show/hide & label the match bulk-select toolbar based on permission and selection ======
 function updateMatchBulkSelectUI(prefix = 'td-') {
@@ -66,8 +98,7 @@ function updateMatchBulkSelectUI(prefix = 'td-') {
   const deleteBtn = document.getElementById(`${prefix}match-bulk-delete`);
   if (!toggleBtn || !deleteBtn || !state) return;
 
-  const canBulkManage = (typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false)
-    && (typeof canUserBulkDelete === 'function' ? canUserBulkDelete() : false);
+  const canBulkManage = typeof canUserEditOtherEntries === 'function' ? canUserEditOtherEntries() : false;
   if (!canBulkManage) {
     toggleBtn.classList.add('hidden');
     deleteBtn.classList.add('hidden');
@@ -326,6 +357,21 @@ async function saveMatchScoutForm() {
       } else {
         const targetSlot = await findExistingMatchDoc(teamId, currentMatchEventCode, matchNumber, currentMatchTeamNumber);
         if (targetSlot) {
+          // The target match-number slot is already occupied. That's fine
+          // only if it's the SAME entry already open in this form (editing
+          // in place, or "moving" it back onto its own slot) — anything
+          // else is a duplicate: either a brand-new entry (currentMatchDocId
+          // is null) colliding with one that already exists, or an existing
+          // entry being MOVED (match number changed) onto a slot some OTHER
+          // entry already occupies, which would otherwise silently merge
+          // this save into that unrelated entry. Block and leave the form
+          // (and whatever the user already typed) exactly as-is so they can
+          // just change the match number and retry.
+          if (targetSlot.id !== currentMatchDocId) {
+            hideLoading();
+            errorEl.textContent = `Match ${matchNumber} for this team already exists — edit that entry instead, or change the match number.`;
+            return;
+          }
           docId = targetSlot.id;
           existingData = targetSlot;
         } else {
@@ -401,6 +447,19 @@ async function saveMatchScoutForm() {
   }
 }
 
+// ====== Core delete logic: delete a single match entry by its known doc id,
+// then refresh whichever list panels/counts are currently visible — shared by
+// the edit form's own Delete button (below, which reads its state from
+// whatever form is currently open) and each entry row's standalone Delete
+// button in renderMatchListForTeam(), which already has the doc id on hand
+// and doesn't need the form open at all. Mirrors pit-scout.js's
+// deletePitScoutEntry(). ======
+async function deleteMatchScoutEntry(teamId, docId) {
+  await db.collection('teams').doc(teamId).collection('matchScouting').doc(docId).delete();
+  refreshOpenMatchListPanels();
+  if (typeof refreshMatchTeamListCounts === 'function') refreshMatchTeamListCounts();
+}
+
 // ====== Delete match scouting data ======
 async function deleteMatchScoutData() {
   const errorEl = document.getElementById('match-modal-error');
@@ -424,10 +483,8 @@ async function deleteMatchScoutData() {
     onConfirm: async () => {
       showLoading('Deleting...');
       try {
-        await db.collection('teams').doc(teamId).collection('matchScouting').doc(currentMatchDocId).delete();
+        await deleteMatchScoutEntry(teamId, currentMatchDocId);
         hideLoading();
-        refreshMatchEntriesCache();
-        refreshOpenMatchListPanels();
         successEl.textContent = 'Entry deleted.';
         setTimeout(() => {
           closeMatchScoutForm();
@@ -602,6 +659,11 @@ async function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
   const lineFields = previewFields.filter(f => f.type !== 'textarea');
   const blockFields = previewFields.filter(f => f.type === 'textarea');
 
+  // Rebuilt every render so shift-click range-select always reflects the
+  // CURRENT filtered/sorted order — see handleBulkRangeClick() (first-api.js).
+  bulkState.order = [];
+  bulkState.checkboxEls = new Map();
+
   filtered.forEach((entry, index) => {
     const item = document.createElement('div');
     item.className = 'match-entry-item';
@@ -622,14 +684,13 @@ async function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
       checkbox.type = 'checkbox';
       checkbox.style.cssText = 'width:18px; height:18px; flex-shrink:0; cursor:pointer;';
       checkbox.checked = bulkState.selectedIds.has(entry.id);
-      checkbox.addEventListener('change', (e) => {
+      bulkState.order.push(entry.id);
+      bulkState.checkboxEls.set(entry.id, checkbox);
+      markBulkAnchorCheckbox(checkbox, entry.id, bulkState.rangeState);
+      // 'click' (not 'change') so shiftKey is available — see handleBulkRangeClick() (first-api.js).
+      checkbox.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (checkbox.checked) {
-          bulkState.selectedIds.add(entry.id);
-        } else {
-          bulkState.selectedIds.delete(entry.id);
-        }
-        updateMatchBulkSelectUI(prefix);
+        handleBulkRangeClick(e, entry.id, bulkState.order, bulkState.checkboxEls, bulkState.selectedIds, bulkState.rangeState, () => updateMatchBulkSelectUI(prefix));
       });
       numAndCheckbox.appendChild(checkbox);
     }
@@ -661,6 +722,55 @@ async function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
       openMatchScoutEdit(entry.id, entry);
     });
     header.appendChild(editBtn);
+
+    // Standalone one-click Delete — same permission rule as Edit (own entry
+    // always allowed, otherwise needs canEditOtherEntries) and, like Edit,
+    // always rendered with a Permission Denied notice on click rather than
+    // hidden, so an unauthorized user can still discover why. Mirrors the
+    // Team Detail popup's pit-entry Delete button (team-info.js), just
+    // per-row instead of a single section-level button since a team can have
+    // many match entries.
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'btn btn-small';
+    deleteBtn.style.cssText = 'background:var(--error); color:#fff; border-color:var(--error);';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!canEditThisEntry) {
+        if (typeof showNoticeModal === 'function') {
+          showNoticeModal({ title: 'Permission Denied', message: 'You do not have permission to delete this match scouting entry.' });
+        }
+        return;
+      }
+      if (typeof showConfirmModal !== 'function') return;
+      showConfirmModal({
+        title: 'Delete Match Scouting Entry?',
+        message: `Delete Match #${entry.matchNumber} for Team #${teamNumber}? This cannot be undone.`,
+        confirmLabel: 'Delete',
+        danger: true,
+        onConfirm: async () => {
+          const teamId = currentTeamData?.id;
+          if (!teamId) return;
+          showLoading('Deleting...');
+          try {
+            await deleteMatchScoutEntry(teamId, entry.id);
+          } catch (err) {
+            console.error('Failed to delete match scouting entry:', err);
+            if (typeof showNoticeModal === 'function') {
+              showNoticeModal({
+                title: 'Delete Failed',
+                message: err.code === 'permission-denied'
+                  ? 'Permission denied: you do not have permission to delete this entry.'
+                  : 'Failed to delete. Please check your connection and try again.'
+              });
+            }
+          } finally {
+            hideLoading();
+          }
+        }
+      });
+    });
+    header.appendChild(deleteBtn);
     item.appendChild(header);
 
     // Metadata line
@@ -698,6 +808,7 @@ async function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
     container.appendChild(item);
   });
 
+  resolveBulkAnchor(bulkState.order, bulkState.checkboxEls, bulkState.rangeState);
   updateMatchBulkSelectUI(prefix);
 }
 
@@ -743,6 +854,11 @@ document.addEventListener('DOMContentLoaded', () => {
     onMatchScoutedStateChanged = () => {
       refreshOpenMatchListPanels();
       if (typeof refreshMatchTeamListCounts === 'function') refreshMatchTeamListCounts();
+      // Neither of the above ever touches the team-level Delete button — it
+      // used to stay permanently absent until some unrelated full re-render
+      // happened to fire first. Patch it here too so it appears as soon as
+      // this event's first match-scouting snapshot actually arrives.
+      if (typeof refreshTeamRowDeleteButtons === 'function') refreshTeamRowDeleteButtons();
     };
   }
 

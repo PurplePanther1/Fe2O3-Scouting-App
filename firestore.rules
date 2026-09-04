@@ -372,7 +372,8 @@ service cloud.firestore {
       allow create: if isAuth()
         && !exists(/databases/$(database)/documents/joinCodes/$(code))
         && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.joinCode == code
-        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[request.auth.uid] == 'captain';
+        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[request.auth.uid] == 'captain'
+        && request.resource.data.name == get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.name;
       allow update: if false;
       // Only when the team this code points to is down to its last member —
       // same condition as teams/{teamId}'s own delete rule, checked via the

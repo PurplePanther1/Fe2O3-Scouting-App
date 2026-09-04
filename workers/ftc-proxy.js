@@ -21,16 +21,31 @@
 const FTC_API_BASE = 'https://ftc-api.firstinspires.org/v2.0';
 
 /**
+ * The exact moment a given calendar year's FTC season kicks off: the 2nd
+ * Saturday of September, 12:00 EST (a fixed UTC-5 offset, as specified —
+ * not "Eastern time" generically, so this doesn't shift with DST). Returns
+ * a UTC timestamp (ms since epoch).
+ */
+function getSeasonKickoffUTC(year) {
+  const sept1Dow = new Date(Date.UTC(year, 8, 1)).getUTCDay(); // month 8 = September
+  const firstSaturday = 1 + ((6 - sept1Dow + 7) % 7);
+  const secondSaturday = firstSaturday + 7;
+  return Date.UTC(year, 8, secondSaturday, 17, 0, 0); // 12:00 EST = 17:00 UTC
+}
+
+/**
  * Compute the current FTC season.
- * FTC seasons run September–April, named by the year they start.
- * If the current month is before September, season = current year - 1.
- * Otherwise, season = current year.
- * Examples: Jan 2026 → season 2025, Sep 2026 → season 2026.
+ * FTC seasons run September–April, named by the year they start, and don't
+ * actually become "current" until that year's real kickoff (2nd Saturday of
+ * September, 12:00 EST) — before that, the PRIOR season is still current,
+ * even though the calendar month is already September.
+ * Examples: Jan 2026 → season 2025. Sep 5 2026 (before kickoff) → season
+ * 2025. Sep 12 2026, 1pm EST (after kickoff) → season 2026.
  */
 function getCurrentSeason() {
-  const now = new Date();
-  const month = now.getMonth() + 1; // getMonth() is 0-indexed
-  return month >= 9 ? now.getFullYear() : now.getFullYear() - 1;
+  const now = Date.now();
+  const thisYear = new Date(now).getUTCFullYear();
+  return now >= getSeasonKickoffUTC(thisYear) ? thisYear : thisYear - 1;
 }
 
 /**
