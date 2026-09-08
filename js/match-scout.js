@@ -287,6 +287,31 @@ function matchFormValuesChanged(fieldValues, existingData) {
   return Object.keys(fieldValues).some(key => (fieldValues[key] ?? null) !== (existingData[key] ?? null));
 }
 
+// ====== Does this match number NOT appear in the team's actual schedule for
+// this event? Used to warn (not block) before saving a match entry — e.g. a
+// typo'd match number. Reuses getEventSchedule() (first-api.js), the same
+// schedule lookup the match-based view (match-schedule-view.js) already
+// fetches through, rather than a second lookup here.
+//
+// Returns false (treat as "no mismatch", i.e. skip the warning) whenever
+// schedule data isn't available at all — an API failure, or an event with no
+// published schedule yet — since there's nothing to validate against, not
+// evidence of a mismatch. ======
+async function isMatchNumberMismatched(eventCode, teamNumber, matchNumber) {
+  let schedule;
+  try {
+    schedule = await getEventSchedule(eventCode);
+  } catch (err) {
+    console.warn('Could not load schedule to validate match number, skipping check:', err);
+    return false;
+  }
+  if (!schedule || schedule.length === 0) return false;
+
+  const match = schedule.find(m => Number(m.matchNumber) === Number(matchNumber));
+  if (!match) return true;
+  return !(match.teams || []).some(t => Number(t.teamNumber) === Number(teamNumber));
+}
+
 // ====== Save match scouting form ======
 async function saveMatchScoutForm() {
   const errorEl = document.getElementById('match-modal-error');
@@ -333,6 +358,36 @@ async function saveMatchScoutForm() {
       errorEl.textContent = 'Team data not loaded. Please rejoin your team.';
       return;
     }
+
+    // Warn (don't block) if this match number doesn't show up in the team's
+    // actual schedule for this event — a likely typo, but not necessarily
+    // wrong (e.g. a replay/reschedule not yet reflected in the published
+    // schedule), so this is a confirm, not a hard stop. Confirming or
+    // canceling both leave the form's entered values exactly as-is (same
+    // "don't discard the user's input" pattern as the duplicate-match-number
+    // block above) — canceling just returns to the form with nothing saved.
+    showLoading('Checking match schedule...');
+    const mismatched = await isMatchNumberMismatched(currentMatchEventCode, currentMatchTeamNumber, matchNumber);
+    hideLoading();
+    if (mismatched) {
+      showConfirmModal({
+        title: 'Match Number Not Scheduled',
+        message: `Team #${currentMatchTeamNumber} isn't scheduled for Match ${matchNumber} at this event — save anyway?`,
+        confirmLabel: 'Save Anyway',
+        onConfirm: () => performMatchScoutSave(fieldValues, matchNumber, teamId)
+      });
+      return;
+    }
+
+    await performMatchScoutSave(fieldValues, matchNumber, teamId);
+}
+
+// ====== Actually write the match scouting entry — factored out of
+// saveMatchScoutForm() so the schedule-mismatch confirm above can call this
+// directly as its onConfirm, without duplicating the write logic. ======
+async function performMatchScoutSave(fieldValues, matchNumber, teamId) {
+    const errorEl = document.getElementById('match-modal-error');
+    const successEl = document.getElementById('match-modal-success');
     const userDisplayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
 
     showLoading('Saving match scouting data...');

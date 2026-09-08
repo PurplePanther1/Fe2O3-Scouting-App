@@ -321,6 +321,13 @@
                   <option value="team">Search: Team Name/Number</option>
                 </select>
               </div>
+              <!-- Match scores (wishlist item 31) — manual refresh only, sourced
+                   from FTCScout (match-scores.js). No auto-polling: see that
+                   file's header comment for why. -->
+              <div style="margin-bottom:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <button id="btn-refresh-match-scores" type="button" class="btn btn-small btn-outline">🔄 Refresh Scores</button>
+                <span class="help-text" id="match-scores-status" style="margin:0"></span>
+              </div>
               <p class="help-text" id="match-schedule-status"></p>
               <div id="match-schedule-list" class="match-schedule-list"></div>
             </div>
@@ -687,6 +694,20 @@
         <p id="msm-export-match-error" class="error-message"></p>
         <p id="msm-export-match-success" class="success-message"></p>
       </div>
+    </div>
+  </div>
+
+  <!-- ====== Match Score Breakdown Modal (Match View — wishlist item 31,
+       match-scores.js) — same modal-overlay/modal-card pattern as the Match
+       Scouted modal above. ====== -->
+  <div id="match-score-modal" class="modal-overlay hidden">
+    <div id="match-score-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--md">
+      <div class="modal-header">
+        <h3 id="match-score-modal-title">Match Score</h3>
+        <button id="btn-match-score-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div id="match-score-modal-body" style="padding:16px 24px 24px"></div>
     </div>
   </div>
 
@@ -1108,6 +1129,7 @@
   <script src="/js/pit-scout.js"></script>
   <script src="/js/match-scout.js"></script>
   <script src="/js/match-schedule-view.js"></script>
+  <script src="/js/match-scores.js"></script>
   <script src="/js/team-info.js"></script>
   <script src="/js/match-scouted-modal.js"></script>
   <script src="/js/form-builder.js"></script>

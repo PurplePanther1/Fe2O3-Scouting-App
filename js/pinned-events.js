@@ -114,6 +114,16 @@ function renderPinnedEventsList() {
     // list's pattern (click to select, no separate button). Clicking an
     // already-selected row deselects it.
     item.addEventListener('click', () => {
+      // A click landing while THIS SAME event is still mid-selectEvent() is
+      // ignored — isSelected above is a snapshot from when this row was last
+      // (re-)rendered, which happens synchronously inside selectEvent() itself
+      // before its actual team/schedule fetch has finished, so a re-click on
+      // a slow connection would otherwise read as "already selected" and
+      // incorrectly deselect an event that's still loading. Confirmed via
+      // repeated Playwright reproduction — see selectEventLoadingCode's own
+      // comment in first-api.js.
+      if (typeof selectEventLoadingCode !== 'undefined' && selectEventLoadingCode === evt.code) return;
+
       if (isSelected) {
         // Reuse the same "clear selected event" logic used elsewhere in the app.
         if (typeof clearSelectedEvent === 'function') {

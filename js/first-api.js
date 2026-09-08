@@ -396,6 +396,12 @@ function renderEventList(events) {
     // Click to select; clicking the already-selected row again deselects it
     // — same toggle pattern as the Pinned Events list (pinned-events.js).
     item.addEventListener('click', () => {
+      // A click landing while THIS SAME event is still mid-selectEvent() is
+      // ignored rather than fed into the toggle below — selectedEvent is set
+      // synchronously well before that load actually finishes, so without
+      // this guard a re-click on a slow connection reads as "already
+      // selected" and incorrectly deselects it instead of doing nothing.
+      if (selectEventLoadingCode === evt.code) return;
       const isSelected = selectedEvent && selectedEvent.code === evt.code;
       if (isSelected) {
         deselectEventPreservingResults();
@@ -434,7 +440,31 @@ function renderSuggestions(events) {
     item.appendChild(nameEl);
     item.appendChild(codeEl);
 
-    item.addEventListener('click', () => {
+    // mousedown, not click: this dropdown is rebuilt from scratch
+    // (dropdown.innerHTML = '' + recreate) every time the live-typing
+    // debounce fires (updateSuggestionsForCurrentQuery(), ~150ms after the
+    // user's last keystroke) — including while a click is physically in
+    // progress. A browser only dispatches 'click' if the same element is
+    // still there for both mousedown AND mouseup; if the debounce rebuilds
+    // the list in between (confirmed via Playwright: mousedown on this item,
+    // then a still-pending debounce fires before mouseup), the original node
+    // is gone and the click is silently dropped — nothing happens, no error.
+    // mousedown fires and finishes synchronously the instant the button goes
+    // down, before that later timer ever gets a chance to run, so switching
+    // to it closes the race entirely. preventDefault() keeps the input from
+    // losing focus first (its own blur handler would otherwise race to hide
+    // this same dropdown out from under this handler).
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+
+      // A re-click on the same suggestion while it's already mid-selectEvent()
+      // is ignored — without this, clearSelectedEvent() would tear down the
+      // in-flight selection's UI/listeners while that same selectEvent() call
+      // is still running in the background and will still complete and
+      // repopulate things moments later, leaving a confusing half-torn-down
+      // state in between. See selectEventLoadingCode's own comment above.
+      if (selectEventLoadingCode === evt.code) return;
+
       // Set BEFORE clearSelectedEvent()/selectEvent() — both trigger
       // synchronous saveSessionState() calls (directly, and via
       // selectEvent()'s own activateScoutingSubTab() side effect), which
@@ -596,8 +626,27 @@ function deselectEventPreservingResults() {
   }
 }
 
+// ====== Set at the very start of selectEvent() below, cleared once its full
+// async chain settles (success or failure) — lets a click landing on the
+// SAME event while it's still loading be recognized as "already in
+// progress" rather than misread as "this event is already fully selected,
+// so toggle it off/reselect it", which is all the various click handlers
+// below (this file's renderEventList()/renderSuggestions(), pinned-events.js's
+// renderPinnedEventsList()) otherwise have to go on — they only see
+// selectedEvent, which gets set synchronously at the top of selectEvent(),
+// BEFORE any of its actual async work (team/schedule fetch) has finished.
+// Confirmed via repeated Playwright reproduction: two clicks on the same
+// row ~150ms apart (an entirely plausible "did that register?" re-click on
+// a slow connection) reliably turned the second click into an unintended
+// deselect, on every entry point (search results, Pinned Events), not just
+// one of them. ======
+let selectEventLoadingCode = null;
+
 // ====== Select an event ======
 async function selectEvent(eventData) {
+  if (selectEventLoadingCode === eventData.code) return; // already loading this same event — ignore the extra click
+  selectEventLoadingCode = eventData.code;
+
   console.time('[Timing] selectEvent total');
   selectedEvent = eventData;
 
@@ -758,6 +807,8 @@ async function selectEvent(eventData) {
     console.error('Failed to fetch teams:', err);
     document.getElementById('selected-event-teams-count').textContent = 'Failed to load teams';
     showEventError('Could not load teams. Check your connection and try again.');
+  } finally {
+    if (selectEventLoadingCode === eventData.code) selectEventLoadingCode = null;
   }
 }
 

@@ -947,34 +947,24 @@ input[type="password"]::placeholder {
   border: 1px solid var(--border);
   border-radius: 6px;
   margin-bottom: 6px;
-  cursor: pointer;
   overflow: hidden;
 }
 
+/* Centered rather than space-between — the header used to also hold an
+   expand chevron/score badge on the right (both since moved: chevron removed
+   with item 29's rework, score moved into each alliance's own side for item
+   31), so this is a single centered label now, not two ends being spaced apart. */
 .match-schedule-row-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
+  justify-content: center;
+  padding: 10px 12px;
 }
 
 .match-schedule-row-header .match-number {
   font-weight: 700;
-  font-size: 0.9rem;
-  color: var(--text-muted);
-}
-
-/* Rotates to point up when expanded — the "this row opens" affordance the
-   floating .suggestions-dropdown doesn't need (it has no collapsed state). */
-.match-expand-icon {
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  flex-shrink: 0;
-  transition: transform 0.15s ease;
-}
-
-.match-schedule-row.expanded .match-expand-icon {
-  transform: rotate(180deg);
+  font-size: 1.1rem;
+  color: var(--text);
 }
 
 .match-schedule-teams {
@@ -983,10 +973,14 @@ input[type="password"]::placeholder {
   padding: 0 2px 2px;
 }
 
+/* Column: this alliance's score header on top, its team slots below —
+   column instead of row so the score can sit big and full-width on its own
+   side of the match row (wishlist item 31), rather than sharing one small
+   shared badge in the row header. */
 .alliance-block {
   display: flex;
+  flex-direction: column;
   flex: 1;
-  gap: 2px;
   min-width: 0;
 }
 
@@ -998,11 +992,67 @@ input[type="password"]::placeholder {
   background: var(--alliance-blue-bg);
 }
 
+.alliance-team-slots {
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* This alliance's own score — hidden until scores have been fetched
+   (auto-loaded on event select, or the Refresh Scores button;
+   match-scores.js) and this match has been played. Big/bold per item 3's
+   "make it significantly more prominent" ask, full-width on its own
+   alliance's side, with an explicit caret + hover treatment (same inset
+   box-shadow language as .match-team-slot:hover below) so it reads as
+   clickable rather than just a bigger label. */
+.alliance-score {
+  display: none;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 6px 6px;
+  cursor: pointer;
+  font-weight: 800;
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.alliance-score.visible {
+  display: flex;
+}
+
+.alliance-score:hover {
+  box-shadow: inset 0 0 0 999px rgba(0, 0, 0, 0.08);
+}
+
+.alliance-score-red {
+  color: var(--alliance-red);
+}
+
+.alliance-score-blue {
+  color: var(--alliance-blue);
+}
+
+.alliance-score-caret {
+  font-size: 0.7rem;
+  opacity: 0.7;
+}
+
+/* Directly clickable (item 29 — no expand step needed to reach it) — opens
+   the match scouting form for this team/match via openMatchScoutFormFromSchedule()
+   (match-schedule-view.js). The inset box-shadow (not background) on hover so
+   it layers on top of the alliance red/blue tint and the .scouted green tint
+   below, instead of replacing whichever of those is already painted. */
 .match-team-slot {
   flex: 1;
   min-width: 0;
   padding: 6px 8px;
   text-align: center;
+  cursor: pointer;
+}
+
+.match-team-slot:hover {
+  box-shadow: inset 0 0 0 999px rgba(0, 0, 0, 0.08);
 }
 
 .match-team-number {
@@ -1025,48 +1075,12 @@ input[type="password"]::placeholder {
   color: var(--text-muted);
   /* Auto-shortens long team names to fit their slot instead of wrapping or
      overflowing into the next team's column — min-width:0 on every flex
-     ancestor above (.alliance-block, .match-team-slot) is required for this
-     to actually take effect, same reasoning as the export-modal button-row
+     ancestor above (.alliance-block, .alliance-team-slots, .match-team-slot)
+     is required for this to actually take effect, same reasoning as the export-modal button-row
      fix elsewhere in this file. */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* Persistent INLINE panel — normal document flow, not position:absolute —
-   so it pushes rows below it down the page instead of floating over them
-   like .suggestions-dropdown does. Negative top margin + no-radius/no-border
-   on the shared edge visually fuses it to the row above as one expanded unit. */
-.match-schedule-panel {
-  background: var(--card-bg);
-  border: 1px solid var(--border);
-  border-top: none;
-  border-radius: 0 0 6px 6px;
-  margin: -6px 0 6px;
-  padding: 10px 12px;
-}
-
-.match-schedule-panel-team {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: 6px;
-  margin-bottom: 6px;
-  background: var(--surface);
-  cursor: pointer;
-}
-
-.match-schedule-panel-team:last-child {
-  margin-bottom: 0;
-}
-
-.match-schedule-panel-team .match-team-name {
-  font-size: 0.85rem;
-  white-space: normal;
-  text-overflow: clip;
-  text-align: right;
 }
 
 /* Scouted-status indicator — mirrors .team-item.scouted's green tint +
@@ -1076,19 +1090,176 @@ input[type="password"]::placeholder {
    checkmark must sit on that specific slot, not float at the row level —
    otherwise which of the 4 teams it refers to would be ambiguous. Layers on
    top of (doesn't replace) the alliance red/blue tint and number color. */
-.match-team-slot.scouted,
-.match-schedule-panel-team.scouted {
+.match-team-slot.scouted {
   background: rgba(46, 204, 113, 0.18);
 }
 
-.match-schedule-panel-team.scouted {
-  border: 1px solid var(--success);
-}
-
-.match-team-slot.scouted .match-team-number::after,
-.match-schedule-panel-team.scouted .match-team-number::after {
+.match-team-slot.scouted .match-team-number::after {
   content: ' ✓';
   color: var(--success);
+}
+
+/* ====== Match Score Breakdown Modal (wishlist item 31, match-scores.js) ======
+   A collapsible tree — Auto/DC Points -> their sub-categories -> (for Leave/
+   Base) per-robot values, plus Penalties and Total — mirroring FTCScout's own
+   score-breakdown layout. Each nesting level repeats the same 4-column grid
+   (caret | label | red | blue) rather than one global grid, indented via
+   .msb-children's margin/border; columns won't line up pixel-perfect across
+   depths, but that's what FTCScout's own UI does too. */
+.msb-tree {
+  font-size: 0.85rem;
+}
+
+.msb-columns,
+.msb-row {
+  display: grid;
+  grid-template-columns: 18px 1fr 56px 56px;
+  align-items: center;
+  gap: 8px;
+}
+
+.msb-columns {
+  font-weight: 700;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.msb-columns .msb-red {
+  color: var(--alliance-red);
+  text-align: right;
+}
+
+.msb-columns .msb-blue {
+  color: var(--alliance-blue);
+  text-align: right;
+}
+
+.msb-row {
+  padding: 7px 0;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.msb-row.no-children {
+  cursor: default;
+}
+
+.msb-row:not(.no-children):hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.msb-caret {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.65rem;
+  cursor: pointer;
+  padding: 0;
+  width: 100%;
+  text-align: center;
+}
+
+.msb-row.no-children .msb-caret {
+  visibility: hidden;
+}
+
+.msb-label {
+  color: var(--text);
+}
+
+.msb-val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.msb-val.msb-red {
+  color: var(--alliance-red);
+}
+
+.msb-val.msb-blue {
+  color: var(--alliance-blue);
+}
+
+.msb-sub-label {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.msb-children {
+  margin-left: 18px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+.msb-children.collapsed {
+  display: none;
+}
+
+.msb-node.msb-total > .msb-row {
+  font-weight: 800;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 10px;
+  cursor: default;
+}
+
+.msb-node.msb-total .msb-val {
+  font-size: 1.1rem;
+}
+
+/* Ranking-point icon row, below the point tree — one row per criterion
+   (Movement/Goal/Pattern RP), a dot per alliance: dimmed/grey by default,
+   filled with that alliance's color once .achieved is added (that alliance
+   met the criterion in this match). Same 4-column grid as .msb-row/.msb-columns
+   above for alignment, even though nothing here expands. */
+.msb-rp-section {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.msb-rp-heading {
+  font-weight: 700;
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.msb-rp-row {
+  display: grid;
+  grid-template-columns: 18px 1fr 56px 56px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+}
+
+.msb-rp-label {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.msb-rp-icon {
+  text-align: center;
+  font-size: 1rem;
+  color: var(--text-muted);
+  opacity: 0.3;
+}
+
+.msb-rp-icon.achieved.msb-rp-red {
+  color: var(--alliance-red);
+  opacity: 1;
+}
+
+.msb-rp-icon.achieved.msb-rp-blue {
+  color: var(--alliance-blue);
+  opacity: 1;
 }
 
 /* ====== Pit Scouting Modal ====== */

@@ -1,15 +1,25 @@
-// ====== Match Scouting Tab: Match-Based View (Phase 2 — list/expand shell) ======
+// ====== Match Scouting Tab: Match-Based View ======
 // Adds a second way to browse the Match Scouting tab, alongside the existing
 // team-based list (js/first-api.js's renderMatchTeamList()/#team-list-match),
 // which this file never touches. A toggle switches between them; this file
 // owns only the new match-based side: fetching the event's schedule
 // (getEventSchedule(), first-api.js), rendering one row per match with all 4
-// teams color-coded by alliance, and a single-open-at-a-time inline expand
-// panel per row.
+// teams color-coded by alliance, and — per-team — a scouted-status indicator
+// and a direct click straight to the match scouting form.
 //
-// Phase 2 scope only: no scouted-status indicators yet (phase 3), and
-// clicking a team in the expanded panel does nothing yet (phase 4 wires it
-// to the match scouting form).
+// Team slots are clickable directly from the collapsed row (wishlist item
+// 29) — there used to be an expand-first step here, but expanding never
+// showed anything the collapsed row didn't already show (same team number/
+// name/scouted-status), so it was removed rather than kept as a redundant
+// second way to reach the same click target.
+//
+// Each alliance's score (wishlist item 31) is populated separately by
+// match-scores.js, auto-loaded as soon as an event is selected (cached
+// per-event for the session, and in Firestore, so this doesn't mean a live
+// FTCScout hit on every switch) — this file just renders the score element
+// and asks match-scores.js (if loaded) what to put in it, the same "call the
+// optional global if it's defined" pattern already used below for
+// scouted-status.
 
 // ====== Fallback view for a team that's never set one — change this one
 // constant to flip the default. Persisted per-team via session-state.js
@@ -20,10 +30,8 @@ const MATCH_VIEW_DEFAULT = 'team'; // 'team' | 'match'
 
 let matchViewMode = MATCH_VIEW_DEFAULT;
 
-// Schedule data + expand state for the currently selected event
+// Schedule data for the currently selected event
 let currentEventSchedule = [];
-let expandedScheduleMatchNumber = null;
-let expandedSchedulePanelEl = null;
 
 // Same "live substring filter over rendered text" approach as
 // applyTeamSearchFilter() (first-api.js) for the Team View lists — kept as
@@ -76,15 +84,19 @@ function hideMatchViewToggle() {
 function onMatchScheduleEventSelected(eventCode) {
   showMatchViewToggle();
   loadMatchScheduleView(eventCode);
+  // Auto-loads scores for this event (session/Firestore cache first, live
+  // FTCScout fetch only if neither has it) — no manual "Refresh Scores"
+  // click required for the first load, wishlist item 31 follow-up.
+  if (typeof onMatchScoresEventSelected === 'function') {
+    onMatchScoresEventSelected(eventCode);
+  }
 }
 
 // ====== Called from clearSelectedEvent() (first-api.js) — hides the toggle
-// and clears out any schedule state/expanded panel from the previous event. ======
+// and clears out any schedule/score state from the previous event. ======
 function resetMatchScheduleView() {
   hideMatchViewToggle();
   currentEventSchedule = [];
-  expandedScheduleMatchNumber = null;
-  expandedSchedulePanelEl = null;
 
   const status = document.getElementById('match-schedule-status');
   const list = document.getElementById('match-schedule-list');
@@ -97,13 +109,16 @@ function resetMatchScheduleView() {
   currentMatchScheduleSearchQuery = '';
   const searchInput = document.getElementById('input-match-schedule-search');
   if (searchInput) searchInput.value = '';
+
+  // A new event also means whatever scores were fetched for the last one
+  // (match-scores.js) no longer apply — reset that state too, same "call the
+  // optional global if it's defined" pattern used throughout this file.
+  if (typeof resetMatchScores === 'function') resetMatchScores();
 }
 
 // ====== Fetch this event's schedule and render it ======
 async function loadMatchScheduleView(eventCode) {
   currentEventSchedule = [];
-  expandedScheduleMatchNumber = null;
-  expandedSchedulePanelEl = null;
 
   const status = document.getElementById('match-schedule-status');
   const list = document.getElementById('match-schedule-list');
@@ -137,7 +152,7 @@ function renderMatchScheduleList(schedule) {
     return;
   }
 
-  status.textContent = `${schedule.length} match(es)`;
+  status.textContent = `${schedule.length} match(es) — click a team below to scout`;
 
   const sorted = [...schedule].sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
   sorted.forEach(match => {
@@ -172,17 +187,6 @@ function applyMatchScheduleSearchFilter(query) {
   list.querySelectorAll('.match-schedule-row').forEach(row => {
     const matches = !q || getMatchScheduleRowSearchText(row).toLowerCase().includes(q);
     row.style.display = matches ? '' : 'none';
-
-    // The expanded panel (if any) is this row's own next sibling, keyed by
-    // the same match number — kept in sync with its row's visibility here
-    // rather than filtered independently: the panel's own text is just
-    // team numbers/names, not the match number/description, so searching
-    // by match number would otherwise leave an orphaned panel visible under
-    // a hidden row.
-    const panel = row.nextElementSibling;
-    if (panel && panel.classList.contains('match-schedule-panel') && panel.dataset.matchNumber === row.dataset.matchNumber) {
-      panel.style.display = matches ? '' : 'none';
-    }
   });
 }
 
@@ -237,8 +241,12 @@ function getScheduleTeamName(teamNumber) {
   return team.name || team.nameFull || team.nameShort || team.schoolName || team.teamNameCalc || '';
 }
 
-// ====== Build one collapsed match row: header (match label + expand icon)
-// plus all 4 teams as two-line (number/name) slots, color-coded by alliance. ======
+// ====== Build one collapsed match row: header (match label) plus all 4
+// teams as two-line (number/name) slots, color-coded by alliance, each
+// directly clickable to scout. Each alliance block also carries its OWN
+// score header (wishlist item 31) — the red alliance's score sits on the red
+// side, the blue alliance's on the blue side, rather than one shared badge —
+// see buildAllianceBlock() below. ======
 function buildMatchScheduleRow(match) {
   const { red, blue } = getAllianceTeams(match);
 
@@ -253,12 +261,7 @@ function buildMatchScheduleRow(match) {
   numberSpan.className = 'match-number';
   numberSpan.textContent = match.description || `Match ${match.matchNumber}`;
 
-  const icon = document.createElement('span');
-  icon.className = 'match-expand-icon';
-  icon.textContent = '▾'; // ▾ — rotates to point up when expanded (CSS)
-
   header.appendChild(numberSpan);
-  header.appendChild(icon);
 
   const teamsRow = document.createElement('div');
   teamsRow.className = 'match-schedule-teams';
@@ -268,18 +271,42 @@ function buildMatchScheduleRow(match) {
   row.appendChild(header);
   row.appendChild(teamsRow);
 
-  row.addEventListener('click', () => toggleScheduleMatchExpand(match, row));
-
   return row;
 }
 
+// ====== One alliance's half of a match row: its own score header (wishlist
+// item 31 — big, on THIS alliance's own side, clickable to open the
+// breakdown modal) stacked above its team slots. ======
 function buildAllianceBlock(color, teams, matchNumber) {
   const block = document.createElement('div');
   block.className = `alliance-block alliance-${color}`;
-  teams.forEach(t => block.appendChild(buildMatchTeamSlot(t.teamNumber, matchNumber)));
+
+  const scoreEl = document.createElement('div');
+  scoreEl.className = `alliance-score alliance-score-${color}`;
+  scoreEl.dataset.matchNumber = matchNumber;
+  scoreEl.dataset.alliance = color;
+  scoreEl.addEventListener('click', () => {
+    if (typeof openMatchScoreBreakdownModal === 'function') {
+      openMatchScoreBreakdownModal(matchNumber);
+    }
+  });
+  block.appendChild(scoreEl);
+  applyAllianceScore(scoreEl, matchNumber, color);
+
+  const slotsWrap = document.createElement('div');
+  slotsWrap.className = 'alliance-team-slots';
+  teams.forEach(t => slotsWrap.appendChild(buildMatchTeamSlot(t.teamNumber, matchNumber)));
+  block.appendChild(slotsWrap);
+
   return block;
 }
 
+// ====== One team's clickable slot within a collapsed match row (wishlist
+// item 29 — clicking it goes straight to the match scouting form, no expand
+// step first). Resolves new-vs-edit and permission the same way the
+// team-based view does — openMatchScoutFormFromSchedule() (match-scout.js)
+// tells the user via showNoticeModal() if an entry already exists and they
+// can't edit it, rather than silently doing nothing. ======
 function buildMatchTeamSlot(teamNumber, matchNumber) {
   const slot = document.createElement('div');
   slot.className = 'match-team-slot';
@@ -298,10 +325,17 @@ function buildMatchTeamSlot(teamNumber, matchNumber) {
   slot.appendChild(numSpan);
   slot.appendChild(nameSpan);
   applyScoutedIndicator(slot, teamNumber, matchNumber);
+
+  slot.addEventListener('click', () => {
+    if (typeof openMatchScoutFormFromSchedule === 'function' && selectedEvent?.code) {
+      openMatchScoutFormFromSchedule(matchNumber, teamNumber, selectedEvent.code, nameSpan.textContent);
+    }
+  });
+
   return slot;
 }
 
-// ====== Scouted-status indicator (phase 3) ======
+// ====== Scouted-status indicator ======
 // Reads the LIVE cache watchMatchScoutStatus() (match-scout.js) already
 // maintains for the currently selected event — no separate Firestore
 // listener of our own. That cache is keyed by "eventCode_teamNumber" and
@@ -330,91 +364,53 @@ function applyScoutedIndicator(el, teamNumber, matchNumber) {
 }
 
 // ====== Re-apply scouted indicators to every currently-rendered team slot
-// (collapsed rows and, if one is open, the expanded panel) in place, without
-// rebuilding any DOM — called whenever matchEntriesCache changes (live
-// snapshot updates), so an expanded panel or scroll position never gets
-// disrupted by someone else's scouting update landing mid-browse. ======
+// in place, without rebuilding any DOM — called whenever matchEntriesCache
+// changes (live snapshot updates), so scroll position never gets disrupted
+// by someone else's scouting update landing mid-browse. ======
 function refreshMatchScheduleScoutedIndicators() {
   document.querySelectorAll('#match-schedule-list [data-team-number]').forEach(el => {
     applyScoutedIndicator(el, el.dataset.teamNumber, el.dataset.matchNumber);
   });
 }
 
-// ====== Expand/collapse a match row into its persistent inline panel.
-// Only one match is ever expanded at a time — expanding a new one always
-// collapses (removes) whichever panel was previously open first. The panel
-// is inserted as a real DOM sibling right after the row (not
-// position:absolute), so it pushes every row below it down the page. ======
-function toggleScheduleMatchExpand(match, rowEl) {
-  const matchNumber = match.matchNumber;
-  const wasThisOneExpanded = expandedScheduleMatchNumber === matchNumber;
+// ====== One alliance's score header (wishlist item 31) — reads whatever
+// match-scores.js has cached for this match (nothing until it's auto-loaded
+// or explicitly refreshed; match-scores.js is optional-global-called exactly
+// like match-scout.js's scouted-status cache above). Shows just THIS
+// alliance's total, big and on its own side of the row; hidden entirely if
+// no score is available yet (not yet fetched, or this match hasn't been
+// played). The caret is a pure affordance — the whole element is clickable,
+// same as the CSS hover highlight applies to the whole element too. ======
+function applyAllianceScore(scoreEl, matchNumber, color) {
+  const summary = typeof getMatchScoreSummary === 'function' ? getMatchScoreSummary(matchNumber) : null;
+  const value = summary ? summary[color]?.totalPoints : null;
 
-  if (expandedSchedulePanelEl) {
-    expandedSchedulePanelEl.remove();
-    expandedSchedulePanelEl = null;
-  }
-  document.querySelectorAll('.match-schedule-row.expanded').forEach(el => el.classList.remove('expanded'));
-  expandedScheduleMatchNumber = null;
-
-  if (wasThisOneExpanded) {
-    // Clicking the already-expanded row again just closes it.
+  if (value == null) {
+    scoreEl.classList.remove('visible');
+    scoreEl.innerHTML = '';
     return;
   }
 
-  expandedScheduleMatchNumber = matchNumber;
-  rowEl.classList.add('expanded');
-
-  const panel = buildMatchSchedulePanel(match);
-  rowEl.insertAdjacentElement('afterend', panel);
-  expandedSchedulePanelEl = panel;
-}
-
-// ====== Build the expanded panel's 4 team rows. Purely display-only in this
-// phase — phase 4 adds the click handler that opens the match scouting form
-// with this match/team pre-filled and locked. ======
-function buildMatchSchedulePanel(match) {
-  const { red, blue } = getAllianceTeams(match);
-  const panel = document.createElement('div');
-  panel.className = 'match-schedule-panel';
-  panel.dataset.matchNumber = match.matchNumber;
-
-  [...red, ...blue].forEach(t => panel.appendChild(buildMatchSchedulePanelTeam(t, match.matchNumber)));
-
-  return panel;
-}
-
-function buildMatchSchedulePanelTeam(teamEntry, matchNumber) {
-  const color = String(teamEntry.station || '').toLowerCase().startsWith('red') ? 'red' : 'blue';
-
-  const row = document.createElement('div');
-  row.className = `match-schedule-panel-team alliance-${color}`;
-  row.dataset.teamNumber = teamEntry.teamNumber;
-  row.dataset.matchNumber = matchNumber;
-
+  scoreEl.innerHTML = '';
   const numSpan = document.createElement('span');
-  numSpan.className = 'match-team-number';
-  numSpan.textContent = `#${teamEntry.teamNumber}`;
+  numSpan.className = 'alliance-score-value';
+  numSpan.textContent = value;
+  const caret = document.createElement('span');
+  caret.className = 'alliance-score-caret';
+  caret.textContent = '▸';
 
-  const nameSpan = document.createElement('span');
-  nameSpan.className = 'match-team-name';
-  nameSpan.textContent = getScheduleTeamName(teamEntry.teamNumber);
+  scoreEl.appendChild(numSpan);
+  scoreEl.appendChild(caret);
+  scoreEl.classList.add('visible');
+}
 
-  row.appendChild(numSpan);
-  row.appendChild(nameSpan);
-  applyScoutedIndicator(row, teamEntry.teamNumber, matchNumber);
-
-  // Opens the match scouting form with match number + team pre-filled and
-  // locked (match-scout.js's openMatchScoutFormFromSchedule() resolves
-  // new-vs-edit and permission the same way the team-based view does — if
-  // an entry already exists and the current user can't edit it, it tells
-  // them so via showNoticeModal() rather than silently doing nothing).
-  row.addEventListener('click', () => {
-    if (typeof openMatchScoutFormFromSchedule === 'function' && selectedEvent?.code) {
-      openMatchScoutFormFromSchedule(matchNumber, teamEntry.teamNumber, selectedEvent.code, nameSpan.textContent);
-    }
+// ====== Re-apply score headers to every currently-rendered row — called by
+// match-scores.js once scores load/refresh, same "refresh in place" pattern
+// as refreshMatchScheduleScoutedIndicators() above. ======
+function refreshMatchScheduleScoreBadges() {
+  document.querySelectorAll('#match-schedule-list .alliance-score').forEach(scoreEl => {
+    applyAllianceScore(scoreEl, scoreEl.dataset.matchNumber, scoreEl.dataset.alliance);
   });
-
-  return row;
 }
 
 // ====== Wire up the Team View / Match View toggle buttons ======

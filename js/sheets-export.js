@@ -318,6 +318,48 @@ function buildMatchSheetRows(fields, docs) {
   ]);
 }
 
+// ====== Split match docs into normal vs "mismatched" (the match number
+// doesn't correspond to this team's actual schedule for its event) — for the
+// Mismatched Match Numbers export tab (wishlist item 21). Reuses
+// getEventSchedule() (first-api.js), the same schedule lookup the
+// match-based view (match-schedule-view.js) and the save-time warning
+// (match-scout.js's isMatchNumberMismatched()) already fetch through, rather
+// than a second lookup here. Grouped by eventCode so a doc set spanning many
+// events (e.g. gatherFullTeamExportData's whole-team-history scope) only
+// fetches each event's schedule once.
+//
+// Whenever a given event's schedule can't be loaded, or hasn't been
+// published yet, none of that event's docs are treated as mismatched —
+// nothing to validate against isn't evidence of a mismatch, same reasoning
+// as the save-time check. ======
+async function splitMismatchedMatchEntries(matchDocs) {
+  const eventCodes = Array.from(new Set(matchDocs.map(d => d.eventCode).filter(Boolean)));
+  const schedules = {};
+  await Promise.all(eventCodes.map(async (code) => {
+    try {
+      schedules[code] = await getEventSchedule(code);
+    } catch (err) {
+      console.warn(`Failed to load schedule for ${code}, skipping match-number validation for its entries:`, err);
+      schedules[code] = null;
+    }
+  }));
+
+  const normal = [];
+  const mismatched = [];
+  matchDocs.forEach(doc => {
+    const schedule = schedules[doc.eventCode];
+    if (!schedule || schedule.length === 0) {
+      normal.push(doc);
+      return;
+    }
+    const match = schedule.find(m => Number(m.matchNumber) === Number(doc.matchNumber));
+    const scheduled = !!match && (match.teams || []).some(t => Number(t.teamNumber) === Number(doc.teamNumber));
+    (scheduled ? normal : mismatched).push(doc);
+  });
+
+  return { normal, mismatched };
+}
+
 // ====== Build a {teamNumber: name} map for one event, from the same
 // Firestore-cached roster (events/{eventCode}) getCachedEvent() (first-api.js)
 // already reads for event selection — not scoped to the currently selected
@@ -403,14 +445,22 @@ async function fetchMatchDocsForEvent(eventCode, teamId) {
 // its event folder afterward. tokenGetter defaults to the shared token (see
 // sheetsApiFetch above); the whole-team export passes its own broader one.
 async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs, tokenGetter) {
-  const createResp = await createSpreadsheet(title, ['Pit Scouting', 'Match Scouting'], tokenGetter);
+  const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
+  const sheetTitles = ['Pit Scouting', 'Match Scouting'];
+  if (mismatched.length > 0) sheetTitles.push('Mismatched Match Numbers');
+
+  const createResp = await createSpreadsheet(title, sheetTitles, tokenGetter);
   const spreadsheetId = createResp.spreadsheetId;
 
   const pitRows = buildPitSheetRows(pitFields, pitDocs);
-  const matchRows = buildMatchSheetRows(matchFields, matchDocs);
+  const matchRows = buildMatchSheetRows(matchFields, normal);
 
   await writeSheetValues(spreadsheetId, 'Pit Scouting', pitRows, tokenGetter);
   await writeSheetValues(spreadsheetId, 'Match Scouting', matchRows, tokenGetter);
+  if (mismatched.length > 0) {
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    await writeSheetValues(spreadsheetId, 'Mismatched Match Numbers', mismatchedRows, tokenGetter);
+  }
 
   return { spreadsheetId, spreadsheetUrl: createResp.spreadsheetUrl };
 }
@@ -418,34 +468,44 @@ async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, ma
 // ====== Build & download an .xlsx workbook from the same row data used for the
 // Google Sheets export (buildPitSheetRows/buildMatchSheetRows) — same two-tab shape,
 // just rendered client-side via SheetJS instead of written through the Sheets API. ======
-function downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs) {
+async function downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs) {
   if (typeof XLSX === 'undefined') {
     throw new Error('Excel export library failed to load. Check your connection and try again.');
   }
 
+  const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
   const pitRows = buildPitSheetRows(pitFields, pitDocs);
-  const matchRows = buildMatchSheetRows(matchFields, matchDocs);
+  const matchRows = buildMatchSheetRows(matchFields, normal);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
+  if (mismatched.length > 0) {
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mismatchedRows), 'Mismatched Match Numbers');
+  }
   XLSX.writeFile(wb, filename);
 }
 
 // ====== Build a 2-tab workbook as raw bytes (not a file download) — used by
 // the whole-team export to bundle one small workbook per event into a single
 // ZIP, rather than triggering a separate browser download for each. ======
-function buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs) {
+async function buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs) {
   if (typeof XLSX === 'undefined') {
     throw new Error('Excel export library failed to load. Check your connection and try again.');
   }
 
+  const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
   const pitRows = buildPitSheetRows(pitFields, pitDocs);
-  const matchRows = buildMatchSheetRows(matchFields, matchDocs);
+  const matchRows = buildMatchSheetRows(matchFields, normal);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
+  if (mismatched.length > 0) {
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mismatchedRows), 'Mismatched Match Numbers');
+  }
   return XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
 }
 
@@ -453,26 +513,39 @@ function buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs) {
 // Matches Scouted" modal's export button, which has no pit-scouting section
 // to include. ======
 async function exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs) {
-  const createResp = await createSpreadsheet(title, ['Match Scouting']);
+  const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
+  const sheetTitles = ['Match Scouting'];
+  if (mismatched.length > 0) sheetTitles.push('Mismatched Match Numbers');
+
+  const createResp = await createSpreadsheet(title, sheetTitles);
   const spreadsheetId = createResp.spreadsheetId;
 
-  const matchRows = buildMatchSheetRows(matchFields, matchDocs);
+  const matchRows = buildMatchSheetRows(matchFields, normal);
   await writeSheetValues(spreadsheetId, 'Match Scouting', matchRows);
+  if (mismatched.length > 0) {
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    await writeSheetValues(spreadsheetId, 'Mismatched Match Numbers', mismatchedRows);
+  }
 
   return createResp.spreadsheetUrl;
 }
 
 // ====== Build & download a single-tab .xlsx workbook — match-only counterpart
 // to downloadScoutingWorkbook() above. ======
-function downloadMatchOnlyWorkbook(filename, matchFields, matchDocs) {
+async function downloadMatchOnlyWorkbook(filename, matchFields, matchDocs) {
   if (typeof XLSX === 'undefined') {
     throw new Error('Excel export library failed to load. Check your connection and try again.');
   }
 
-  const matchRows = buildMatchSheetRows(matchFields, matchDocs);
+  const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
+  const matchRows = buildMatchSheetRows(matchFields, normal);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
+  if (mismatched.length > 0) {
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mismatchedRows), 'Mismatched Match Numbers');
+  }
   XLSX.writeFile(wb, filename);
 }
 
@@ -822,7 +895,7 @@ async function handleExportTeamExcelClick(statusPrefix) {
 
     const teamName = pitDocs[0]?.teamName || matchDocs[0]?.teamName || '';
     const filename = sanitizeFilename(`${teamLabel(teamNumber, teamName)} Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
-    downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
+    await downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
@@ -904,7 +977,7 @@ async function handleExportTeamMatchOnlyExcelClick(statusPrefix) {
     const { matchFields, matchDocs } = await gatherTeamMatchExportData(teamNumber, eventCode, teamId);
 
     const filename = sanitizeFilename(`${teamLabel(teamNumber, matchDocs[0]?.teamName || '')} Match Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
-    downloadMatchOnlyWorkbook(filename, matchFields, matchDocs);
+    await downloadMatchOnlyWorkbook(filename, matchFields, matchDocs);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', matchDocs.length === 0
@@ -1084,7 +1157,7 @@ async function handleExportEventExcelClick(statusPrefix) {
     const { pitFields, matchFields, pitDocs, matchDocs } = await gatherEventExportData(eventCode, teamId);
 
     const filename = sanitizeFilename(`${selectedEvent?.name || eventCode} - All Teams Scouting.xlsx`);
-    downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
+    await downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
@@ -1240,7 +1313,7 @@ async function handleExportEventMatchOnlyExcelClick(statusPrefix) {
     const { matchFields, matchDocs } = await gatherEventMatchOnlyExportData(eventCode, teamId);
 
     const filename = sanitizeFilename(`${selectedEvent?.name || eventCode} - All Teams Match Data.xlsx`);
-    downloadMatchOnlyWorkbook(filename, matchFields, matchDocs);
+    await downloadMatchOnlyWorkbook(filename, matchFields, matchDocs);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', matchDocs.length === 0
@@ -1283,11 +1356,11 @@ async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix) {
 
     showLoading('Building workbook files...');
     const zip = new JSZip();
-    eventCodes.forEach(eventCode => {
+    for (const eventCode of eventCodes) {
       const { pitDocs, matchDocs } = byEvent[eventCode];
-      const bytes = buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs);
+      const bytes = await buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs);
       zip.file(`${sanitizeFilename(eventCode)}.xlsx`, bytes);
-    });
+    }
 
     showLoading('Creating ZIP file...');
     const blob = await zip.generateAsync({ type: 'blob' });
