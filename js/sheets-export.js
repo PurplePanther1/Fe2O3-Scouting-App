@@ -233,7 +233,7 @@ function formatTimestamp(ts) {
 // doc for "deleted field" columns below, regardless of whether a given
 // export's fixedColumns already happens to cover some of them too. ======
 const RESERVED_DOC_KEYS = new Set([
-  'id', 'eventCode', 'teamNumber', 'teamId', 'matchNumber', 'teamName',
+  'id', 'eventCode', 'teamNumber', 'teamId', 'matchNumber', 'teamName', 'season',
   'scoutedBy', 'scoutedByEmail', 'scoutedByName', 'scoutedAt', 'updatedAt',
   'lastEditedBy', 'lastEditedByEmail', 'lastEditedByName', 'lastEditedByTimestamp'
 ]);
@@ -399,20 +399,80 @@ function attachTeamNames(docs, nameMap) {
 // loadFormConfig()/loadMatchFormConfig() (dynamic-form.js) seed a default config
 // back into Firestore via .set() when a team has none yet — a create/update that
 // firestore.rules restricts to captains / canEditTemplates. Export must work for
-// any team member, and never needs to write anything, so it reads the doc itself
-// and falls back to the same DEFAULT_*_FIELDS locally instead of seeding.
-async function loadFormConfigReadOnly(teamId, configDocId, defaults) {
+// any team member, and never needs to write anything, so it reads the season-
+// scoped doc itself and falls back to the same DEFAULT_*_FIELDS locally instead
+// of seeding. season defaults to the app's currently-selected season, same as
+// dynamic-form.js's loaders — pass the SEASON THE EXPORTED DATA ACTUALLY
+// BELONGS TO (see resolveExportSeason() below), not necessarily "now", so an
+// old season's export reflects the field configuration active for that season.
+//
+// Mirrors loadSeasonScopedFormConfig()'s legacy-inheritance rule (dynamic-
+// form.js) for the CURRENT season, minus the write-back: if this is the
+// current season and its own {season}_{configType} doc doesn't exist yet
+// (e.g. nobody has opened the Form Builder since this shipped), fall back to
+// the pre-season-scoping shared doc so export doesn't show hardcoded defaults
+// for a team that's actually customized its form.
+async function loadFormConfigReadOnly(teamId, season, configType, defaults) {
+  const resolvedSeason = typeof resolveFormConfigSeason === 'function' ? resolveFormConfigSeason(season) : String(season);
   try {
     const doc = await db.collection('teams').doc(teamId)
-      .collection('formConfig').doc(configDocId).get();
+      .collection('formConfig').doc(`${resolvedSeason}_${configType}`).get();
     if (doc.exists) {
       const data = doc.data();
       return (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
     }
+
+    if (resolvedSeason === String(getCurrentFtcSeason())) {
+      const legacyDoc = await db.collection('teams').doc(teamId)
+        .collection('formConfig').doc(configType).get();
+      if (legacyDoc.exists) {
+        const data = legacyDoc.data();
+        return (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+      }
+    }
   } catch (err) {
-    console.warn(`Failed to read ${configDocId} form config for export, using defaults:`, err);
+    console.warn(`Failed to read ${configType} form config for season ${resolvedSeason} for export, using defaults:`, err);
   }
   return defaults.map(f => ({ ...f }));
+}
+
+// ====== Which season a set of same-event scouting docs' form config should
+// resolve to for export — an event can never actually span two seasons, so
+// any doc here that's been tagged (see pit-scout.js/match-scout.js's
+// `season` field) authoritatively pins it; falls back to the app's
+// currently-selected season only if every doc predates season-tagging. ======
+function resolveExportSeason(docs) {
+  const tagged = (docs || []).find(d => d.season);
+  return tagged ? tagged.season : undefined;
+}
+
+// ====== Load the UNION of form-config fields across every season
+// represented in `docs` (deduped by field id, first-seen wins) — used only by
+// gatherFullTeamExportData(), which spans a team's entire history across
+// every event/season at once. buildSheetRows() already renders any field
+// present in the data but absent from the passed-in `fields` list as a
+// "(deleted field)" column; passing the full cross-season union here instead
+// keeps every season's real fields as normal columns, since none of them were
+// actually deleted — they just belong to a different season's form. ======
+async function loadUnionFormConfig(teamId, docs, configType, defaults) {
+  const seasons = docs.length > 0
+    ? Array.from(new Set(docs.map(d => d.season || resolveFormConfigSeason())))
+    : [resolveFormConfigSeason()];
+
+  const perSeasonFields = await Promise.all(
+    seasons.map(season => loadFormConfigReadOnly(teamId, season, configType, defaults))
+  );
+
+  const seen = new Set();
+  const union = [];
+  perSeasonFields.forEach(fields => {
+    fields.forEach(field => {
+      if (seen.has(field.id)) return;
+      seen.add(field.id);
+      union.push(field);
+    });
+  });
+  return union;
 }
 
 // ====== Label errors with which step produced them, so failures are diagnosable ======
@@ -592,11 +652,6 @@ function teamLabel(teamNumber, teamName) {
 // ====== Gather a single team's pit + match scouting data for the selected event ======
 // Shared by both the Google Sheets and Excel export paths for a team.
 async function gatherTeamExportData(teamNumber, eventCode, teamId) {
-  const [pitFields, matchFields] = await Promise.all([
-    loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
-    loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
-  ]);
-
   // findExistingPitDoc() (pit-scout.js) queries by data fields rather than
   // guessing a document ID, so it finds this team's entry regardless of
   // which document-ID era it was saved under.
@@ -609,6 +664,16 @@ async function gatherTeamExportData(teamNumber, eventCode, teamId) {
     .filter(d => Number(d.teamNumber) === Number(teamNumber))
     .sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
 
+  // One event can never span two seasons, so any tag found on either side
+  // (pit or match) resolves the season for both — falls back to the app's
+  // currently-selected season only if this team has no tagged docs at all
+  // for this event yet.
+  const season = resolveExportSeason([...pitDocs, ...matchDocs]);
+  const [pitFields, matchFields] = await Promise.all([
+    loadFormConfigReadOnly(teamId, season, 'pitScouting', DEFAULT_PIT_FIELDS),
+    loadFormConfigReadOnly(teamId, season, 'matchScouting', DEFAULT_MATCH_FIELDS)
+  ]);
+
   const nameMap = await getEventTeamNameMap(eventCode);
   attachTeamNames(pitDocs, nameMap);
   attachTeamNames(matchDocs, nameMap);
@@ -619,12 +684,12 @@ async function gatherTeamExportData(teamNumber, eventCode, teamId) {
 // ====== Gather a single team's MATCH-ONLY scouting data (no pit) for the
 // selected event — used by the "View Matches Scouted" modal's export button. ======
 async function gatherTeamMatchExportData(teamNumber, eventCode, teamId) {
-  const matchFields = await loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS);
-
   const allMatchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode, teamId));
   const matchDocs = allMatchDocs
     .filter(d => Number(d.teamNumber) === Number(teamNumber))
     .sort((a, b) => (a.matchNumber || 0) - (b.matchNumber || 0));
+
+  const matchFields = await loadFormConfigReadOnly(teamId, resolveExportSeason(matchDocs), 'matchScouting', DEFAULT_MATCH_FIELDS);
 
   attachTeamNames(matchDocs, await getEventTeamNameMap(eventCode));
 
@@ -634,11 +699,11 @@ async function gatherTeamMatchExportData(teamNumber, eventCode, teamId) {
 // ====== Gather a single team's PIT-ONLY scouting data (no match) for the
 // selected event — used by the Pit Scouting tab's per-row export button. ======
 async function gatherTeamPitOnlyExportData(teamNumber, eventCode, teamId) {
-  const pitFields = await loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS);
-
   const pitEntry = await withStep('Reading pit scouting data', () =>
     findExistingPitDoc(teamId, eventCode, teamNumber));
   const pitDocs = pitEntry ? [pitEntry] : [];
+
+  const pitFields = await loadFormConfigReadOnly(teamId, resolveExportSeason(pitDocs), 'pitScouting', DEFAULT_PIT_FIELDS);
 
   attachTeamNames(pitDocs, await getEventTeamNameMap(eventCode));
 
@@ -648,11 +713,6 @@ async function gatherTeamPitOnlyExportData(teamNumber, eventCode, teamId) {
 // ====== Gather every team's pit + match scouting data for the selected event ======
 // Shared by both the Google Sheets and Excel export paths for a whole event.
 async function gatherEventExportData(eventCode, teamId) {
-  const [pitFields, matchFields] = await Promise.all([
-    loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
-    loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
-  ]);
-
   const pitSnap = await withStep('Reading pit scouting data',
     () => db.collection('teams').doc(teamId).collection('pitScouting').where('eventCode', '==', eventCode).get());
   const pitDocs = [];
@@ -661,6 +721,15 @@ async function gatherEventExportData(eventCode, teamId) {
 
   const matchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode, teamId));
   matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
+
+  // Every doc here shares one eventCode, so — same as gatherTeamExportData()
+  // above — one tag anywhere in the set resolves the season for the whole
+  // event's export.
+  const season = resolveExportSeason([...pitDocs, ...matchDocs]);
+  const [pitFields, matchFields] = await Promise.all([
+    loadFormConfigReadOnly(teamId, season, 'pitScouting', DEFAULT_PIT_FIELDS),
+    loadFormConfigReadOnly(teamId, season, 'matchScouting', DEFAULT_MATCH_FIELDS)
+  ]);
 
   const nameMap = await getEventTeamNameMap(eventCode);
   attachTeamNames(pitDocs, nameMap);
@@ -672,13 +741,13 @@ async function gatherEventExportData(eventCode, teamId) {
 // ====== Gather every team's PIT-ONLY scouting data for the selected event —
 // used by the Pit Scouting tab's "Export All Pit Data" button. ======
 async function gatherEventPitOnlyExportData(eventCode, teamId) {
-  const pitFields = await loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS);
-
   const pitSnap = await withStep('Reading pit scouting data',
     () => db.collection('teams').doc(teamId).collection('pitScouting').where('eventCode', '==', eventCode).get());
   const pitDocs = [];
   pitSnap.forEach(doc => pitDocs.push({ id: doc.id, ...doc.data() }));
   pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
+
+  const pitFields = await loadFormConfigReadOnly(teamId, resolveExportSeason(pitDocs), 'pitScouting', DEFAULT_PIT_FIELDS);
 
   attachTeamNames(pitDocs, await getEventTeamNameMap(eventCode));
 
@@ -688,10 +757,10 @@ async function gatherEventPitOnlyExportData(eventCode, teamId) {
 // ====== Gather every team's MATCH-ONLY scouting data for the selected event —
 // used by the Match Scouting tab's "Export All Match Data" button. ======
 async function gatherEventMatchOnlyExportData(eventCode, teamId) {
-  const matchFields = await loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS);
-
   const matchDocs = await withStep('Reading match scouting data', () => fetchMatchDocsForEvent(eventCode, teamId));
   matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
+
+  const matchFields = await loadFormConfigReadOnly(teamId, resolveExportSeason(matchDocs), 'matchScouting', DEFAULT_MATCH_FIELDS);
 
   attachTeamNames(matchDocs, await getEventTeamNameMap(eventCode));
 
@@ -706,11 +775,6 @@ async function gatherEventMatchOnlyExportData(eventCode, teamId) {
 // eventCode. Used only by the "Export Whole Team Data" flow, right before a
 // team's data is permanently deleted (leaving/deleting as its last member). ======
 async function gatherFullTeamExportData(teamId) {
-  const [pitFields, matchFields] = await Promise.all([
-    loadFormConfigReadOnly(teamId, 'pitScouting', DEFAULT_PIT_FIELDS),
-    loadFormConfigReadOnly(teamId, 'matchScouting', DEFAULT_MATCH_FIELDS)
-  ]);
-
   const pitSnap = await withStep('Reading all pit scouting data',
     () => db.collection('teams').doc(teamId).collection('pitScouting').get());
   const matchSnap = await withStep('Reading all match scouting data',
@@ -722,16 +786,30 @@ async function gatherFullTeamExportData(teamId) {
     return byEvent[eventCode];
   };
 
+  const allPitDocs = [];
+  const allMatchDocs = [];
   pitSnap.forEach(doc => {
     const data = { id: doc.id, ...doc.data() };
+    allPitDocs.push(data);
     if (!data.eventCode) return;
     getBucket(data.eventCode).pitDocs.push(data);
   });
   matchSnap.forEach(doc => {
     const data = { id: doc.id, ...doc.data() };
+    allMatchDocs.push(data);
     if (!data.eventCode) return;
     getBucket(data.eventCode).matchDocs.push(data);
   });
+
+  // This export spans the team's ENTIRE history — potentially many seasons
+  // at once, each with its own field configuration — so, unlike every other
+  // gather function above, there's no single "the" season to resolve here.
+  // Each column instead comes from whichever season(s) actually used it (see
+  // loadUnionFormConfig()'s doc comment).
+  const [pitFields, matchFields] = await Promise.all([
+    loadUnionFormConfig(teamId, allPitDocs, 'pitScouting', DEFAULT_PIT_FIELDS),
+    loadUnionFormConfig(teamId, allMatchDocs, 'matchScouting', DEFAULT_MATCH_FIELDS)
+  ]);
 
   const eventCodes = Object.keys(byEvent).sort();
   // A for..of (not forEach) since each event's team-name lookup is async, and

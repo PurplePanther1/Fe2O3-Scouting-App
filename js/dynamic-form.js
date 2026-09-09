@@ -1,7 +1,15 @@
 // ====== Dynamic Pit Scouting Form System ======
-// Loads field configuration from teams/{teamId}/formConfig/pitScouting
-// and renders the form dynamically based on that config.
-// If no config exists, seeds a default one matching the original hardcoded fields.
+// Loads field configuration from teams/{teamId}/formConfig/{season}_pitScouting
+// and renders the form dynamically based on that config. Config is scoped per
+// FTC season (see getSelectedSeason()/getCurrentFtcSeason(), first-api.js) so
+// editing one season's form never changes how another season's already-
+// collected data displays or exports.
+// If no config exists for a season, seeds a default one matching the original
+// hardcoded fields — EXCEPT the current season the very first time it's ever
+// loaded post-migration, which instead inherits the old pre-season-scoping
+// shared doc (formConfig/pitScouting or matchScouting, no season prefix) if
+// one exists, so existing teams' already-configured forms aren't silently
+// reset. See loadSeasonScopedFormConfig() below.
 
 // ====== Default field configuration (matches original hardcoded form) ======
 const DEFAULT_PIT_FIELDS = [
@@ -112,94 +120,162 @@ const DEFAULT_MATCH_FIELDS = [
   }
 ];
 
-// ====== Cached form config (per team) ======
-let cachedFormConfig = null;
-let formConfigTeamId = null;
+// ====== Resolve the FTC season a form config lookup/save should target when
+// no explicit season is given — always "whatever the app's season selector
+// currently shows" (getSelectedSeason(), first-api.js), the same signal
+// every other event-scoped lookup in this app already keys off of. Falls
+// back to getCurrentFtcSeason() if the selector isn't in the DOM yet (e.g.
+// called before first-api.js's DOMContentLoaded populates it). Always
+// returned as a string, matching the season dropdown's own value type and
+// the {season}_pitScouting doc-ID convention. ======
+function resolveFormConfigSeason(season) {
+  if (season !== undefined && season !== null && season !== '') return String(season);
+  if (typeof getSelectedSeason === 'function') {
+    const fromSelector = getSelectedSeason();
+    if (fromSelector) return String(fromSelector);
+  }
+  return String(getCurrentFtcSeason());
+}
 
-// ====== Cached match form config (per team) ======
-let cachedMatchFormConfig = null;
-let matchFormConfigTeamId = null;
+// ====== Cached form config, keyed by "teamId_season" ======
+const formConfigCache = new Map();
 
-// ====== Load (or create) form config for a team ======
-async function loadFormConfig(teamId) {
-  // Return cached value if same team
-  if (cachedFormConfig && formConfigTeamId === teamId) {
-    return cachedFormConfig;
+// ====== Cached match form config, keyed by "teamId_season" ======
+const matchFormConfigCache = new Map();
+
+// ====== Shared season-scoped load/seed/migrate logic for both pit and match
+// form config. configType is 'pitScouting' or 'matchScouting'. The doc ID for
+// season S is "{S}_{configType}" (e.g. "2025_pitScouting") — a plain doc-ID
+// change within the existing formConfig collection, not a new subcollection
+// level, so no firestore.rules changes are needed (the existing
+// match /formConfig/{configDoc} rule already applies to any doc ID in that
+// collection).
+//
+// Migration: existing teams have ONE pre-season-scoping shared doc at the
+// OLD un-prefixed ID (formConfig/pitScouting or formConfig/matchScouting).
+// The first time the CURRENT season's config is loaded and no
+// {currentSeason}_{configType} doc exists yet, that legacy doc's fields (if
+// any) are copied in as the current season's starting config — so existing
+// teams' already-configured forms keep working immediately after this ships.
+// Any OTHER season (past or, once seasons roll over, future) with no config
+// doc yet just seeds DEFAULT_*_FIELDS fresh and never touches the legacy
+// doc — a new season always starts from a clean form, per design. The legacy
+// doc itself is left in place afterward (unused, harmless) rather than
+// deleted. ======
+// Returns { fields, season, wasFresh }. wasFresh is true only when NO
+// season-scoped doc existed yet and the hardcoded defaults had to be seeded
+// (i.e. there was nothing — not even a legacy config — to inherit) — used by
+// form-builder.js to show its "fresh form" banner and copy-from-past-season
+// action. Inheriting the legacy config counts as already-configured, not
+// fresh, since the team has real content either way. ======
+async function loadSeasonScopedFormConfig(teamId, season, configType, defaults, cache) {
+  const resolvedSeason = resolveFormConfigSeason(season);
+  const cacheKey = `${teamId}_${resolvedSeason}`;
+  if (cache.has(cacheKey)) {
+    return cache.get(cacheKey);
   }
 
+  const docId = `${resolvedSeason}_${configType}`;
+  const configRef = db.collection('teams').doc(teamId).collection('formConfig').doc(docId);
+
   try {
-    const doc = await db.collection('teams').doc(teamId)
-      .collection('formConfig').doc('pitScouting').get();
+    const doc = await configRef.get();
 
     if (doc.exists) {
       const data = doc.data();
       const sorted = (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-      cachedFormConfig = sorted;
-      formConfigTeamId = teamId;
-      return sorted;
+      const result = { fields: sorted, season: resolvedSeason, wasFresh: false };
+      cache.set(cacheKey, result);
+      return result;
     }
 
-    // No config exists — seed default and save
-    const defaultConfig = DEFAULT_PIT_FIELDS.map(f => ({ ...f }));
-    await db.collection('teams').doc(teamId)
-      .collection('formConfig').doc('pitScouting')
-      .set({ fields: defaultConfig });
-
-    cachedFormConfig = defaultConfig;
-    formConfigTeamId = teamId;
-    return defaultConfig;
-  } catch (err) {
-    console.warn('Failed to load form config, using defaults:', err);
-    // Fall back to defaults without saving
-    return DEFAULT_PIT_FIELDS.map(f => ({ ...f }));
-  }
-}
-
-// ====== Invalidate the config cache (call after saving edits) ======
-function invalidateFormConfigCache() {
-  cachedFormConfig = null;
-  formConfigTeamId = null;
-}
-
-// ====== Invalidate the match form config cache ======
-function invalidateMatchFormConfigCache() {
-  cachedMatchFormConfig = null;
-  matchFormConfigTeamId = null;
-}
-
-// ====== Load (or create) match scouting form config for a team ======
-async function loadMatchFormConfig(teamId) {
-  // Return cached value if same team
-  if (cachedMatchFormConfig && matchFormConfigTeamId === teamId) {
-    return cachedMatchFormConfig;
-  }
-
-  try {
-    const doc = await db.collection('teams').doc(teamId)
-      .collection('formConfig').doc('matchScouting').get();
-
-    if (doc.exists) {
-      const data = doc.data();
-      const sorted = (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-      cachedMatchFormConfig = sorted;
-      matchFormConfigTeamId = teamId;
-      return sorted;
+    // No season-scoped doc yet. Only the CURRENT season inherits the old
+    // shared (un-prefixed) config, and only on its own first load ever.
+    if (resolvedSeason === String(getCurrentFtcSeason())) {
+      const legacyDoc = await db.collection('teams').doc(teamId)
+        .collection('formConfig').doc(configType).get();
+      if (legacyDoc.exists) {
+        const legacyFields = (legacyDoc.data().fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+        await configRef.set({ fields: legacyFields });
+        const result = { fields: legacyFields, season: resolvedSeason, wasFresh: false };
+        cache.set(cacheKey, result);
+        return result;
+      }
     }
 
-    // No config exists — seed default and save
-    const defaultConfig = DEFAULT_MATCH_FIELDS.map(f => ({ ...f }));
-    await db.collection('teams').doc(teamId)
-      .collection('formConfig').doc('matchScouting')
-      .set({ fields: defaultConfig });
-
-    cachedMatchFormConfig = defaultConfig;
-    matchFormConfigTeamId = teamId;
-    return defaultConfig;
+    // No season-scoped doc, no legacy doc to inherit — fresh default config.
+    const defaultConfig = defaults.map(f => ({ ...f }));
+    await configRef.set({ fields: defaultConfig });
+    const result = { fields: defaultConfig, season: resolvedSeason, wasFresh: true };
+    cache.set(cacheKey, result);
+    return result;
   } catch (err) {
-    console.warn('Failed to load match form config, using defaults:', err);
+    console.warn(`Failed to load ${configType} form config for season ${resolvedSeason}, using defaults:`, err);
     // Fall back to defaults without saving
-    return DEFAULT_MATCH_FIELDS.map(f => ({ ...f }));
+    return { fields: defaults.map(f => ({ ...f })), season: resolvedSeason, wasFresh: true };
   }
+}
+
+// ====== Load (or create/migrate) pit scouting form config for a team +
+// season. season defaults to the app's currently-selected season. ======
+async function loadFormConfig(teamId, season) {
+  const { fields } = await loadSeasonScopedFormConfig(teamId, season, 'pitScouting', DEFAULT_PIT_FIELDS, formConfigCache);
+  return fields;
+}
+
+// ====== Invalidate the pit form config cache — call after saving edits.
+// With no args, clears every cached team/season; pass teamId (and optionally
+// season) to invalidate more narrowly. ======
+function invalidateFormConfigCache(teamId, season) {
+  if (teamId === undefined) { formConfigCache.clear(); return; }
+  if (season === undefined) {
+    Array.from(formConfigCache.keys())
+      .filter(key => key.startsWith(`${teamId}_`))
+      .forEach(key => formConfigCache.delete(key));
+    return;
+  }
+  formConfigCache.delete(`${teamId}_${resolveFormConfigSeason(season)}`);
+}
+
+// ====== Invalidate the match form config cache — same shape as
+// invalidateFormConfigCache() above, for matchFormConfigCache. ======
+function invalidateMatchFormConfigCache(teamId, season) {
+  if (teamId === undefined) { matchFormConfigCache.clear(); return; }
+  if (season === undefined) {
+    Array.from(matchFormConfigCache.keys())
+      .filter(key => key.startsWith(`${teamId}_`))
+      .forEach(key => matchFormConfigCache.delete(key));
+    return;
+  }
+  matchFormConfigCache.delete(`${teamId}_${resolveFormConfigSeason(season)}`);
+}
+
+// ====== Load (or create/migrate) match scouting form config for a team +
+// season. season defaults to the app's currently-selected season. ======
+async function loadMatchFormConfig(teamId, season) {
+  const { fields } = await loadSeasonScopedFormConfig(teamId, season, 'matchScouting', DEFAULT_MATCH_FIELDS, matchFormConfigCache);
+  return fields;
+}
+
+// ====== List every OTHER season that has a real saved config for the given
+// type ("pitScouting"/"matchScouting"), newest first — used by the form
+// builder's "copy fields from a past season" action (wishlist item 26).
+// Reads the whole (small — a couple docs per season) formConfig collection
+// and picks out doc IDs of the form "{season}_{configType}", since Firestore
+// can't query by ID suffix. excludeSeason is normally whichever season the
+// builder currently has open, so it can't "copy" a season onto itself. ======
+async function listOtherSeasonsWithFormConfig(teamId, configType, excludeSeason) {
+  const snap = await db.collection('teams').doc(teamId).collection('formConfig').get();
+  const suffix = `_${configType}`;
+  const seasons = [];
+  snap.forEach(doc => {
+    if (!doc.id.endsWith(suffix)) return;
+    const season = doc.id.slice(0, -suffix.length);
+    if (!/^\d+$/.test(season)) return; // skip the un-prefixed legacy doc
+    if (season === String(excludeSeason)) return;
+    seasons.push(season);
+  });
+  return seasons.sort((a, b) => Number(b) - Number(a));
 }
 
 // ====== Render a dynamic form into a container element ======

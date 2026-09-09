@@ -521,7 +521,11 @@ async function renderPitDataForTeam(teamNumber, eventCode) {
   const teamId = currentTeamData?.id;
   let fields = [];
   try {
-    fields = teamId && typeof loadFormConfig === 'function' ? await loadFormConfig(teamId) : [];
+    // Resolve fields for THIS entry's own season (falling back to the app's
+    // currently-selected season for a legacy entry saved before
+    // season-tagging existed) — this preview should reflect the field set
+    // that was active when the team was scouted, not today's form.
+    fields = teamId && typeof loadFormConfig === 'function' ? await loadFormConfig(teamId, entry.season) : [];
   } catch (err) {
     console.warn('Failed to load pit form config for team detail:', err);
     fields = [];

@@ -229,7 +229,11 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
   if (!teamId) return;
 
   try {
-    const fields = await loadMatchFormConfig(teamId);
+    // Resolve fields for THIS entry's own season (falling back to the app's
+    // currently-selected season for a legacy entry saved before
+    // season-tagging existed) — editing an old entry should show the field
+    // set that was active when it was scouted, not today's form.
+    const fields = await loadMatchFormConfig(teamId, existingData?.season);
     const container = document.getElementById('match-dynamic-fields');
     const renderedFields = lockMatchNumber ? fields.filter(f => f.id !== 'matchNumber') : fields;
 
@@ -443,6 +447,13 @@ async function performMatchScoutSave(fieldValues, matchNumber, teamId) {
         teamNumber: Number(currentMatchTeamNumber),
         teamId: teamId || null,
         matchNumber: Number(matchNumber),
+        // Tags which FTC season this entry belongs to, so form-config lookups
+        // (dynamic-form.js) and exports (sheets-export.js) resolve the field
+        // set that was actually active when it was scouted, not whatever the
+        // current season's form looks like now. Immutable once set on an
+        // existing entry (like scoutedAt below); a legacy entry saved before
+        // this field existed picks one up here on its next save.
+        season: (isExisting && existingData.season) ? existingData.season : resolveFormConfigSeason(),
         ...fieldValues,
         scoutedBy: scoutedByUid,
         // Raw email is never stored on entries — attribution is uid + display name only.
@@ -704,7 +715,14 @@ async function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
   const teamId = currentTeamData?.id;
   if (teamId && typeof loadMatchFormConfig === 'function') {
     try {
-      const matchFields = await loadMatchFormConfig(teamId);
+      // All these entries share one eventCode, so (once tagged) they share
+      // one real season too — pulled from whichever entry has it tagged,
+      // falling back to the app's currently-selected season if every entry
+      // here predates season-tagging. Resolving once for the whole list
+      // (rather than per-entry) keeps this consistent with the fact that an
+      // event can never actually span two seasons.
+      const listSeason = entries.find(e => e.season)?.season;
+      const matchFields = await loadMatchFormConfig(teamId, listSeason);
       if (matchListRenderGeneration[prefix] !== myGeneration) return; // superseded by a newer call
       previewFields = matchFields.filter(f => f.showInPreview !== false);
     } catch (err) {

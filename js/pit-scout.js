@@ -74,12 +74,16 @@ async function openPitScoutForm(teamNumber, eventCode) {
   }
 
   try {
-    const fields = await loadFormConfig(teamId);
+    // Load existing data first so an edit resolves fields for THAT entry's
+    // own season (falling back to the app's currently-selected season for a
+    // brand-new entry, or a legacy entry saved before season-tagging
+    // existed) — editing an old entry should show the field set that was
+    // active when it was scouted, not whatever the current season's form
+    // looks like now.
+    const existingData = await loadExistingPitData(teamId, eventCode, teamNumber);
+    const fields = await loadFormConfig(teamId, existingData?.season);
     const container = document.getElementById('pit-dynamic-fields');
 
-    // Load existing data for this team
-    const existingData = await loadExistingPitData(teamId, eventCode, teamNumber);
-    
     currentFormController = renderDynamicForm(container, fields, existingData);
 
     if (existingData) {
@@ -167,6 +171,13 @@ async function savePitScoutForm() {
       eventCode: currentPitEventCode,
       teamNumber: Number(currentPitTeamNumber),
       teamId: teamId || null,
+      // Tags which FTC season this entry belongs to, so form-config lookups
+      // (dynamic-form.js) and exports (sheets-export.js) resolve the field
+      // set that was actually active when it was scouted, not whatever the
+      // current season's form looks like now. Immutable once set on an
+      // existing entry (like scoutedAt below); a legacy entry saved before
+      // this field existed picks one up here on its next save.
+      season: (isExisting && existingData.season) ? existingData.season : resolveFormConfigSeason(),
       ...fieldValues,
       scoutedBy: scoutedByUid,
       // Raw email is never stored on entries — attribution is uid + display name only.

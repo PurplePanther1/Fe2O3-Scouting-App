@@ -324,17 +324,24 @@ async function deleteEntireTeam(teamId, uid, teamData) {
     clearTeamSessionState(teamId);
   }
 
-  // formConfig docs may not exist if the team never customized either form —
-  // deleting a doc that doesn't exist is a harmless no-op.
+  // formConfig now holds one doc per season per form type
+  // ({season}_pitScouting/{season}_matchScouting — dynamic-form.js), plus
+  // possibly the old pre-season-scoping shared docs (pitScouting/
+  // matchScouting) for a team that hasn't triggered migration yet — so the
+  // whole subcollection has to be queried and cleared, not just those two
+  // legacy doc IDs, or every other season's saved config would be orphaned.
+  // Same best-effort per-document style as deleteAllScoutingEntriesForTeam() above.
   try {
-    await db.collection('teams').doc(teamId).collection('formConfig').doc('pitScouting').delete();
+    const formConfigSnap = await db.collection('teams').doc(teamId).collection('formConfig').get();
+    for (const doc of formConfigSnap.docs) {
+      try {
+        await doc.ref.delete();
+      } catch (err) {
+        console.warn(`Failed to delete formConfig/${doc.id} for team ${teamId}:`, err);
+      }
+    }
   } catch (err) {
-    console.warn(`Failed to delete pitScouting formConfig for team ${teamId}:`, err);
-  }
-  try {
-    await db.collection('teams').doc(teamId).collection('formConfig').doc('matchScouting').delete();
-  } catch (err) {
-    console.warn(`Failed to delete matchScouting formConfig for team ${teamId}:`, err);
+    console.warn(`Failed to query formConfig for team deletion:`, err);
   }
 
   if (teamData && teamData.joinCode) {

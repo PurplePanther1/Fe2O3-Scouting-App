@@ -313,7 +313,7 @@ async function cacheEventToFirestore(eventData, ftcTeams) {
     const eventRef = db.collection('events').doc(eventData.code);
     await eventRef.set({
       name: eventData.name,
-      date: eventData.startDate ? new Date(eventData.startDate) : null,
+      date: eventData.dateStart ? new Date(eventData.dateStart) : null,
       ftcTeams: ftcTeams.map(t => ({
         teamNumber: t.teamNumber,
         name: t.name || t.nameFull || t.nameShort || t.schoolName || t.teamNameCalc || '',
@@ -388,7 +388,7 @@ function renderEventList(events) {
 
     const codeEl = document.createElement('div');
     codeEl.className = 'event-code';
-    codeEl.textContent = `${evt.code}  •  ${evt.startDate || 'Date TBD'}`;
+    codeEl.textContent = `${evt.code}  •  ${evt.dateStart || 'Date TBD'}`;
 
     item.appendChild(nameEl);
     item.appendChild(codeEl);
@@ -435,7 +435,7 @@ function renderSuggestions(events) {
 
     const codeEl = document.createElement('div');
     codeEl.className = 'suggestion-code';
-    codeEl.textContent = `${evt.code}  •  ${evt.startDate || ''}`;
+    codeEl.textContent = `${evt.code}  •  ${evt.dateStart || ''}`;
 
     item.appendChild(nameEl);
     item.appendChild(codeEl);

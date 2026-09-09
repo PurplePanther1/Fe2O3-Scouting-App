@@ -1,10 +1,25 @@
 // ====== Pit & Match Scouting Form Builder (Captain only) ======
 // Allows team captains to add, remove, reorder, and edit fields
 // in the pit scouting or match scouting form configuration.
-// Config stored in: teams/{teamId}/formConfig/pitScouting or matchScouting
+// Config stored in: teams/{teamId}/formConfig/{season}_pitScouting or {season}_matchScouting
+// (dynamic-form.js). The builder always edits whichever season the app's
+// global season selector currently shows (same convention as events/teams
+// elsewhere) — there's no separate season picker inside the builder itself.
 
 // ====== Current form type being edited ======
 let currentFormBuilderType = 'pitScouting'; // 'pitScouting' or 'matchScouting'
+
+// ====== Season the builder is currently editing — resolved once when the
+// builder opens (see openFormBuilder()), from resolveFormConfigSeason()
+// (dynamic-form.js), which defaults to the app's currently-selected season. ======
+let currentBuilderSeason = null;
+
+// ====== True when the season/type currently open has no real saved config
+// yet (loadSeasonScopedFormConfig seeded either the migrated legacy config or
+// the hardcoded defaults on this load) — drives the "fresh form" banner and
+// its copy-from-past-season action in renderBuilderFields(). Reset on every
+// open/switch, and cleared as soon as the team saves any real edit. ======
+let builderConfigWasFresh = false;
 
 // ====== Max fields allowed in the entry preview line at once (per form type
 // — pit and match each get their own budget), so the Team Detail card's
@@ -23,6 +38,7 @@ const FIELD_TYPES = [
 // ====== Open the form builder ======
 async function openFormBuilder(type) {
   currentFormBuilderType = type || 'pitScouting';
+  currentBuilderSeason = resolveFormConfigSeason();
 
   const teamId = currentTeamData?.id;
   if (!teamId) {
@@ -44,6 +60,16 @@ async function openFormBuilder(type) {
   // Update modal title based on type
   const title = currentFormBuilderType === 'matchScouting' ? 'Match Scouting Form Builder' : 'Pit Scouting Form Builder';
   document.getElementById('builder-modal-title').textContent = title;
+
+  // Season subtitle — always shown (not just for a fresh form) since editing
+  // is now season-scoped: whoever's editing needs to know which season's
+  // form they're changing.
+  const seasonLabelEl = document.getElementById('builder-season-label');
+  if (seasonLabelEl) {
+    seasonLabelEl.textContent = typeof formatFtcSeasonLabel === 'function'
+      ? `Editing: ${formatFtcSeasonLabel(currentBuilderSeason)}`
+      : `Editing season: ${currentBuilderSeason}`;
+  }
 
   // Update tab active state
   document.querySelectorAll('.builder-type-tab').forEach(tab => {
@@ -67,47 +93,151 @@ function switchBuilderType(type) {
   openFormBuilder(type);
 }
 
-// ====== Get the current config doc name ======
-function getBuilderConfigDoc() {
-  return currentFormBuilderType === 'matchScouting' ? 'matchScouting' : 'pitScouting';
+// ====== Get the current season-scoped config doc ID ======
+function getBuilderConfigDocId() {
+  return `${currentBuilderSeason}_${currentFormBuilderType}`;
 }
 
-// ====== Get the current cached config ======
+// ====== Get the current cached config (fields array only) ======
 function getBuilderCachedConfig() {
-  return currentFormBuilderType === 'matchScouting' ? cachedMatchFormConfig : cachedFormConfig;
+  const teamId = currentTeamData?.id;
+  if (!teamId || !currentBuilderSeason) return null;
+  const cache = currentFormBuilderType === 'matchScouting' ? matchFormConfigCache : formConfigCache;
+  const cached = cache.get(`${teamId}_${currentBuilderSeason}`);
+  return cached ? cached.fields : null;
 }
 
-// ====== Get the current config team ID ======
-function getBuilderConfigTeamId() {
-  return currentFormBuilderType === 'matchScouting' ? matchFormConfigTeamId : formConfigTeamId;
-}
-
-// ====== Set the current cached config ======
+// ====== Set the current cached config, after a builder write ======
 function setBuilderCachedConfig(fields, teamId) {
-  if (currentFormBuilderType === 'matchScouting') {
-    cachedMatchFormConfig = fields;
-    matchFormConfigTeamId = teamId;
-  } else {
-    cachedFormConfig = fields;
-    formConfigTeamId = teamId;
-  }
+  const cache = currentFormBuilderType === 'matchScouting' ? matchFormConfigCache : formConfigCache;
+  cache.set(`${teamId}_${currentBuilderSeason}`, { fields, season: currentBuilderSeason, wasFresh: false });
+  // A real edit just landed — this season/type is no longer "fresh" (matters
+  // if the team saves an edit and then reopens the builder without a full
+  // page reload in between).
+  builderConfigWasFresh = false;
+  renderFreshSeasonBanner();
 }
 
 // ====== Invalidate the current config cache ======
 function invalidateBuilderConfigCache() {
+  const teamId = currentTeamData?.id;
   if (currentFormBuilderType === 'matchScouting') {
-    invalidateMatchFormConfigCache();
+    invalidateMatchFormConfigCache(teamId, currentBuilderSeason);
   } else {
-    invalidateFormConfigCache();
+    invalidateFormConfigCache(teamId, currentBuilderSeason);
   }
 }
 
-// ====== Load the current config ======
+// ====== Load the current config (fields array; also updates
+// builderConfigWasFresh as a side effect) ======
 async function loadBuilderConfig(teamId) {
-  if (currentFormBuilderType === 'matchScouting') {
-    return await loadMatchFormConfig(teamId);
+  const defaults = currentFormBuilderType === 'matchScouting' ? DEFAULT_MATCH_FIELDS : DEFAULT_PIT_FIELDS;
+  const cache = currentFormBuilderType === 'matchScouting' ? matchFormConfigCache : formConfigCache;
+  const result = await loadSeasonScopedFormConfig(teamId, currentBuilderSeason, currentFormBuilderType, defaults, cache);
+  builderConfigWasFresh = result.wasFresh;
+  return result.fields;
+}
+
+// ====== Show/hide/populate the "fresh form" banner and its
+// copy-fields-from-a-past-season action (wishlist item 26). Only offers
+// seasons that actually have a saved config for the SAME form type — copying
+// pit fields into a match form (or vice versa) isn't offered. A no-op if the
+// banner markup isn't in the DOM (older cached page, etc.). ======
+async function renderFreshSeasonBanner() {
+  const banner = document.getElementById('builder-fresh-season-banner');
+  if (!banner) return;
+
+  if (!builderConfigWasFresh) {
+    banner.classList.add('hidden');
+    return;
   }
-  return await loadFormConfig(teamId);
+
+  const teamId = currentTeamData?.id;
+  const textEl = document.getElementById('builder-fresh-season-text');
+  const select = document.getElementById('builder-copy-season-select');
+  const copyBtn = document.getElementById('btn-builder-copy-season');
+  if (!teamId || !textEl || !select || !copyBtn) return;
+
+  // Snapshot which season/type this render is for — captured before the
+  // await below so a season/type switch (or the modal closing) mid-lookup
+  // can be detected and the now-stale result discarded instead of painting
+  // the wrong season's banner.
+  const renderedSeason = currentBuilderSeason;
+  const renderedType = currentFormBuilderType;
+  const seasonLabel = typeof formatFtcSeasonLabel === 'function' ? formatFtcSeasonLabel(renderedSeason) : renderedSeason;
+
+  let pastSeasons = [];
+  try {
+    pastSeasons = await listOtherSeasonsWithFormConfig(teamId, renderedType, renderedSeason);
+  } catch (err) {
+    console.warn('Failed to list past seasons with a saved form config:', err);
+  }
+
+  if (!builderConfigWasFresh || currentBuilderSeason !== renderedSeason || currentFormBuilderType !== renderedType) return;
+
+  banner.classList.remove('hidden');
+  textEl.textContent = `This is a fresh ${seasonLabel} form.`;
+
+  if (pastSeasons.length === 0) {
+    select.innerHTML = '';
+    select.classList.add('hidden');
+    copyBtn.classList.add('hidden');
+    return;
+  }
+
+  select.classList.remove('hidden');
+  copyBtn.classList.remove('hidden');
+  select.innerHTML = '';
+  pastSeasons.forEach(season => {
+    const option = document.createElement('option');
+    option.value = season;
+    option.textContent = typeof formatFtcSeasonLabel === 'function' ? formatFtcSeasonLabel(season) : season;
+    select.appendChild(option);
+  });
+}
+
+// ====== Copy another season's saved fields in as this season's starting
+// config (wishlist item 26) — a deliberate one-time seed the team can then
+// keep editing normally; it does not link the two seasons' configs together
+// afterward. Only enabled while the current season/type is genuinely fresh
+// (see renderFreshSeasonBanner()), so this only ever overwrites a
+// hardcoded-defaults doc, never a team's real configured fields. ======
+async function copyFormConfigFromSeason(fromSeason) {
+  const teamId = currentTeamData?.id;
+  if (!teamId || !fromSeason) return;
+
+  const seasonLabel = typeof formatFtcSeasonLabel === 'function' ? formatFtcSeasonLabel(fromSeason) : fromSeason;
+  const targetLabel = typeof formatFtcSeasonLabel === 'function' ? formatFtcSeasonLabel(currentBuilderSeason) : currentBuilderSeason;
+
+  if (typeof showConfirmModal !== 'function') return;
+  showConfirmModal({
+    title: 'Copy Form Fields?',
+    message: `Copy ${seasonLabel}'s fields into ${targetLabel}? This replaces the current (default) fields for this season with a copy of ${seasonLabel}'s — you can still edit them afterward.`,
+    confirmLabel: 'Copy Fields',
+    onConfirm: async () => {
+      showLoading('Copying fields...');
+      try {
+        const sourceDoc = await db.collection('teams').doc(teamId)
+          .collection('formConfig').doc(`${fromSeason}_${currentFormBuilderType}`).get();
+        const copiedFields = sourceDoc.exists ? (sourceDoc.data().fields || []) : [];
+
+        await db.collection('teams').doc(teamId)
+          .collection('formConfig').doc(getBuilderConfigDocId())
+          .set({ fields: copiedFields });
+
+        hideLoading();
+        invalidateBuilderConfigCache();
+        setBuilderCachedConfig(copiedFields, teamId);
+
+        await renderBuilderFields(teamId);
+        if (typeof setStatusMessage === 'function') setStatusMessage('builder', 'success', `Copied fields from ${seasonLabel}.`);
+      } catch (err) {
+        hideLoading();
+        console.error('Failed to copy form config from another season:', err);
+        if (typeof setStatusMessage === 'function') setStatusMessage('builder', 'error', 'Failed to copy fields.');
+      }
+    }
+  });
 }
 
 // ====== Render the field list in the builder ======
@@ -117,8 +247,9 @@ async function renderBuilderFields(teamId) {
 
   try {
     const fields = await loadBuilderConfig(teamId);
+    renderFreshSeasonBanner();
     list.innerHTML = '';
-    
+
     if (!fields || fields.length === 0) {
       list.innerHTML = '<p class="help-text" style="text-align:center">No fields yet. Add one below.</p>';
       return;
@@ -379,7 +510,7 @@ async function saveFieldEdit() {
   const teamId = currentTeamData?.id;
   if (!teamId) return;
 
-  const configDoc = getBuilderConfigDoc();
+  const configDoc = getBuilderConfigDocId();
 
   showLoading('Saving field...');
   try {
@@ -448,7 +579,7 @@ function removeField(index) {
     confirmLabel: 'Remove',
     danger: true,
     onConfirm: async () => {
-      const configDoc = getBuilderConfigDoc();
+      const configDoc = getBuilderConfigDocId();
 
       showLoading('Removing field...');
       try {
@@ -489,7 +620,7 @@ async function moveField(fromIndex, direction) {
   [fields[fromIndex], fields[toIndex]] = [fields[toIndex], fields[fromIndex]];
   fields.forEach((f, i) => { f.sortOrder = i; });
 
-  const configDoc = getBuilderConfigDoc();
+  const configDoc = getBuilderConfigDocId();
 
   showLoading('Reordering...');
   try {
@@ -531,6 +662,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // Builder buttons
   document.getElementById('btn-builder-close').addEventListener('click', closeFormBuilder);
   document.getElementById('btn-builder-add-field').addEventListener('click', () => openFieldEditor(-1));
+
+  // Copy-fields-from-a-past-season action (wishlist item 26) — only ever
+  // visible/enabled while the fresh-season banner is shown.
+  const copySeasonBtn = document.getElementById('btn-builder-copy-season');
+  if (copySeasonBtn) {
+    copySeasonBtn.addEventListener('click', () => {
+      const select = document.getElementById('builder-copy-season-select');
+      if (select && select.value) copyFormConfigFromSeason(select.value);
+    });
+  }
 
   // Field editor buttons
   document.getElementById('btn-bld-save').addEventListener('click', saveFieldEdit);

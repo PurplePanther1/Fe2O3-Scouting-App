@@ -728,6 +728,15 @@
         <p class="help-text" style="margin-bottom:16px">
           Add, edit, reorder, or remove fields. Changes affect all team members immediately.
         </p>
+        <p id="builder-season-label" class="help-text" style="margin-bottom:8px; font-weight:600"></p>
+        <!-- Shown only when this season/type has no saved config yet (wishlist item 26) -->
+        <div id="builder-fresh-season-banner" class="hidden" style="margin-bottom:16px; padding:10px 12px; background:var(--surface); border:1px solid var(--border); border-radius:8px">
+          <p id="builder-fresh-season-text" class="help-text" style="margin:0 0 8px 0"></p>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
+            <select id="builder-copy-season-select" style="flex:1; min-width:160px"></select>
+            <button id="btn-builder-copy-season" class="btn btn-outline btn-small">Copy Fields</button>
+          </div>
+        </div>
         <div id="builder-field-list" class="builder-field-list"></div>
         <button id="btn-builder-add-field" class="btn btn-outline" style="margin-top:12px; width:100%">+ Add Field</button>
         <p id="builder-error" class="error-message"></p>

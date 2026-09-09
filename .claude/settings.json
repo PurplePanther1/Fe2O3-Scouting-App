@@ -200,7 +200,16 @@
       "Bash(node scripts/_tmp_drive_pin_race.js)",
       "Bash(node scripts/_tmp_drive_results_race.js)",
       "Bash(node scripts/_tmp_drive_legit_deselect.js)",
-      "Bash(rm -f scripts/_tmp_pin_race_harness.html scripts/_tmp_drive_pin_race.js scripts/_tmp_drive_results_race.js scripts/_tmp_drive_legit_deselect.js)"
+      "Bash(rm -f scripts/_tmp_pin_race_harness.html scripts/_tmp_drive_pin_race.js scripts/_tmp_drive_results_race.js scripts/_tmp_drive_legit_deselect.js)",
+      "Read(//c/Users/tim/AppData/Local/Temp/claude/c--Users-tim-Documents-Kid-Sync5-Levi-5-Robotics-Coding-Scouting-App/5a365f70-839e-4c3c-992d-68a2d4c075e7/scratchpad/staging/**)",
+      "Read(//c/Users/tim/AppData/Local/Temp/claude/c--Users-tim-Documents-Kid-Sync5-Levi-5-Robotics-Coding-Scouting-App/5a365f70-839e-4c3c-992d-68a2d4c075e7/scratchpad/staging/js/**)",
+      "Bash(curl -sI https://fe2o3scouting.pages.dev/js/first-api.js?cb=__CMDSUB_OUTPUT__)",
+      "Bash(curl -sI https://0ba52a76.fe2o3scouting.pages.dev/js/first-api.js?cb=__CMDSUB_OUTPUT__)",
+      "Bash(curl -s https://fe2o3scouting.pages.dev/js/first-api.js?cb=__CMDSUB_OUTPUT__ -o /tmp/cf-first-api.js)",
+      "Bash(curl -s https://fe2o3scouting.pages.dev/js/dynamic-form.js?cb=__CMDSUB_OUTPUT__ -o /tmp/cf-dynamic-form.js)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" \"https://fe2o3scouting.pages.dev/scouting/index.html?cb=$\\(date +%s\\)\")",
+      "Bash(curl -s \"https://scouting-app-9b4c4.web.app/scouting/index.html?cb=$\\(date +%s\\)\")",
+      "Bash(curl -sL https://fe2o3scouting.pages.dev/scouting/index.html?cb=__CMDSUB_OUTPUT__ -o /tmp/cf-scouting-index2.html)"
     ]
   }
 }
