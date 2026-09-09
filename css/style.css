@@ -25,6 +25,11 @@
   --alliance-red-bg: rgba(239, 68, 68, 0.14);
   --alliance-blue: #3b82f6;
   --alliance-blue-bg: rgba(59, 130, 246, 0.14);
+  /* Live-collaboration presence — "someone else is here" — kept distinct
+     from --primary so a focused field's own border color and a field-level
+     presence indicator never read as the same signal. */
+  --presence: #f5a623;
+  --presence-bg: rgba(245, 166, 35, 0.14);
   --google-bg: #ffffff;
   --google-text: #333333;
   --radius: 12px;
@@ -1407,6 +1412,60 @@ input[type="password"]::placeholder {
 .pit-field textarea {
   resize: vertical;
   min-height: 60px;
+}
+
+.pit-field select:disabled,
+.pit-field input:disabled,
+.pit-field textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ====== Live collaboration: field-level "someone else is here" indicator
+   (applyPresenceIndicators(), live-entry-sync.js) — a visual cue only, not
+   a lock; the underlying value is still plain last-write-wins. ====== */
+.pit-field.field-presence-active select,
+.pit-field.field-presence-active input,
+.pit-field.field-presence-active textarea {
+  border-color: var(--presence);
+  background: var(--presence-bg);
+}
+
+.field-presence-tag {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--presence-bg);
+  color: var(--presence);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+/* ====== Live collaboration: "who else is in this entry right now" banner
+   and the Take Over button shown when opening an entry someone else already
+   has open (renderPresenceBanner(), live-entry-sync.js). ====== */
+.presence-banner {
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--presence-bg);
+  color: var(--presence);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.btn-take-over {
+  display: block;
+  width: 100%;
+  margin-bottom: 14px;
+  border-color: var(--presence);
+  color: var(--presence);
+}
+
+.btn-take-over:hover {
+  background: var(--presence);
+  color: #fff;
 }
 
 .pit-field select {

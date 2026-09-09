@@ -285,11 +285,13 @@ function renderDynamicForm(container, fields, existingData) {
 
   const fieldElements = {}; // id -> DOM element (input, select, textarea)
   const labelElements = {}; // id -> label DOM element
+  const fieldDivs = {}; // id -> wrapping div, used by setFieldPresenceIndicator()
 
   fields.forEach(field => {
     const fieldDiv = document.createElement('div');
     fieldDiv.className = 'pit-field';
     fieldDiv.dataset.fieldId = field.id;
+    fieldDivs[field.id] = fieldDiv;
 
     // Label
     const label = document.createElement('label');
@@ -360,21 +362,58 @@ function renderDynamicForm(container, fields, existingData) {
       }
       return null;
     },
-    // Set values from an object (for loading existing data)
+    // Set values from an object (for loading existing data). A key whose
+    // value is null/undefined clears that field back to blank — matters for
+    // live remote updates (dynamic-form.js itself is only ever called with a
+    // full snapshot, where this was previously harmless either way).
     setValues(data) {
       if (!data) return;
       fields.forEach(field => {
         const el = fieldElements[field.id];
         if (!el) return;
+        if (!(field.id in data)) return;
         const val = data[field.id];
-        if (val != null) {
-          el.value = val;
-        }
+        el.value = (val != null) ? val : '';
       });
     },
     // Get a specific field element
     getField(id) {
       return fieldElements[id] || null;
+    },
+    // Show/hide a lightweight "someone else is focused here" indicator on one
+    // field. Pass a display name to show it, or null/undefined to clear it.
+    // Used by live-entry-sync.js's applyPresenceIndicators() — not a lock,
+    // purely visual (see that file for why).
+    setFieldPresenceIndicator(id, name) {
+      const fieldDiv = fieldDivs[id];
+      if (!fieldDiv) return;
+      let tag = fieldDiv.querySelector('.field-presence-tag');
+      if (!name) {
+        fieldDiv.classList.remove('field-presence-active');
+        if (tag) tag.remove();
+        return;
+      }
+      fieldDiv.classList.add('field-presence-active');
+      if (!tag) {
+        tag = document.createElement('span');
+        tag.className = 'field-presence-tag';
+        fieldDiv.appendChild(tag);
+      }
+      tag.textContent = name;
+    },
+    // Disable/enable every rendered field — used for the read-only "someone
+    // else is already editing this" view, before a "Take Over" click (if any)
+    // switches the form into edit mode.
+    setReadOnly(readOnly) {
+      fields.forEach(field => {
+        const el = fieldElements[field.id];
+        if (!el) return;
+        if (field.type === 'counter') {
+          el.querySelectorAll('button').forEach(btn => { btn.disabled = readOnly; });
+        } else {
+          el.disabled = readOnly;
+        }
+      });
     }
   };
 }
@@ -472,11 +511,22 @@ function renderCounter(field, savedValue) {
     plusBtn.disabled = max !== null && current >= max;
   }
 
+  // Dispatches a synthetic 'input' on the wrapper itself after each tap, so
+  // wireLiveFormFields() (live-entry-sync.js) can wire a counter field the
+  // same generic way as any real <input> — it only listens for event names,
+  // not a specific element type. (No synthetic focus/blur here: there's no
+  // natural "focused" moment for a +/- button tap, so counter fields don't
+  // get the live field-level presence indicator — a known, accepted gap.)
+  function notifyChanged() {
+    wrapper.dispatchEvent(new Event('input', { bubbles: false }));
+  }
+
   minusBtn.addEventListener('click', () => {
     if (current <= min) return;
     current = Math.max(min, current - step);
     render();
     playCounterTone('down');
+    notifyChanged();
   });
 
   plusBtn.addEventListener('click', () => {
@@ -484,6 +534,7 @@ function renderCounter(field, savedValue) {
     current = max !== null ? Math.min(max, current + step) : current + step;
     render();
     playCounterTone('up');
+    notifyChanged();
   });
 
   render();

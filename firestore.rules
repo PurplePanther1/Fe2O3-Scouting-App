@@ -57,6 +57,48 @@ service cloud.firestore {
       );
     }
 
+    // ====== Live-collaboration ownership model (pit/match scouting entries,
+    // wishlist item 10) ======
+    // activeEditors (a map field on the entry doc itself — see
+    // js/live-entry-sync.js for why it has to live there rather than a
+    // subcollection: rules can get()/exists() a specific document path but
+    // cannot query or enumerate a collection, so "is anyone else currently
+    // present" is only enforceable server-side if it's a field on the very
+    // document being written) tracks who currently has this entry open for
+    // editing. hasActiveEditors() is a coarse, non-authoritative signal —
+    // whether any individual entry is "stale" is a CLIENT-SIDE display
+    // concern only (see LIVE_PRESENCE_STALE_MS in live-entry-sync.js); an
+    // unpruned crashed-tab entry just leaves the document in the MORE
+    // permissive state below forever, which can never lock anyone out, only
+    // stay collaborative longer than strictly necessary.
+    function hasActiveEditors(entry) {
+      return entry != null && entry.activeEditors != null && entry.activeEditors.size() > 0;
+    }
+
+    // Someone's already actively editing -> any team member may join, edit
+    // a field, or take over. Nobody's in there -> the usual owner/captain/
+    // canEditOtherEntries gate applies, same as an entry with no live
+    // session ever attached to it at all (a batch-mode match entry, or any
+    // entry from before this feature existed).
+    function canJoinOrEditEntry(teamId, entry) {
+      return isTeamMember(teamId) && (hasActiveEditors(entry) || canEditOrDeleteEntry(teamId, entry));
+    }
+
+    // Ownership (scoutedBy/scoutedByName) may change ONLY as the direct
+    // result of the caller removing themselves as the last remaining active
+    // editor — "whoever is last to close out owns it" — never an arbitrary
+    // reassignment. Requires they were a recognized editor immediately
+    // beforehand, so ownership can never transfer to someone who was never
+    // validly admitted as an editor in the first place (see
+    // canJoinOrEditEntry above, which is what gates admission).
+    function isValidOwnershipTransfer(before, after) {
+      return before.activeEditors != null
+        && (request.auth.uid in before.activeEditors)
+        && after.activeEditors != null
+        && after.activeEditors.size() == 0
+        && after.scoutedBy == request.auth.uid;
+    }
+
     // Narrow carve-out for a member with ONLY canKickMembers (no captain, no
     // canEditOtherEntries — those two already pass canEditOrDeleteEntry()
     // above regardless of the target's current membership, so this only ever
@@ -250,12 +292,26 @@ service cloud.firestore {
       // on read is kept anyway, purely for parity with the flat collection's
       // rule (a nonexistent doc leaks nothing either way, so this is a no-op
       // change in practice, not a tightening or loosening of access).
+      // allow update's first clause now accepts EITHER the classic
+      // owner/captain/canEditOtherEntries gate OR canJoinOrEditEntry's
+      // "someone's already actively editing" case (live-collaboration
+      // ownership model, wishlist item 10 — see canJoinOrEditEntry/
+      // isValidOwnershipTransfer above for the reasoning), and the
+      // scoutedBy-immutability check now has a second legal path: a valid
+      // ownership transfer, triggered only by the last active editor
+      // removing themselves. An entry that never goes through
+      // js/live-entry-sync.js (no activeEditors field ever written) behaves
+      // under this rule exactly as it did before this feature existed —
+      // hasActiveEditors() is false, canJoinOrEditEntry() reduces to
+      // canEditOrDeleteEntry(), and isValidOwnershipTransfer() is never
+      // reachable (before.activeEditors is always null for such an entry).
       match /pitScouting/{documentId} {
         allow read: if resource == null || isTeamMember(teamId);
         allow create: if isAuth() && isTeamMember(teamId);
         allow update: if isAuth() && (
-          (canEditOrDeleteEntry(teamId, resource.data)
-            && request.resource.data.scoutedBy == resource.data.scoutedBy)
+          (canJoinOrEditEntry(teamId, resource.data)
+            && (request.resource.data.scoutedBy == resource.data.scoutedBy
+                || isValidOwnershipTransfer(resource.data, request.resource.data)))
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
           || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
@@ -268,14 +324,22 @@ service cloud.firestore {
       // flat /matchScouting/{documentId} collection below during the data-
       // reorg migration). Match's doc-ID scheme and per-match cardinality
       // differ from pit's at the application layer, but none of that is
-      // visible to these rules — teamId, scoutedBy, and lastEditedBy are the
-      // only fields any of this depends on, same as pit.
+      // visible to these rules — teamId, scoutedBy, lastEditedBy, and
+      // activeEditors are the only fields any of this depends on, same as
+      // pit. Only entries opened from the match-based/schedule view ever get
+      // a live session attached (js/match-scout.js keeps the team-based
+      // view's manual entry flow on the pre-existing batch-save model) — this
+      // rule doesn't need to know or care which entry point created a given
+      // doc, since canJoinOrEditEntry()/isValidOwnershipTransfer() already
+      // degrade to today's exact behavior for any entry with no
+      // activeEditors field.
       match /matchScouting/{documentId} {
         allow read: if resource == null || isTeamMember(teamId);
         allow create: if isAuth() && isTeamMember(teamId);
         allow update: if isAuth() && (
-          (canEditOrDeleteEntry(teamId, resource.data)
-            && request.resource.data.scoutedBy == resource.data.scoutedBy)
+          (canJoinOrEditEntry(teamId, resource.data)
+            && (request.resource.data.scoutedBy == resource.data.scoutedBy
+                || isValidOwnershipTransfer(resource.data, request.resource.data)))
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
           || canAnonymizeOwnLastEdit(resource.data, request.resource.data)

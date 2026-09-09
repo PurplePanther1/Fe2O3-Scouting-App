@@ -564,6 +564,9 @@
         <button id="btn-pit-cancel" class="btn-modal-close">&times;</button>
       </div>
       <form id="pit-form" onsubmit="return false">
+        <p id="pit-presence-banner" class="presence-banner hidden"></p>
+        <button type="button" id="btn-pit-take-over" class="btn btn-outline btn-take-over hidden">Take Over Editing</button>
+
         <!-- Dynamic fields are rendered here by dynamic-form.js -->
         <div id="pit-dynamic-fields"></div>
 
@@ -572,7 +575,7 @@
 
         <div class="pit-modal-actions">
           <button type="button" id="btn-pit-cancel-inline" class="btn btn-outline">Cancel</button>
-          <button type="button" id="btn-pit-save" class="btn btn-primary">Save Scout Data</button>
+          <button type="button" id="btn-pit-save" class="btn btn-primary">Done</button>
         </div>
         <button type="button" id="pit-delete-btn" class="btn btn-link btn-delete hidden" style="margin-top:12px; color:var(--error)">Delete this scouting data</button>
       </form>
@@ -588,6 +591,9 @@
         <button id="btn-match-cancel" class="btn-modal-close">&times;</button>
       </div>
       <form id="match-form" onsubmit="return false">
+        <p id="match-presence-banner" class="presence-banner hidden"></p>
+        <button type="button" id="btn-match-take-over" class="btn btn-outline btn-take-over hidden">Take Over Editing</button>
+
         <!-- Dynamic fields are rendered here by dynamic-form.js -->
         <div id="match-dynamic-fields"></div>
 
@@ -1135,6 +1141,7 @@
   <script src="/js/pinned-events.js"></script>
   <script src="/js/ftcscout.js"></script>
   <script src="/js/dynamic-form.js"></script>
+  <script src="/js/live-entry-sync.js"></script>
   <script src="/js/pit-scout.js"></script>
   <script src="/js/match-scout.js"></script>
   <script src="/js/match-schedule-view.js"></script>

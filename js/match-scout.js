@@ -13,9 +13,30 @@
 // continuity with pre-migration data. Older entries (saved before this
 // existed) used `${eventCode}_${matchNumber}_${teamNumber}` — left as-is
 // (see findExistingMatchDoc() below) rather than migrated.
-// Fields: eventCode, matchNumber, teamNumber, teamId, plus dynamic fields
-//         from formConfig, scoutedBy (uid), scoutedByName, scoutedAt, updatedAt
+// Fields: eventCode, matchNumber, teamNumber, teamId, season, plus dynamic
+//         fields from formConfig, scoutedBy/scoutedByName, scoutedAt,
+//         lastEditedBy/lastEditedByName/lastEditedByTimestamp, updatedAt,
+//         and (live entries only) activeEditors.
 // Unlike pit scouting, each team can have multiple match entries (one per match).
+//
+// Two distinct modes, depending on entry point — unlike pit scouting, which
+// is always live:
+//  - LIVE (the match-based/schedule view, match-schedule-view.js ->
+//    openMatchScoutFormFromSchedule): matchNumber is already known from
+//    which row was clicked, so there's no "which slot" ambiguity. Uses
+//    live-entry-sync.js exactly like pit-scout.js — field writes go live as
+//    typed, presence/ownership apply, Save becomes "Done".
+//  - BATCH (the team-based view's manual "+Match Scout"/"Edit" buttons):
+//    matchNumber is typed/edited by hand, so the duplicate-slot problem is
+//    real (this is what commit b77fcb9 was about) and there's no natural
+//    moment to "join" a live session before a number is even chosen. Keeps
+//    today's single-write-on-Save model entirely; the only change is
+//    checking for a colliding matchNumber as soon as one is entered (blur),
+//    rather than only at Save — see checkMatchNumberCollision().
+// Which mode applies is determined by the SAME lockedMatchNumber/
+// lockMatchNumber parameter that already distinguished "came from the
+// schedule" from "came from the team view" before any of this — no new flag
+// needed.
 
 let currentMatchTeamNumber = null;
 let currentMatchEventCode = null;
@@ -25,12 +46,17 @@ let currentMatchDocId = null; // set when editing an existing entry
 // already known from which match row + team slot was clicked. When
 // non-null, the matchNumber field is excluded from the rendered dynamic
 // form (same as teamNumber/eventCode, which are never dynamic-form fields
-// at all — title + module state only) and saveMatchScoutForm() uses this
-// value instead of reading one out of the form.
+// at all — title + module state only), saveMatchScoutForm() uses this value
+// instead of reading one out of the form, and — per the header comment —
+// this is also exactly what selects LIVE mode.
 let currentLockedMatchNumber = null;
-let matchScoutUnsubscribe = null; // Firestore snapshot listener
-let matchEntriesCache = {}; // keyed by "eventCode_teamNumber" -> array of entries (each entry's own .id is the real doc id, format-agnostic)
+let matchScoutUnsubscribe = null; // Firestore snapshot listener (status/"how many matches logged" listener — see watchMatchScoutStatus)
+let matchEntriesCache = {}; // keyed by "eventCode_teamNumber" -> array of entries (each entry's own .id is the real doc id, format-agnostic). Only entries that count per matchEntryHasRealContent() are included — see watchMatchScoutStatus().
 let currentMatchFormController = null; // returned by renderDynamicForm
+let currentMatchFormMode = null; // 'live' or 'batch' — set by whichever open function ran, read by the Save/Done button handler
+let currentMatchFields = null; // the field config rendered into the open form, needed by the live session's snapshot handler (live mode only)
+let currentMatchLiveSession = null; // returned by createLiveEntrySession (live-entry-sync.js), live mode only
+let matchStatusWatchGeneration = 0; // guards against a slower, superseded async snapshot handler clobbering a newer one's result — see watchMatchScoutStatus()
 
 // ====== Find this team's existing match-scouting entry for (eventCode,
 // matchNumber, teamNumber), regardless of which document-ID scheme it was
@@ -47,6 +73,18 @@ async function findExistingMatchDoc(teamId, eventCode, matchNumber, teamNumber) 
   if (snap.empty) return null;
   const doc = snap.docs[0];
   return { id: doc.id, ...doc.data() };
+}
+
+// ====== Does (eventCode, matchNumber, teamNumber) already belong to some
+// OTHER entry than the one currently open (excludeDocId)? Used by batch
+// mode's matchNumber blur check (as soon as a number is entered, for the
+// earliest possible warning) and by performMatchScoutSave's save-time
+// re-check (kept as a defensive backstop — see saveMatchScoutForm, b77fcb9)
+// so both call sites agree on exactly what counts as a collision. ======
+async function checkMatchNumberCollision(teamId, eventCode, matchNumber, teamNumber, excludeDocId) {
+  const existing = await findExistingMatchDoc(teamId, eventCode, matchNumber, teamNumber);
+  if (existing && existing.id !== excludeDocId) return existing;
+  return null;
 }
 
 // Bulk-select state for the match entries list (captain / canEditOtherEntries
@@ -142,15 +180,112 @@ async function bulkDeleteMatchScoutData(entryIds) {
   return results;
 }
 
+// ====== Shared live-mode wiring for the match-based (schedule) view — see
+// the file header for why only this entry point gets live-entry-sync.js.
+// Creates the live session, attaches its snapshot handler to the already-
+// rendered form, and either joins immediately (startInEditMode) or opens
+// read-only with a "Take Over" option. ======
+async function attachMatchLiveSession(docId, fields, baseFieldsIfNew, startInEditMode) {
+  currentMatchFormMode = 'live';
+  currentMatchFields = fields;
+  document.getElementById('btn-match-save').textContent = 'Done';
+  document.getElementById('btn-match-take-over').classList.add('hidden');
+  const presenceBanner = document.getElementById('match-presence-banner');
+  presenceBanner.classList.add('hidden');
+  presenceBanner.textContent = '';
+
+  const teamId = currentTeamData?.id;
+  const docRef = db.collection('teams').doc(teamId).collection('matchScouting').doc(docId);
+  const displayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
+
+  currentMatchLiveSession = createLiveEntrySession({
+    docRef,
+    uid: currentUser.uid,
+    displayName,
+    onSnapshotData: (data) => {
+      if (!currentMatchFormController || !currentMatchFields) return;
+      applyRemoteFieldValues(currentMatchFormController, currentMatchFields, data);
+      applyPresenceIndicators(currentMatchFormController, currentMatchFields, data?.activeEditors, currentUser.uid);
+      renderPresenceBanner(document.getElementById('match-presence-banner'), data?.activeEditors, currentUser.uid);
+    }
+  });
+
+  if (startInEditMode) {
+    await currentMatchLiveSession.join(baseFieldsIfNew);
+    currentMatchFormController.setReadOnly(false);
+    wireLiveFormFields(currentMatchFormController, fields, currentMatchLiveSession);
+    document.getElementById('btn-match-take-over').classList.add('hidden');
+  } else {
+    currentMatchFormController.setReadOnly(true);
+    document.getElementById('btn-match-take-over').classList.remove('hidden');
+  }
+}
+
+// ====== "Take Over" — join the live session as an active editor after
+// opening read-only because someone else was already in here. ======
+async function takeOverMatchScoutEntry() {
+  if (!currentMatchLiveSession || !currentMatchFormController || !currentMatchFields || !currentUser) return;
+  try {
+    const displayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
+    await currentMatchLiveSession.join({
+      eventCode: currentMatchEventCode,
+      teamNumber: Number(currentMatchTeamNumber),
+      matchNumber: Number(currentLockedMatchNumber),
+      teamId: currentTeamData?.id,
+      season: resolveFormConfigSeason(),
+      scoutedBy: currentUser.uid,
+      scoutedByName: displayName,
+      scoutedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    currentMatchFormController.setReadOnly(false);
+    wireLiveFormFields(currentMatchFormController, currentMatchFields, currentMatchLiveSession);
+    document.getElementById('btn-match-take-over').classList.add('hidden');
+  } catch (err) {
+    console.error('Failed to take over match scouting entry:', err);
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({ title: 'Take Over Failed', message: 'Could not take over this entry. Please check your connection and try again.' });
+    }
+  }
+}
+
+// ====== Watch the matchNumber field (batch mode only — see file header) for
+// a collision with some other already-existing entry, as soon as a valid
+// number is entered, rather than waiting for Save. excludeDocId is the entry
+// currently being edited (null for a brand-new entry), so editing a slot
+// back onto its own existing number is never flagged as a collision with
+// itself. Per decision: don't auto-open/redirect into the colliding entry,
+// just block with a message pointing at it. ======
+function wireMatchNumberCollisionCheck(formController, teamId, eventCode, teamNumber, excludeDocId) {
+  const el = formController.getField('matchNumber');
+  if (!el) return;
+  const errorEl = document.getElementById('match-modal-error');
+  const checkNow = async () => {
+    const matchNumber = formController.getValues().matchNumber;
+    if (!matchNumber) return;
+    const collision = await checkMatchNumberCollision(teamId, eventCode, matchNumber, teamNumber, excludeDocId);
+    if (collision) {
+      errorEl.textContent = `Match ${matchNumber} for this team already exists — go edit that entry from the team's match list instead, or change the match number.`;
+    } else if (errorEl.textContent.startsWith('Match ') && errorEl.textContent.includes('already exists')) {
+      errorEl.textContent = '';
+    }
+  };
+  el.addEventListener('blur', checkNow);
+  el.addEventListener('change', checkNow);
+}
+
 // ====== Open the match scouting form (modal) for a new entry ======
-// lockedMatchNumber/teamName are only passed by openMatchScoutFormFromSchedule()
-// (the match-based view's entry point, below) — every other existing caller
-// passes just (teamNumber, eventCode), which behaves exactly as before.
-async function openMatchScoutForm(teamNumber, eventCode, lockedMatchNumber = null, teamName = null) {
+// lockedMatchNumber/teamName/accessInfo are only passed by
+// openMatchScoutFormFromSchedule() (the match-based/LIVE view's entry point,
+// below) — every other existing caller passes just (teamNumber, eventCode),
+// which behaves exactly as before (BATCH mode, team-based view).
+async function openMatchScoutForm(teamNumber, eventCode, lockedMatchNumber = null, teamName = null, accessInfo = null) {
   currentMatchTeamNumber = teamNumber;
   currentMatchEventCode = eventCode;
   currentMatchDocId = null;
   currentLockedMatchNumber = lockedMatchNumber;
+  currentMatchFormMode = lockedMatchNumber != null ? 'live' : 'batch';
+  currentMatchFields = null;
+  if (currentMatchLiveSession) { currentMatchLiveSession.detach(); currentMatchLiveSession = null; }
 
   // Reset modal state
   document.getElementById('match-modal-title').textContent = lockedMatchNumber != null
@@ -159,6 +294,11 @@ async function openMatchScoutForm(teamNumber, eventCode, lockedMatchNumber = nul
   document.getElementById('match-modal-error').textContent = '';
   document.getElementById('match-modal-success').textContent = '';
   document.getElementById('match-delete-btn').classList.add('hidden');
+  document.getElementById('btn-match-take-over').classList.add('hidden');
+  document.getElementById('btn-match-save').textContent = lockedMatchNumber != null ? 'Done' : 'Save Match Data';
+  const presenceBanner = document.getElementById('match-presence-banner');
+  presenceBanner.classList.add('hidden');
+  presenceBanner.textContent = '';
 
   // Show modal
   document.getElementById('match-modal').classList.remove('hidden');
@@ -190,6 +330,28 @@ async function openMatchScoutForm(teamNumber, eventCode, lockedMatchNumber = nul
 
     // Clear success message
     document.getElementById('match-modal-success').textContent = '';
+
+    if (lockedMatchNumber != null) {
+      // LIVE mode. Reached only from openMatchScoutFormFromSchedule's
+      // "not found" branch, which already confirmed nothing exists for this
+      // slot — so this is always a brand-new entry with zero active editors,
+      // i.e. always startInEditMode.
+      const docId = `${teamId}_${eventCode}_${lockedMatchNumber}_${teamNumber}`;
+      const displayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
+      await attachMatchLiveSession(docId, fields, {
+        eventCode,
+        teamNumber: Number(teamNumber),
+        matchNumber: Number(lockedMatchNumber),
+        teamId,
+        season: resolveFormConfigSeason(),
+        scoutedBy: currentUser.uid,
+        scoutedByName: displayName,
+        scoutedAt: firebase.firestore.FieldValue.serverTimestamp()
+      }, true);
+    } else {
+      // BATCH mode — today's model, plus the early duplicate-number check.
+      wireMatchNumberCollisionCheck(currentMatchFormController, teamId, eventCode, teamNumber, null);
+    }
   } catch (err) {
     console.error('Failed to render match form:', err);
     document.getElementById('match-modal-error').textContent = 'Failed to load form. Please try again.';
@@ -197,18 +359,21 @@ async function openMatchScoutForm(teamNumber, eventCode, lockedMatchNumber = nul
 }
 
 // ====== Open match form to edit an existing entry ======
-// lockMatchNumber/teamName are only passed by openMatchScoutFormFromSchedule()
-// (below) — every other existing caller (the team-based view's Edit button)
-// passes just (docId, existingData), which behaves exactly as before. The
-// locked value is always derived from existingData.matchNumber itself, not
-// a separately-passed number, so it can never disagree with the entry being
-// edited.
-async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, teamName = null) {
+// lockMatchNumber/teamName/accessInfo are only passed by
+// openMatchScoutFormFromSchedule() (below) — every other existing caller
+// (the team-based view's Edit button) passes just (docId, existingData),
+// which behaves exactly as before (BATCH mode). The locked value is always
+// derived from existingData.matchNumber itself, not a separately-passed
+// number, so it can never disagree with the entry being edited.
+async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, teamName = null, accessInfo = null) {
   // Extract team number and event code from existing data
   currentMatchTeamNumber = existingData.teamNumber;
   currentMatchEventCode = existingData.eventCode;
   currentMatchDocId = docId;
   currentLockedMatchNumber = lockMatchNumber ? existingData.matchNumber : null;
+  currentMatchFormMode = lockMatchNumber ? 'live' : 'batch';
+  currentMatchFields = null;
+  if (currentMatchLiveSession) { currentMatchLiveSession.detach(); currentMatchLiveSession = null; }
 
   document.getElementById('match-modal-title').textContent = lockMatchNumber && teamName
     ? `Edit Match #${existingData.matchNumber || '?'} — Team #${currentMatchTeamNumber} (${teamName})`
@@ -216,6 +381,11 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
   document.getElementById('match-modal-error').textContent = '';
   document.getElementById('match-modal-success').textContent = '';
   document.getElementById('match-delete-btn').classList.remove('hidden');
+  document.getElementById('btn-match-take-over').classList.add('hidden');
+  document.getElementById('btn-match-save').textContent = lockMatchNumber ? 'Done' : 'Save Match Data';
+  const presenceBanner = document.getElementById('match-presence-banner');
+  presenceBanner.classList.add('hidden');
+  presenceBanner.textContent = '';
 
   document.getElementById('match-modal').classList.remove('hidden');
 
@@ -239,7 +409,29 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
 
     currentMatchFormController = renderDynamicForm(container, renderedFields, existingData);
 
-    document.getElementById('match-modal-success').textContent = 'Editing existing match entry.';
+    document.getElementById('match-modal-success').textContent = lockMatchNumber ? '' : 'Editing existing match entry.';
+
+    if (lockMatchNumber) {
+      // LIVE mode. accessInfo was already computed by
+      // openMatchScoutFormFromSchedule (it had to, to decide whether to
+      // reach this function at all) — startInEditMode decides whether we
+      // join immediately or open read-only with a Take Over option.
+      const startInEditMode = !!(accessInfo && accessInfo.startInEditMode);
+      await attachMatchLiveSession(docId, fields, {
+        eventCode: existingData.eventCode,
+        teamNumber: Number(existingData.teamNumber),
+        matchNumber: Number(existingData.matchNumber),
+        teamId,
+        season: existingData.season || resolveFormConfigSeason(),
+        scoutedBy: existingData.scoutedBy || currentUser.uid,
+        scoutedByName: existingData.scoutedByName || (typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : 'Unknown'),
+        scoutedAt: existingData.scoutedAt || firebase.firestore.FieldValue.serverTimestamp()
+      }, startInEditMode);
+    } else {
+      // BATCH mode — today's model, plus the early duplicate-number check
+      // (excluding this entry's own current slot).
+      wireMatchNumberCollisionCheck(currentMatchFormController, teamId, existingData.eventCode, existingData.teamNumber, docId);
+    }
   } catch (err) {
     console.error('Failed to render match form for edit:', err);
     document.getElementById('match-modal-error').textContent = 'Failed to load form. Please try again.';
@@ -250,33 +442,33 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
 // (match-schedule-view.js's expanded panel) — matchNumber, teamNumber, and
 // eventCode are all already known from which match row + team slot was
 // clicked, so all three end up locked (title-only, not user-editable) in
-// whichever of the two functions above ends up handling it. Resolves
-// new-vs-edit and permission exactly like the team-based view already does:
-// looks up any existing entry via findExistingMatchDoc() (the same helper
-// the manual flow already uses to avoid guessing doc IDs), and if one
-// exists but the current user isn't its original scouter and lacks
-// canEditOtherEntries, tells them so via showNoticeModal() — same
-// Permission Denied message renderMatchListForTeam()'s Edit button now
-// shows in that case, below. ======
+// whichever of the two functions above ends up handling it, and this is
+// always LIVE mode (see file header). Three-way access decision (mirrors
+// pit-scout.js's openPitScoutForm — see classifyLiveEntryAccess() in
+// live-entry-sync.js for the reasoning):
+//  - zero active editors, not qualified -> blocked, Permission Denied.
+//  - zero active editors, qualified (owner/captain/canEditOtherEntries, or
+//    nothing exists yet) -> open and join immediately.
+//  - someone's already active -> open read-only with a Take Over option,
+//    regardless of whether this user would also independently qualify. ======
 async function openMatchScoutFormFromSchedule(matchNumber, teamNumber, eventCode, teamName) {
   const teamId = currentTeamData?.id;
   if (!teamId || !currentUser) return;
 
   const existing = await findExistingMatchDoc(teamId, eventCode, matchNumber, teamNumber);
+  const access = classifyLiveEntryAccess(existing, canUserEditOtherEntries);
+
+  if (access.blocked) {
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({ title: 'Permission Denied', message: 'You do not have permission to edit this match scouting entry.' });
+    }
+    return;
+  }
 
   if (existing) {
-    const canEdit = typeof canUserEditOtherEntries === 'function'
-      ? canUserEditOtherEntries(existing)
-      : (existing.scoutedBy === currentUser?.uid);
-    if (!canEdit) {
-      if (typeof showNoticeModal === 'function') {
-        showNoticeModal({ title: 'Permission Denied', message: 'You do not have permission to edit this match scouting entry.' });
-      }
-      return;
-    }
-    await openMatchScoutEdit(existing.id, existing, true, teamName);
+    await openMatchScoutEdit(existing.id, existing, true, teamName, access);
   } else {
-    await openMatchScoutForm(teamNumber, eventCode, matchNumber, teamName);
+    await openMatchScoutForm(teamNumber, eventCode, matchNumber, teamName, access);
   }
 }
 
@@ -284,8 +476,9 @@ async function openMatchScoutFormFromSchedule(matchNumber, teamNumber, eventCode
 // saved? Used to decide whether a Save on an existing entry should touch
 // lastEditedBy/lastEditedByName/lastEditedByTimestamp at all — clicking Save
 // without changing anything shouldn't reassign "last edited by" to whoever
-// just reopened and resaved the entry unchanged. Same pattern as pit-scout.js's
-// pitFormValuesChanged(). ======
+// just reopened and resaved the entry unchanged. BATCH mode only — live
+// mode's per-field writes do this same comparison inline in
+// createLiveEntrySession (live-entry-sync.js). ======
 function matchFormValuesChanged(fieldValues, existingData) {
   if (!existingData) return true;
   return Object.keys(fieldValues).some(key => (fieldValues[key] ?? null) !== (existingData[key] ?? null));
@@ -316,8 +509,12 @@ async function isMatchNumberMismatched(eventCode, teamNumber, matchNumber) {
   return !(match.teams || []).some(t => Number(t.teamNumber) === Number(teamNumber));
 }
 
-// ====== Save match scouting form ======
+// ====== Save match scouting form (BATCH mode only — see file header; the
+// Save/Done button's click handler, wired in DOMContentLoaded below,
+// branches to this only when currentMatchFormMode is 'batch'. This guard is
+// just defensive backup against that branch ever getting out of sync. ======
 async function saveMatchScoutForm() {
+  if (currentMatchFormMode === 'live') return;
   const errorEl = document.getElementById('match-modal-error');
   const successEl = document.getElementById('match-modal-success');
   if (errorEl) errorEl.textContent = '';
@@ -568,6 +765,15 @@ async function deleteMatchScoutData() {
   });
 }
 
+// ====== "Done" — live mode's Save/Done button handler (batch mode uses
+// saveMatchScoutForm instead — see the DOMContentLoaded wiring below). No
+// discrete save left to do (every field write already landed live); just
+// flush any still-debounced write and close. ======
+function finishMatchScoutForm() {
+  if (currentMatchLiveSession) currentMatchLiveSession.flushAll();
+  closeMatchScoutForm();
+}
+
 // ====== Close the match scouting form ======
 function closeMatchScoutForm() {
   document.getElementById('match-modal').classList.add('hidden');
@@ -576,11 +782,40 @@ function closeMatchScoutForm() {
   currentMatchDocId = null;
   currentLockedMatchNumber = null;
   currentMatchFormController = null;
+  currentMatchFields = null;
+  currentMatchFormMode = null;
+  // Best-effort, not awaited — see pit-scout.js's closePitScoutForm for why.
+  if (currentMatchLiveSession) {
+    currentMatchLiveSession.detach();
+    currentMatchLiveSession = null;
+  }
+}
+
+// ====== Does this match entry have any real scouted content, as opposed to
+// an empty shell created the instant someone opened a LIVE entry's form (see
+// attachMatchLiveSession — live entries are created on open, not on an
+// explicit save)? BATCH-mode entries never have this problem — they're only
+// ever created by an explicit Save, which already requires matchNumber (see
+// saveMatchScoutForm's validation) — so existence is still a meaningful
+// signal for them, same as before this feature. The presence of the
+// activeEditors field is what's checked to tell which kind of entry this
+// is: only entries that have ever gone through createLiveEntrySession ever
+// get that field at all, live or batch origin makes no difference to the
+// RULE this entry is governed by, only to this display check. ======
+function matchEntryHasRealContent(entry, fields) {
+  if (entry.activeEditors === undefined) return true; // batch-mode entry — existence already meant something
+  const contentFields = fields.filter((field) => field.id !== 'matchNumber');
+  return contentFields.some((field) => {
+    const v = entry[field.id];
+    return v !== null && v !== undefined && v !== '';
+  });
 }
 
 // ====== Watch match scouting status for a given event ======
 // Sets up a Firestore onSnapshot listener that updates matchEntriesCache
-// and calls the callback whenever data changes.
+// and calls the callback whenever data changes. Only entries that count per
+// matchEntryHasRealContent() are included — see that function for why a
+// live entry's mere existence isn't enough anymore.
 function watchMatchScoutStatus(eventCode) {
   // Unsubscribe previous listener
   if (matchScoutUnsubscribe) {
@@ -604,16 +839,30 @@ function watchMatchScoutStatus(eventCode) {
   // now, not a teamId where() clause.
   matchScoutUnsubscribe = db.collection('teams').doc(teamId).collection('matchScouting')
     .where('eventCode', '==', eventCode)
-    .onSnapshot((snapshot) => {
-      matchEntriesCache = {};
-      snapshot.forEach((doc) => {
-        const data = doc.data();
+    .onSnapshot(async (snapshot) => {
+      // Fires far more often now — every live per-field write and every
+      // ~15s presence heartbeat from every active editor at this event, not
+      // just an explicit save. The content-check below is async
+      // (loadMatchFormConfig), so this generation guard drops a slower,
+      // superseded call's result rather than letting it clobber the cache
+      // with outdated data (same pattern as matchListRenderGeneration, used
+      // elsewhere in this file for the same kind of race).
+      const myGeneration = ++matchStatusWatchGeneration;
+
+      const docsData = [];
+      snapshot.forEach((doc) => docsData.push({ id: doc.id, ...doc.data() }));
+
+      const newCache = {};
+      for (const data of docsData) {
+        const fields = await loadMatchFormConfig(teamId, data.season);
+        if (!matchEntryHasRealContent(data, fields)) continue; // empty shell — not scouted
         const key = `${data.eventCode}_${data.teamNumber}`;
-        if (!matchEntriesCache[key]) {
-          matchEntriesCache[key] = [];
-        }
-        matchEntriesCache[key].push({ id: doc.id, ...data });
-      });
+        if (!newCache[key]) newCache[key] = [];
+        newCache[key].push(data);
+      }
+
+      if (myGeneration !== matchStatusWatchGeneration) return; // superseded by a newer snapshot
+      matchEntriesCache = newCache;
 
       // Notify any listeners
       if (typeof onMatchScoutedStateChanged === 'function') {
@@ -907,15 +1156,26 @@ let onMatchScoutedStateChanged = null;
 
 // ====== Wire up event handlers ======
 document.addEventListener('DOMContentLoaded', () => {
-  // Save button
-  document.getElementById('btn-match-save').addEventListener('click', saveMatchScoutForm);
+  // Save/Done button — branches by mode: batch mode still does a real write
+  // (saveMatchScoutForm), live mode has nothing left to commit (every field
+  // write already landed as it was typed) so it just flushes and closes.
+  document.getElementById('btn-match-save').addEventListener('click', () => {
+    if (currentMatchFormMode === 'live') finishMatchScoutForm();
+    else saveMatchScoutForm();
+  });
 
-  // Cancel / close buttons
-  document.getElementById('btn-match-cancel').addEventListener('click', closeMatchScoutForm);
-  document.getElementById('match-modal-overlay').addEventListener('click', closeMatchScoutForm);
+  // Cancel / close buttons — in batch mode these are a plain discard-and-close
+  // exactly as before (flushAll() is a no-op with no live session); in live
+  // mode they flush any still-debounced write first, same as Done.
+  document.getElementById('btn-match-cancel').addEventListener('click', finishMatchScoutForm);
+  document.getElementById('match-modal-overlay').addEventListener('click', finishMatchScoutForm);
 
   // Inline cancel button
-  document.getElementById('btn-match-cancel-inline').addEventListener('click', closeMatchScoutForm);
+  document.getElementById('btn-match-cancel-inline').addEventListener('click', finishMatchScoutForm);
+
+  // Take Over — join as an active editor (live mode only) after opening
+  // read-only because someone else was already in this entry.
+  document.getElementById('btn-match-take-over').addEventListener('click', takeOverMatchScoutEntry);
 
   // Delete button
   document.getElementById('match-delete-btn').addEventListener('click', deleteMatchScoutData);

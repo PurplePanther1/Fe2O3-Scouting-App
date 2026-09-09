@@ -12,21 +12,34 @@
 // — those are left as-is (see findExistingPitDoc() below, which finds either
 // era by querying data fields rather than guessing an ID) rather than
 // migrated.
-// Fields: eventCode, teamNumber, teamId, plus dynamic fields from formConfig,
-//         scoutedBy (uid), scoutedByName, scoutedAt, updatedAt
+// Fields: eventCode, teamNumber, teamId, season, plus dynamic fields from
+//         formConfig, scoutedBy/scoutedByName (CURRENT OWNER — mutable, see
+//         live-entry-sync.js), scoutedAt, lastEditedBy/lastEditedByName/
+//         lastEditedByTimestamp (last actual field change), updatedAt,
+//         activeEditors (live-entry-sync.js).
+//
+// Pit entries are always live: opening the form joins (or views) a live
+// session via live-entry-sync.js — there's no separate batch-save mode the
+// way match scouting has for its team-based view (pit has no equivalent
+// "locked vs manual" split to preserve). The Save button is relabeled
+// "Done" and just flushes pending field writes and closes.
 
 let currentPitTeamNumber = null;
 let currentPitEventCode = null;
-let pitScoutUnsubscribe = null; // Firestore snapshot listener
+let pitScoutUnsubscribe = null; // Firestore snapshot listener (status/"is this team scouted" listener — see watchPitScoutStatus)
 // Both caches below are keyed by "eventCode_teamNumber" (data-derived), NOT
 // the real Firestore document ID — this makes every reader of these caches
 // (isTeamScouted, getPitScoutedEntry, etc.) automatically work the same way
 // regardless of which document-ID era an entry was saved under. The real ID
 // (needed for edit/delete) is still available via each cached entry's own
-// `.id` property.
+// `.id` property. Only entries with real field content are added here — see
+// pitEntryHasRealContent() / watchPitScoutStatus().
 let scoutedTeamsCache = new Set(); // Set of "eventCode_teamNumber" keys
 let pitScoutedEntriesCache = new Map(); // "eventCode_teamNumber" -> full entry data (incl. real doc id, scoutedBy), for permission checks
 let currentFormController = null; // returned by renderDynamicForm
+let currentPitFields = null; // the field config rendered into the open form, needed by the live session's snapshot handler
+let currentPitLiveSession = null; // returned by createLiveEntrySession (live-entry-sync.js)
+let pitStatusWatchGeneration = 0; // guards against a slower, superseded async snapshot handler clobbering a newer one's result — see watchPitScoutStatus()
 
 // ====== Find this team's existing pit-scouting entry for (eventCode,
 // teamNumber), regardless of which document-ID scheme it was saved under.
@@ -56,6 +69,10 @@ async function openPitScoutForm(teamNumber, eventCode) {
   document.getElementById('pit-modal-error').textContent = '';
   document.getElementById('pit-modal-success').textContent = '';
   document.getElementById('pit-delete-btn').classList.add('hidden');
+  document.getElementById('btn-pit-take-over').classList.add('hidden');
+  const presenceBanner = document.getElementById('pit-presence-banner');
+  presenceBanner.classList.add('hidden');
+  presenceBanner.textContent = '';
 
   // Show modal
   document.getElementById('pit-modal').classList.remove('hidden');
@@ -65,11 +82,17 @@ async function openPitScoutForm(teamNumber, eventCode) {
   // existing-data fetches take, instead of never appearing at all.
   document.getElementById('pit-dynamic-fields').innerHTML = '';
   currentFormController = null;
+  currentPitFields = null;
+  if (currentPitLiveSession) { currentPitLiveSession.detach(); currentPitLiveSession = null; }
 
   // Get field configuration and render dynamic form
   const teamId = currentTeamData?.id;
   if (!teamId) {
     document.getElementById('pit-modal-error').textContent = 'Team data not loaded. Please rejoin your team.';
+    return;
+  }
+  if (!currentUser) {
+    document.getElementById('pit-modal-error').textContent = 'You must be signed in to scout.';
     return;
   }
 
@@ -81,19 +104,109 @@ async function openPitScoutForm(teamNumber, eventCode) {
     // active when it was scouted, not whatever the current season's form
     // looks like now.
     const existingData = await loadExistingPitData(teamId, eventCode, teamNumber);
-    const fields = await loadFormConfig(teamId, existingData?.season);
-    const container = document.getElementById('pit-dynamic-fields');
 
+    const access = classifyLiveEntryAccess(existingData, canUserEditOtherEntries);
+    if (access.blocked) {
+      document.getElementById('pit-modal').classList.add('hidden');
+      if (typeof showNoticeModal === 'function') {
+        showNoticeModal({ title: 'Permission Denied', message: 'You do not have permission to edit this pit scouting entry.' });
+      }
+      currentPitTeamNumber = null;
+      currentPitEventCode = null;
+      return;
+    }
+
+    const fields = await loadFormConfig(teamId, existingData?.season);
+    currentPitFields = fields;
+    const container = document.getElementById('pit-dynamic-fields');
     currentFormController = renderDynamicForm(container, fields, existingData);
 
     if (existingData) {
-      document.getElementById('pit-modal-success').textContent = 'Existing scouting data loaded.';
       document.getElementById('pit-delete-btn').classList.remove('hidden');
+    }
+
+    const teamId2 = teamId; // captured for the closures below
+    const docId = existingData ? existingData.id
+      : `${teamId}_${eventCode}_${teamNumber}`;
+    const docRef = db.collection('teams').doc(teamId2).collection('pitScouting').doc(docId);
+    const displayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
+
+    currentPitLiveSession = createLiveEntrySession({
+      docRef,
+      uid: currentUser.uid,
+      displayName,
+      onSnapshotData: (data) => {
+        if (!currentFormController || !currentPitFields) return;
+        applyRemoteFieldValues(currentFormController, currentPitFields, data);
+        applyPresenceIndicators(currentFormController, currentPitFields, data?.activeEditors, currentUser.uid);
+        renderPresenceBanner(document.getElementById('pit-presence-banner'), data?.activeEditors, currentUser.uid);
+      }
+    });
+
+    if (access.startInEditMode) {
+      await currentPitLiveSession.join({
+        eventCode,
+        teamNumber: Number(teamNumber),
+        teamId: teamId2,
+        season: existingData?.season || resolveFormConfigSeason(),
+        scoutedBy: existingData?.scoutedBy || currentUser.uid,
+        scoutedByName: existingData?.scoutedByName || displayName,
+        scoutedAt: existingData?.scoutedAt || firebase.firestore.FieldValue.serverTimestamp()
+      });
+      currentFormController.setReadOnly(false);
+      wireLiveFormFields(currentFormController, fields, currentPitLiveSession);
+      document.getElementById('btn-pit-take-over').classList.add('hidden');
+    } else {
+      // Someone else is already in here — open read-only with a Take Over option.
+      currentFormController.setReadOnly(true);
+      document.getElementById('btn-pit-take-over').classList.remove('hidden');
     }
   } catch (err) {
     console.error('Failed to render form:', err);
     document.getElementById('pit-modal-error').textContent = 'Failed to load form. Please try again.';
   }
+}
+
+// ====== "Take Over" — join the live session as an active editor after
+// opening read-only because someone else was already in here. ======
+async function takeOverPitScoutEntry() {
+  if (!currentPitLiveSession || !currentFormController || !currentPitFields || !currentUser) return;
+  const teamId = currentTeamData?.id;
+  if (!teamId) return;
+  try {
+    const displayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
+    await currentPitLiveSession.join({
+      eventCode: currentPitEventCode,
+      teamNumber: Number(currentPitTeamNumber),
+      teamId,
+      season: resolveFormConfigSeason(),
+      scoutedBy: currentUser.uid,
+      scoutedByName: displayName,
+      scoutedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    currentFormController.setReadOnly(false);
+    wireLiveFormFields(currentFormController, currentPitFields, currentPitLiveSession);
+    document.getElementById('btn-pit-take-over').classList.add('hidden');
+  } catch (err) {
+    console.error('Failed to take over pit scouting entry:', err);
+    if (typeof showNoticeModal === 'function') {
+      showNoticeModal({ title: 'Take Over Failed', message: 'Could not take over this entry. Please check your connection and try again.' });
+    }
+  }
+}
+
+// ====== Does this pit entry have any real scouted content, as opposed to
+// an empty shell created the instant someone opened the form (live entries
+// are created on open, not on an explicit save — see createLiveEntrySession
+// in live-entry-sync.js)? Checked against the team's configured field list
+// for THIS entry's own season, same as the form itself renders. A doc with
+// none of its configured fields populated should not count as "scouted" —
+// see watchPitScoutStatus(). ======
+function pitEntryHasRealContent(entry, fields) {
+  return fields.some((field) => {
+    const v = entry[field.id];
+    return v !== null && v !== undefined && v !== '';
+  });
 }
 
 // ====== Load existing pit scouting data ======
@@ -106,127 +219,12 @@ async function loadExistingPitData(teamId, eventCode, teamNumber) {
   return null;
 }
 
-// ====== Did the form's field values actually differ from what's already
-// saved? Used to decide whether a Save on an existing entry should touch
-// lastEditedBy/lastEditedByName/lastEditedByTimestamp at all — clicking Save
-// without changing anything shouldn't reassign "last edited by" to whoever
-// just reopened and resaved the entry unchanged. ======
-function pitFormValuesChanged(fieldValues, existingData) {
-  if (!existingData) return true;
-  return Object.keys(fieldValues).some(key => (fieldValues[key] ?? null) !== (existingData[key] ?? null));
-}
-
-// ====== Save pit scouting form ======
-async function savePitScoutForm() {
-  const errorEl = document.getElementById('pit-modal-error');
-  const successEl = document.getElementById('pit-modal-success');
-  errorEl.textContent = '';
-  successEl.textContent = '';
-
-  if (!currentFormController) {
-    errorEl.textContent = 'Form not initialized. Please reopen the form.';
-    return;
-  }
-
-  // Validate required fields
-  const validationError = currentFormController.validate();
-  if (validationError) {
-    errorEl.textContent = validationError;
-    return;
-  }
-
-  if (!currentUser) {
-    errorEl.textContent = 'You must be signed in to scout.';
-    return;
-  }
-
-  if (!currentPitTeamNumber || !currentPitEventCode) {
-    errorEl.textContent = 'Missing team or event data. Please try again.';
-    return;
-  }
-
-  const teamId = currentTeamData?.id;
-  if (!teamId) {
-    errorEl.textContent = 'Team data not loaded. Please rejoin your team.';
-    return;
-  }
-
-  showLoading('Saving pit scouting data...');
-  try {
-    const fieldValues = currentFormController.getValues();
-    const userDisplayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'Unknown');
-
-    // Check if this is a new document or update — finds an existing entry
-    // regardless of which document-ID era it was saved under (see
-    // findExistingPitDoc()); a genuinely new entry gets the current,
-    // collision-safe ID format.
-    const existing = await findExistingPitDoc(teamId, currentPitEventCode, currentPitTeamNumber);
-    const isExisting = !!existing;
-    const existingData = existing;
-    const docId = existing ? existing.id : `${teamId}_${currentPitEventCode}_${currentPitTeamNumber}`;
-
-    const scoutedByUid = isExisting ? (existingData.scoutedBy || currentUser.uid) : currentUser.uid;
-
-    const payload = {
-      eventCode: currentPitEventCode,
-      teamNumber: Number(currentPitTeamNumber),
-      teamId: teamId || null,
-      // Tags which FTC season this entry belongs to, so form-config lookups
-      // (dynamic-form.js) and exports (sheets-export.js) resolve the field
-      // set that was actually active when it was scouted, not whatever the
-      // current season's form looks like now. Immutable once set on an
-      // existing entry (like scoutedAt below); a legacy entry saved before
-      // this field existed picks one up here on its next save.
-      season: (isExisting && existingData.season) ? existingData.season : resolveFormConfigSeason(),
-      ...fieldValues,
-      scoutedBy: scoutedByUid,
-      // Raw email is never stored on entries — attribution is uid + display name only.
-      scoutedByEmail: firebase.firestore.FieldValue.delete(),
-      // Refresh the label whenever the original scouter is the one saving (self-heals stale/pre-feature names);
-      // otherwise leave the original scouter's name alone when someone else edits their entry.
-      scoutedByName: (!isExisting || scoutedByUid === currentUser.uid) ? userDisplayName : (existingData.scoutedByName || existingData.scoutedByEmail || 'Unknown'),
-      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-    };
-
-    if (!isExisting) {
-      payload.scoutedAt = firebase.firestore.FieldValue.serverTimestamp();
-    } else {
-      payload.scoutedAt = existingData.scoutedAt || firebase.firestore.FieldValue.serverTimestamp();
-      // Only reassign "last edited by" if the saved fields actually changed —
-      // resaving an untouched entry shouldn't claim it as edited.
-      if (pitFormValuesChanged(fieldValues, existingData)) {
-        payload.lastEditedBy = currentUser.uid;
-        payload.lastEditedByEmail = firebase.firestore.FieldValue.delete();
-        payload.lastEditedByName = userDisplayName;
-        payload.lastEditedByTimestamp = Date.now();
-      }
-    }
-
-    await db.collection('teams').doc(teamId).collection('pitScouting').doc(docId).set(payload, { merge: true });
-
-    hideLoading();
-    successEl.textContent = 'Pit scouting data saved!';
-    
-    // Update the cache so the team list reflects it immediately — keyed by
-    // data (eventCode_teamNumber), not the real doc id (see cache comments above).
-    scoutedTeamsCache.add(`${currentPitEventCode}_${currentPitTeamNumber}`);
-    
-    // Re-render team list to reflect scouted state
-    refreshTeamListScoutedState();
-
-    // Close modal after a short delay
-    setTimeout(() => {
-      closePitScoutForm();
-    }, 1200);
-  } catch (err) {
-    hideLoading();
-    console.error('Failed to save pit scouting data:', err);
-    if (err.code === 'permission-denied') {
-      errorEl.textContent = 'Permission denied: You do not have permission to edit or save this entry.';
-    } else {
-      errorEl.textContent = 'Failed to save. Please check your connection and try again.';
-    }
-  }
+// ====== "Done" — there's no discrete save anymore (every field write
+// already landed live as it was typed); this just flushes any
+// still-debounced field writes and closes. ======
+function finishPitScoutForm() {
+  if (currentPitLiveSession) currentPitLiveSession.flushAll();
+  closePitScoutForm();
 }
 
 // ====== Core delete logic: resolve the real doc, delete it, and clean up
@@ -236,7 +234,7 @@ async function savePitScoutForm() {
 // team/event/team-number on hand and doesn't need the form open at all. ======
 async function deletePitScoutEntry(teamId, eventCode, teamNumber) {
   // Resolve the real doc id (regardless of which ID era it was saved
-  // under) rather than guessing — same reasoning as savePitScoutForm().
+  // under) rather than guessing — same reasoning as findExistingPitDoc()'s own doc comment.
   const existing = await findExistingPitDoc(teamId, eventCode, teamNumber);
   if (existing) {
     await db.collection('teams').doc(teamId).collection('pitScouting').doc(existing.id).delete();
@@ -333,6 +331,15 @@ function closePitScoutForm() {
   currentPitTeamNumber = null;
   currentPitEventCode = null;
   currentFormController = null;
+  currentPitFields = null;
+  // Best-effort, not awaited — this leaves the session (dropping us from
+  // activeEditors, transferring ownership if we're the last one out) without
+  // blocking the modal close on that round-trip. A failure just means our
+  // presence entry lingers until it goes stale — see live-entry-sync.js.
+  if (currentPitLiveSession) {
+    currentPitLiveSession.detach();
+    currentPitLiveSession = null;
+  }
 
   // If the Team Detail modal (Team Information tab) is open behind this form,
   // refresh its pit data section — covers the save/delete case (already refreshed
@@ -345,7 +352,11 @@ function closePitScoutForm() {
 
 // ====== Watch pit scouting status for a given event ======
 // Sets up a Firestore onSnapshot listener that updates scoutedTeamsCache
-// and calls the callback whenever data changes.
+// and calls the callback whenever data changes. Only entries with real
+// field content count as "scouted" — a live entry's doc exists from the
+// moment its form is opened (see openPitScoutForm), not from an explicit
+// save, so mere existence is no longer a meaningful signal (see
+// pitEntryHasRealContent()).
 function watchPitScoutStatus(eventCode) {
   // Unsubscribe previous listener
   if (pitScoutUnsubscribe) {
@@ -370,17 +381,32 @@ function watchPitScoutStatus(eventCode) {
   // teamId where() clause.
   pitScoutUnsubscribe = db.collection('teams').doc(teamId).collection('pitScouting')
     .where('eventCode', '==', eventCode)
-    .onSnapshot((snapshot) => {
-      scoutedTeamsCache.clear();
-      pitScoutedEntriesCache.clear();
-      snapshot.forEach((doc) => {
-        const data = doc.data();
-        // Keyed by data (eventCode_teamNumber), not doc.id — see cache
-        // comments at the top of this file for why.
+    .onSnapshot(async (snapshot) => {
+      // This listener now fires far more often than before — every live
+      // per-field write and every ~15s presence heartbeat from every active
+      // editor at this event, not just an explicit save. The content-check
+      // below is async (loadFormConfig), so a slower call can finish after a
+      // newer one already did; this generation guard drops the stale result
+      // instead of letting it clobber the caches with outdated data (same
+      // pattern as match-scout.js's matchListRenderGeneration).
+      const myGeneration = ++pitStatusWatchGeneration;
+
+      const docsData = [];
+      snapshot.forEach((doc) => docsData.push({ id: doc.id, ...doc.data() }));
+
+      const newScoutedTeams = new Set();
+      const newEntries = new Map();
+      for (const data of docsData) {
+        const fields = await loadFormConfig(teamId, data.season);
+        if (!pitEntryHasRealContent(data, fields)) continue; // empty shell — not scouted
         const key = `${data.eventCode}_${data.teamNumber}`;
-        scoutedTeamsCache.add(key);
-        pitScoutedEntriesCache.set(key, { id: doc.id, ...data });
-      });
+        newScoutedTeams.add(key);
+        newEntries.set(key, data);
+      }
+
+      if (myGeneration !== pitStatusWatchGeneration) return; // superseded by a newer snapshot
+      scoutedTeamsCache = newScoutedTeams;
+      pitScoutedEntriesCache = newEntries;
 
       // Notify any listeners (e.g., team list renderer)
       if (typeof onScoutedStateChanged === 'function') {
@@ -454,15 +480,17 @@ function refreshTeamListScoutedState() {
 
 // ====== Wire up event handlers ======
 document.addEventListener('DOMContentLoaded', () => {
-  // Save button
-  document.getElementById('btn-pit-save').addEventListener('click', savePitScoutForm);
+  // "Done" — there's no separate save/cancel distinction left (every field
+  // write already landed live), so every way of leaving this modal just
+  // flushes any still-debounced write and closes.
+  document.getElementById('btn-pit-save').addEventListener('click', finishPitScoutForm);
+  document.getElementById('btn-pit-cancel').addEventListener('click', finishPitScoutForm);
+  document.getElementById('pit-modal-overlay').addEventListener('click', finishPitScoutForm);
+  document.getElementById('btn-pit-cancel-inline').addEventListener('click', finishPitScoutForm);
 
-  // Cancel / close buttons
-  document.getElementById('btn-pit-cancel').addEventListener('click', closePitScoutForm);
-  document.getElementById('pit-modal-overlay').addEventListener('click', closePitScoutForm);
-
-  // Inline cancel button
-  document.getElementById('btn-pit-cancel-inline').addEventListener('click', closePitScoutForm);
+  // Take Over — join as an active editor after opening read-only because
+  // someone else was already in this entry.
+  document.getElementById('btn-pit-take-over').addEventListener('click', takeOverPitScoutEntry);
 
   // Delete button
   document.getElementById('pit-delete-btn').addEventListener('click', deletePitScoutData);
