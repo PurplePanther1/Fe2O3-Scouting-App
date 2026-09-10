@@ -400,20 +400,6 @@ function renderDynamicForm(container, fields, existingData) {
         fieldDiv.appendChild(tag);
       }
       tag.textContent = name;
-    },
-    // Disable/enable every rendered field — used for the read-only "someone
-    // else is already editing this" view, before a "Take Over" click (if any)
-    // switches the form into edit mode.
-    setReadOnly(readOnly) {
-      fields.forEach(field => {
-        const el = fieldElements[field.id];
-        if (!el) return;
-        if (field.type === 'counter') {
-          el.querySelectorAll('button').forEach(btn => { btn.disabled = readOnly; });
-        } else {
-          el.disabled = readOnly;
-        }
-      });
     }
   };
 }

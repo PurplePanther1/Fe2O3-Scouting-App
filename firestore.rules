@@ -14,8 +14,25 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([request.auth.uid]);
     }
 
+    // .get(request.auth.uid, null) rather than roles[request.auth.uid] — a
+    // plain member (never captain, never explicitly demoted — only the
+    // captain ever gets a roles{} entry at all, see teams/{teamId}'s own
+    // create rule below) has NO key for themselves in roles at all, not
+    // just a falsy one. Direct bracket access throws in that case — found
+    // via CATEGORY 3's emulator testing this round, in a scenario nothing
+    // before this had ever actually exercised: a plain member with no
+    // roles/permissions entries of their own attempting a write that should
+    // be grantable via some OTHER, non-captain path (the live-collaboration
+    // co-editing gate) while THIS function is ALSO evaluated as a sibling
+    // OR-clause and throws — an error anywhere in the expression denied the
+    // whole write even though the other clause alone should have allowed
+    // it. This is the single most-called permission primitive in the whole
+    // file (isCaptain is used directly or via canEditOrDeleteEntry/
+    // canEditTemplates almost everywhere), so this one fix likely closes
+    // several more latent instances of the same risk beyond the one this
+    // round's testing happened to surface.
     function isCaptain(teamData) {
-      return teamData != null && teamData.roles != null && teamData.roles[request.auth.uid] == 'captain';
+      return teamData != null && teamData.roles != null && teamData.roles.get(request.auth.uid, null) == 'captain';
     }
 
     // Rewritten to guard every get() with exists() first, same style as isTeamMember(),
@@ -45,14 +62,29 @@ service cloud.firestore {
           && isCaptain(get(/databases/$(database)/documents/teams/$(teamId)).data)
         )
         ||
-        entry.scoutedBy == request.auth.uid
+        // .get('scoutedBy', null) rather than entry.scoutedBy — under the
+        // checkpoint ownership model (js/live-entry-sync.js), scoutedBy is
+        // legitimately absent on a real, valid entry until its first commit
+        // (see isValidScoutedByWrite below), and dot/bracket access on a
+        // genuinely-missing map key THROWS in Firestore rules rather than
+        // evaluating to null — which silently denied every single write
+        // (including the plain "join" heartbeat/field-value writes that
+        // never even touch scoutedBy) on any not-yet-committed entry until
+        // this was caught in testing.
+        entry.get('scoutedBy', null) == request.auth.uid
         ||
         (
           teamId != null
           && exists(/databases/$(database)/documents/teams/$(teamId))
           && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null
-          && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid] != null
-          && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid].canEditOtherEntries == true
+          // .get(request.auth.uid, null) rather than permissions[request.auth.uid]
+          // — same throws-on-missing-key hazard as entry.scoutedBy above,
+          // just triggered by a team member who has no permissions map entry
+          // of their own at all yet (found while testing this round's fix,
+          // not something this feature's redesign newly introduced, but a
+          // real latent crash risk in the same code path all the same).
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions.get(request.auth.uid, null) != null
+          && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions.get(request.auth.uid, null).canEditOtherEntries == true
         )
       );
     }
@@ -71,32 +103,92 @@ service cloud.firestore {
     // unpruned crashed-tab entry just leaves the document in the MORE
     // permissive state below forever, which can never lock anyone out, only
     // stay collaborative longer than strictly necessary.
+    // .get('activeEditors', null) rather than entry.activeEditors — a LEGACY
+    // entry (scoutedBy set, but predating this feature entirely — see
+    // isCommittedEntry() below) never had activeEditors written to it at
+    // all, so it's genuinely, permanently absent, not just empty. Direct dot
+    // access throws in that case (same throws-on-missing-key hazard fixed
+    // elsewhere in this file — found here via emulator testing while
+    // verifying CATEGORY 3 against real legacy-shaped data, not by
+    // inspection: it had gone unnoticed until now because every entry this
+    // function was ever actually called against during earlier testing
+    // already had activeEditors written, or the error happened to be masked
+    // by this file's own OR-branches evaluating true anyway).
     function hasActiveEditors(entry) {
-      return entry != null && entry.activeEditors != null && entry.activeEditors.size() > 0;
+      return entry != null && entry.get('activeEditors', null) != null && entry.get('activeEditors', {}).size() > 0;
     }
 
-    // Someone's already actively editing -> any team member may join, edit
-    // a field, or take over. Nobody's in there -> the usual owner/captain/
-    // canEditOtherEntries gate applies, same as an entry with no live
-    // session ever attached to it at all (a batch-mode match entry, or any
-    // entry from before this feature existed).
+    // Has this entry ever actually been committed? checkpoint is the
+    // primary signal (js/live-entry-sync.js's commit()); scoutedBy is a
+    // fallback for entries scouted before the checkpoint field existed at
+    // all — the old model wrote scoutedBy at first save with no checkpoint
+    // concept, so those are real, already-saved entries and must be treated
+    // as committed here too, not as an open draft (mirrors the client-side
+    // isEntryCommitted() in js/live-entry-sync.js — see that function's own
+    // comment; CATEGORY 1 of this round). .get(key, null) throughout for the
+    // same throws-on-missing-key reason as isValidScoutedByWrite() below —
+    // both fields are legitimately absent on a genuine draft.
+    function isCommittedEntry(entry) {
+      return entry != null
+        && (entry.get('checkpoint', null) != null || entry.get('scoutedBy', null) != null);
+    }
+
+    // Someone's already actively editing an UNCOMMITTED draft -> any team
+    // member may join or edit a field alongside them (including writing a
+    // commit's checkpoint/scoutedBy/lastEditedBy, or a cancel's entry-wide
+    // revert — see js/live-entry-sync.js's commit()/cancelUndo(), neither of
+    // which needs any gate beyond this one: both are always issued by a uid
+    // already present in activeEditors at the time, same as an ordinary
+    // field write). CATEGORY 3: that door closes permanently once the entry
+    // has been committed at least once — isCommittedEntry() — regardless of
+    // who else is currently active in it; from that point on only the usual
+    // owner/captain/canEditOtherEntries gate applies, same as an entry with
+    // no live session ever attached to it at all (a batch-mode match entry,
+    // or any entry from before this feature existed). A co-editor who loses
+    // access THIS way, mid-session (the entry got committed by someone else
+    // while they were still active), is detected and gracefully disconnected
+    // client-side — see createLiveEntrySession() in js/live-entry-sync.js —
+    // and can still always remove just themselves from activeEditors via
+    // isValidSelfLeaveOnly() below, even though this gate now denies
+    // everything else they might try.
     function canJoinOrEditEntry(teamId, entry) {
-      return isTeamMember(teamId) && (hasActiveEditors(entry) || canEditOrDeleteEntry(teamId, entry));
+      return isTeamMember(teamId) && (
+        (hasActiveEditors(entry) && !isCommittedEntry(entry))
+        || canEditOrDeleteEntry(teamId, entry)
+      );
     }
 
-    // Ownership (scoutedBy/scoutedByName) may change ONLY as the direct
-    // result of the caller removing themselves as the last remaining active
-    // editor — "whoever is last to close out owns it" — never an arbitrary
-    // reassignment. Requires they were a recognized editor immediately
-    // beforehand, so ownership can never transfer to someone who was never
-    // validly admitted as an editor in the first place (see
-    // canJoinOrEditEntry above, which is what gates admission).
-    function isValidOwnershipTransfer(before, after) {
-      return before.activeEditors != null
-        && (request.auth.uid in before.activeEditors)
-        && after.activeEditors != null
-        && after.activeEditors.size() == 0
-        && after.scoutedBy == request.auth.uid;
+    // A uid may ALWAYS remove ONLY ITSELF from activeEditors, regardless of
+    // whether canJoinOrEditEntry() above still permits them to edit this
+    // entry at all. Without this, a co-editor who loses edit rights
+    // mid-session (CATEGORY 3 — the entry got committed by someone else
+    // while they were still active, closing the "someone's already active"
+    // door behind them) could never even cleanly remove their own now-stale
+    // activeEditors entry, leaving it stuck in the document until some
+    // unrelated write happens to touch it. Mirrors teams/{teamId}'s own
+    // member self-leave branch. The diff must touch ONLY activeEditors, and
+    // within that map ONLY the caller's own key — nobody else's entry, and
+    // no other field on the document, can be smuggled through under cover
+    // of a self-leave.
+    function isValidSelfLeaveOnly(before, after) {
+      return before.get('activeEditors', null) != null
+        && request.auth.uid in before.activeEditors
+        && after.diff(before).affectedKeys().hasOnly(['activeEditors'])
+        && !(request.auth.uid in after.get('activeEditors', {}))
+        && before.activeEditors.diff(after.get('activeEditors', {})).affectedKeys().hasOnly([request.auth.uid]);
+    }
+
+    // scoutedBy ("created by") is create-once, then permanent: it may be SET
+    // only when it doesn't already exist (js/live-entry-sync.js's commit()
+    // sets it on an entry's first successful Done, never before and never
+    // again after), and the value must be the caller's own uid — nobody can
+    // assign someone else as creator. There is no more transfer-on-leave:
+    // once set, scoutedBy is immutable for the life of the document; the
+    // only way it ever changes is the document being deleted and a new one
+    // created from scratch, which naturally starts unset again.
+    function isValidScoutedByWrite(before, after) {
+      return before.get('scoutedBy', null) == after.get('scoutedBy', null)
+        || (before.get('scoutedBy', null) == null && after.get('scoutedBy', null) == request.auth.uid);
     }
 
     // Narrow carve-out for a member with ONLY canKickMembers (no captain, no
@@ -117,9 +209,25 @@ service cloud.firestore {
         && teamId != null
         && exists(/databases/$(database)/documents/teams/$(teamId))
         && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null
-        && request.auth.uid in get(/databases/$(database)/documents/teams/$(teamId)).data.permissions
-        && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions[request.auth.uid].canKickMembers == true
-        && !get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([before[uidField]])
+        // .get(request.auth.uid, null) rather than the old in-guarded
+        // permissions[request.auth.uid] — same throws-on-missing-key hazard
+        // fixed elsewhere in this file (canEditOrDeleteEntry, above), just
+        // never actually exercised here until CATEGORY 3's testing this
+        // round used a team where a member has a genuinely EMPTY
+        // permissions map (no entry at all, not even an empty one) — the
+        // preceding `in` check alone wasn't a reliable enough guard against
+        // the bracket access on the line right after it.
+        && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions.get(request.auth.uid, null) != null
+        && get(/databases/$(database)/documents/teams/$(teamId)).data.permissions.get(request.auth.uid, null).canKickMembers == true
+        // before.get(uidField, null) rather than before[uidField] — uidField
+        // is 'scoutedBy' or 'lastEditedBy', either of which can now be
+        // legitimately absent on a real entry (see isValidScoutedByWrite's
+        // comment above) — direct bracket access throws in that case.
+        // before.get(uidField, null) != null guards the case where it's
+        // genuinely unset: there's no departed uid to anonymize for, so this
+        // is correctly not a match rather than a (meaningless) vacuous one.
+        && before.get(uidField, null) != null
+        && !get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([before.get(uidField, null)])
         && after.diff(before).affectedKeys().hasOnly([nameField])
         && after[nameField] == 'Deleted User';
     }
@@ -140,7 +248,12 @@ service cloud.firestore {
     // condition to check, only the diff shape.
     function canAnonymizeOwnLastEdit(before, after) {
       return isAuth()
-        && before.lastEditedBy == request.auth.uid
+        // before.get('lastEditedBy', null) rather than before.lastEditedBy —
+        // under the checkpoint model (js/live-entry-sync.js's commit()),
+        // lastEditedBy can now be legitimately, permanently absent (it's only
+        // ever set on a commit whose checkpoint differs from the prior one),
+        // and direct dot access throws on a genuinely-missing key.
+        && before.get('lastEditedBy', null) == request.auth.uid
         && after.diff(before).affectedKeys().hasOnly(['lastEditedByName'])
         && after.lastEditedByName == 'Deleted User';
     }
@@ -292,26 +405,30 @@ service cloud.firestore {
       // on read is kept anyway, purely for parity with the flat collection's
       // rule (a nonexistent doc leaks nothing either way, so this is a no-op
       // change in practice, not a tightening or loosening of access).
-      // allow update's first clause now accepts EITHER the classic
-      // owner/captain/canEditOtherEntries gate OR canJoinOrEditEntry's
-      // "someone's already actively editing" case (live-collaboration
-      // ownership model, wishlist item 10 — see canJoinOrEditEntry/
-      // isValidOwnershipTransfer above for the reasoning), and the
-      // scoutedBy-immutability check now has a second legal path: a valid
-      // ownership transfer, triggered only by the last active editor
-      // removing themselves. An entry that never goes through
+      // allow update's first clause accepts EITHER the classic owner/captain/
+      // canEditOtherEntries gate OR canJoinOrEditEntry's "someone's already
+      // actively editing" case (live-collaboration ownership model, wishlist
+      // item 10), and scoutedBy may only be set once (isValidScoutedByWrite,
+      // above) — no more transfer-on-leave. An entry that never goes through
       // js/live-entry-sync.js (no activeEditors field ever written) behaves
       // under this rule exactly as it did before this feature existed —
       // hasActiveEditors() is false, canJoinOrEditEntry() reduces to
-      // canEditOrDeleteEntry(), and isValidOwnershipTransfer() is never
-      // reachable (before.activeEditors is always null for such an entry).
+      // canEditOrDeleteEntry(), and isValidScoutedByWrite() only ever takes
+      // its "unchanged" branch (its "newly set" branch already matches what
+      // a plain first save always did anyway). The standalone delete rule
+      // deliberately stays on canEditOrDeleteEntry (not canJoinOrEditEntry)
+      // — an earlier round of this feature widened delete to any active
+      // editor so a non-privileged co-editor could delete-on-cancel, but
+      // cancel no longer deletes anything under this model (it's a per-field
+      // revert — see js/live-entry-sync.js's cancelUndo()), so that widening
+      // has no remaining justification and is reverted here.
       match /pitScouting/{documentId} {
         allow read: if resource == null || isTeamMember(teamId);
         allow create: if isAuth() && isTeamMember(teamId);
         allow update: if isAuth() && (
           (canJoinOrEditEntry(teamId, resource.data)
-            && (request.resource.data.scoutedBy == resource.data.scoutedBy
-                || isValidOwnershipTransfer(resource.data, request.resource.data)))
+            && isValidScoutedByWrite(resource.data, request.resource.data))
+          || isValidSelfLeaveOnly(resource.data, request.resource.data)
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
           || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
@@ -324,13 +441,13 @@ service cloud.firestore {
       // flat /matchScouting/{documentId} collection below during the data-
       // reorg migration). Match's doc-ID scheme and per-match cardinality
       // differ from pit's at the application layer, but none of that is
-      // visible to these rules — teamId, scoutedBy, lastEditedBy, and
-      // activeEditors are the only fields any of this depends on, same as
-      // pit. Only entries opened from the match-based/schedule view ever get
-      // a live session attached (js/match-scout.js keeps the team-based
+      // visible to these rules — teamId, scoutedBy, lastEditedBy, checkpoint,
+      // and activeEditors are the only fields any of this depends on, same
+      // as pit. Only entries opened from the match-based/schedule view ever
+      // get a live session attached (js/match-scout.js keeps the team-based
       // view's manual entry flow on the pre-existing batch-save model) — this
       // rule doesn't need to know or care which entry point created a given
-      // doc, since canJoinOrEditEntry()/isValidOwnershipTransfer() already
+      // doc, since canJoinOrEditEntry()/isValidScoutedByWrite() already
       // degrade to today's exact behavior for any entry with no
       // activeEditors field.
       match /matchScouting/{documentId} {
@@ -338,8 +455,8 @@ service cloud.firestore {
         allow create: if isAuth() && isTeamMember(teamId);
         allow update: if isAuth() && (
           (canJoinOrEditEntry(teamId, resource.data)
-            && (request.resource.data.scoutedBy == resource.data.scoutedBy
-                || isValidOwnershipTransfer(resource.data, request.resource.data)))
+            && isValidScoutedByWrite(resource.data, request.resource.data))
+          || isValidSelfLeaveOnly(resource.data, request.resource.data)
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
           || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
@@ -491,8 +608,18 @@ service cloud.firestore {
       allow read: if resource == null || isTeamMember(resource.data.teamId);
       allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
       allow update: if isAuth() && (
+        // .get('scoutedBy', null) rather than plain .scoutedBy on both sides
+        // — same throws-on-missing-key hazard fixed elsewhere in this file
+        // (see isValidScoutedByWrite() above) applied here preventively.
+        // This legacy flat collection is no longer written by any current
+        // code path (both entry types now live under
+        // teams/{teamId}/pitScouting — see that match block's own header
+        // comment), and every pre-migration doc here always had scoutedBy
+        // set at creation under the old model, so this was never actually
+        // observed to throw — just closing the same class of latent crash
+        // risk on the offhand chance an old doc is ever touched again.
         (canEditOrDeleteEntry(resource.data.teamId, resource.data)
-          && request.resource.data.scoutedBy == resource.data.scoutedBy)
+          && request.resource.data.get('scoutedBy', null) == resource.data.get('scoutedBy', null))
         || canAnonymizeDepartedField(resource.data.teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
         || canAnonymizeDepartedField(resource.data.teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
         || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
@@ -504,8 +631,9 @@ service cloud.firestore {
       allow read: if resource == null || isTeamMember(resource.data.teamId);
       allow create: if isAuth() && isTeamMember(request.resource.data.teamId);
       allow update: if isAuth() && (
+        // See pitScouting's own copy of this comment, just above.
         (canEditOrDeleteEntry(resource.data.teamId, resource.data)
-          && request.resource.data.scoutedBy == resource.data.scoutedBy)
+          && request.resource.data.get('scoutedBy', null) == resource.data.get('scoutedBy', null))
         || canAnonymizeDepartedField(resource.data.teamId, resource.data, request.resource.data, 'scoutedBy', 'scoutedByName')
         || canAnonymizeDepartedField(resource.data.teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
         || canAnonymizeOwnLastEdit(resource.data, request.resource.data)

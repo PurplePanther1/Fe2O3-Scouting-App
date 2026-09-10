@@ -1483,6 +1483,42 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
+// ====== Shared "someone is editing this right now" badge, used by both team
+// lists (renderPitTeamList/renderMatchTeamList below) — deliberately its own
+// element rather than a class toggled on the row/checkmark, since it's an
+// INDEPENDENT signal from the scouted checkmark/count badge (see
+// isTeamBeingEditedPit()/isTeamBeingEditedMatch() in pit-scout.js/
+// match-scout.js): an uncommitted draft with an active editor shows this
+// with no checkmark, a committed entry someone's reopened shows both.
+// Starts hidden with no text — updateLiveEditingBadge() (below) sets real
+// text before ever un-hiding it, on the initial render pass same as every
+// other live indicator. ======
+function createLiveEditingBadge() {
+  const badge = document.createElement('span');
+  badge.className = 'live-editing-badge hidden';
+  return badge;
+}
+
+// ====== CATEGORY 4: show WHO is editing, not just that someone is — names
+// come from getTeamEditingNamesPit()/getTeamEditingNamesMatch()
+// (pit-scout.js/match-scout.js), which already filter to fresh (non-stale)
+// editors only. Capped at 2 names shown by name, "+N more" beyond that, so
+// a pathologically long combined name string can't blow out the compact
+// team-list row's layout. ======
+function formatEditingNames(names) {
+  if (names.length <= 2) return names.join(', ');
+  return `${names.slice(0, 2).join(', ')} +${names.length - 2} more`;
+}
+function updateLiveEditingBadge(el, names) {
+  if (!el) return;
+  if (!names || names.length === 0) {
+    el.classList.add('hidden');
+    return;
+  }
+  el.textContent = `✎ Editing: ${formatEditingNames(names)}`;
+  el.classList.remove('hidden');
+}
+
 function renderMatchTeamList(teams) {
   console.time('[Timing] renderMatchTeamList');
   const container = document.getElementById('team-list-match');
@@ -1531,6 +1567,7 @@ function renderMatchTeamList(teams) {
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
     leftGroup.appendChild(oprSpan);
+    leftGroup.appendChild(createLiveEditingBadge());
 
     const btnGroup = document.createElement('div');
     btnGroup.className = 'team-item-actions';
@@ -1705,6 +1742,7 @@ function renderPitTeamList(teams) {
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
     leftGroup.appendChild(oprSpan);
+    leftGroup.appendChild(createLiveEditingBadge());
 
     const btnGroup = document.createElement('div');
     btnGroup.className = 'team-item-actions';

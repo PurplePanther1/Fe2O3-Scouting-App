@@ -1414,13 +1414,6 @@ input[type="password"]::placeholder {
   min-height: 60px;
 }
 
-.pit-field select:disabled,
-.pit-field input:disabled,
-.pit-field textarea:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
 /* ====== Live collaboration: field-level "someone else is here" indicator
    (applyPresenceIndicators(), live-entry-sync.js) — a visual cue only, not
    a lock; the underlying value is still plain last-write-wins. ====== */
@@ -1453,19 +1446,6 @@ input[type="password"]::placeholder {
   color: var(--presence);
   font-size: 0.85rem;
   font-weight: 600;
-}
-
-.btn-take-over {
-  display: block;
-  width: 100%;
-  margin-bottom: 14px;
-  border-color: var(--presence);
-  color: var(--presence);
-}
-
-.btn-take-over:hover {
-  background: var(--presence);
-  color: #fff;
 }
 
 .pit-field select {
@@ -1555,6 +1535,35 @@ input[type="password"]::placeholder {
   content: ' ✓';
   color: var(--success);
   font-size: 0.85rem;
+}
+
+/* ====== "Someone is editing this right now" team-list marker
+   (pit-scout.js's isTeamBeingEditedPit()/match-scout.js's
+   isTeamBeingEditedMatch(), created via first-api.js's
+   createLiveEditingBadge()) — an INDEPENDENT signal from the scouted
+   checkmark/count badge above (an uncommitted draft can be actively edited
+   too), so it uses the same live-collaboration --presence color language as
+   the field-presence-tag/presence-banner elsewhere rather than the
+   green/success palette used for "scouted". Hidden by default; toggled via
+   refreshTeamListScoutedState()/refreshMatchTeamListCounts(). Shows actual
+   editor name(s) now (updateLiveEditingBadge(), first-api.js), so max-width
+   + ellipsis caps how wide a long combined name string can grow the row —
+   formatEditingNames() already caps it at 2 names + "+N more" too, this is
+   just a second line of defense against one genuinely long name. ====== */
+.live-editing-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--presence-bg);
+  color: var(--presence);
+  font-size: 0.72rem;
+  font-weight: 600;
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Match Scouting tab's own indicator — a count, not a binary scouted state
