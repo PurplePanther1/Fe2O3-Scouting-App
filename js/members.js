@@ -37,7 +37,7 @@ function resetNestedScrollContainers(container) {
 }
 
 // ====== Dashboard tab switching ======
-// Exposed globally so a fresh login can reset to the default tab (Scouting)
+// Exposed globally so a fresh login can reset to the default tab (My Team)
 // the same way a page refresh does, instead of duplicating this logic.
 function activateDashboardTab(name) {
   // An in-progress bulk-select (Team Info/Pit/Match) shouldn't survive ANY
@@ -47,6 +47,25 @@ function activateDashboardTab(name) {
   // My-Team-tab-only state on every call, even a re-click of the
   // already-active tab (see the join/create-team input clearing below).
   if (typeof exitAllBulkSelectModes === 'function') exitAllBulkSelectModes();
+
+  // Scouting/My Team are real dashboard tabs and assume the dashboard
+  // header/tab bar is visible — but this function can now be called with
+  // 'scouting'/'myteam' while standalone-mode is still on (e.g.
+  // delete-account.js's "Switch to My Team tab to transfer" button, reachable
+  // from the standalone My Account page now that it's also reachable from the
+  // full dashboard, not just the no-team screen). Drop out of standalone mode
+  // first so the header/tabs reappear instead of leaving the tab's content
+  // showing headerless. Same cleanup signOut()/closeStandaloneMyAccount()
+  // (auth.js) already do on their own exit paths.
+  if (name === 'scouting' || name === 'myteam') {
+    const mainScreen = document.getElementById('screen-main');
+    if (mainScreen && mainScreen.classList.contains('standalone-mode')) {
+      mainScreen.classList.remove('standalone-mode');
+      const backBtn = document.getElementById('btn-my-account-standalone-back');
+      if (backBtn) backBtn.classList.add('hidden');
+      standaloneAccountOrigin = null;
+    }
+  }
 
   document.querySelectorAll('#dashboard-tabs .tab').forEach(t => {
     t.classList.toggle('active', t.dataset.dtab === name);
@@ -61,12 +80,27 @@ function activateDashboardTab(name) {
   // targets that sub-tab's own bounded container instead, never this.
   window.scrollTo(0, 0);
 
-  // Refresh the My Account tab's own info/teams list every time it's
+  // Refresh the My Account page's own info/teams list every time it's
   // switched to, not just on login — e.g. a team created/left elsewhere in
   // the same session should show up here without needing a page refresh.
+  // My Account and Account Activity are both standalone pages now (opened via
+  // openStandaloneMyAccount()/openAccountActivity(), auth.js), not dashboard
+  // tabs — but they still reuse this same content-switching function, just
+  // named 'account'/'activity' the same way 'scouting'/'myteam' are.
   if (name === 'account') {
     if (typeof renderAccountInfo === 'function') renderAccountInfo();
     if (typeof renderAccountTeamsList === 'function') renderAccountTeamsList();
+    if (typeof refreshActivityBadge === 'function') refreshActivityBadge();
+  } else if (name === 'activity') {
+    // renderAccountActivity() (activity-log.js) fetches the entries fresh and
+    // updates both badge elements itself — no separate refreshActivityBadge()
+    // call needed here.
+    if (typeof renderAccountActivity === 'function') renderAccountActivity();
+  } else {
+    // Refresh-on-navigation, not real-time (no onSnapshot listener for this)
+    // — every dashboard tab switch (Scouting/My Team) is a navigation point
+    // too, not just landing on Account/Account Activity themselves.
+    if (typeof refreshActivityBadge === 'function') refreshActivityBadge();
   }
 
   // The My Team tab's "Join Another Team" input/status belong to whatever
@@ -460,6 +494,29 @@ const MEMBER_PERMISSION_LABELS = {
 };
 let memberPermissionsEditingUid = null;
 
+// ====== Activity-log message for a permission change — one consolidated
+// line per Save/Grant-All/Remove-All action (not one entry per checkbox),
+// e.g. "granted Edit/delete others' entries; removed Pin/unpin events."
+// Returns null when the before/after sets are identical (nothing to log). ======
+function buildPermissionChangeMessage(beforePerms, afterPerms) {
+  const before = beforePerms || {};
+  const after = afterPerms || {};
+  const granted = [];
+  const removed = [];
+  MEMBER_PERMISSION_KEYS.forEach(key => {
+    const wasOn = before[key] === true;
+    const isOn = after[key] === true;
+    if (wasOn === isOn) return;
+    const label = MEMBER_PERMISSION_LABELS[key] || key;
+    (isOn ? granted : removed).push(label);
+  });
+  if (granted.length === 0 && removed.length === 0) return null;
+  const parts = [];
+  if (granted.length > 0) parts.push(`granted ${granted.join(', ')}`);
+  if (removed.length > 0) parts.push(`removed ${removed.join(', ')}`);
+  return parts.join('; ') + '.';
+}
+
 // ====== Grant All / Remove All split-button fill indicator — shared by the
 // row split button (filled from the member's saved permissions, re-applied
 // on every render) and the modal's split button (filled from the modal's
@@ -541,6 +598,7 @@ function setAllMemberPermissionBoxes(value) {
 async function setAllPermissionsForMember(uid, value, containerEl) {
   if (!currentTeamId) return;
 
+  const beforePerms = { ...(currentTeamPermissions[uid] || {}) };
   const updates = {};
   const newPerms = {};
   MEMBER_PERMISSION_KEYS.forEach(key => {
@@ -551,6 +609,18 @@ async function setAllPermissionsForMember(uid, value, containerEl) {
   try {
     await db.collection('teams').doc(currentTeamId).update(updates);
     currentTeamPermissions[uid] = { ...(currentTeamPermissions[uid] || {}), ...newPerms };
+    if (typeof logActivityForUser === 'function' && currentTeamData) {
+      const diffMessage = buildPermissionChangeMessage(beforePerms, currentTeamPermissions[uid]);
+      if (diffMessage) {
+        const actorName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : 'A captain';
+        logActivityForUser(uid, {
+          type: 'permission-changed',
+          teamId: currentTeamId,
+          teamName: currentTeamData.name || 'this team',
+          message: `${actorName} updated your permissions in "${currentTeamData.name || 'this team'}": ${diffMessage}`
+        });
+      }
+    }
     if (currentTeamData) {
       currentTeamData.permissions = currentTeamPermissions;
     }
@@ -575,6 +645,7 @@ async function saveMemberPermissions() {
   const uid = memberPermissionsEditingUid;
   const errorEl = document.getElementById('member-permissions-error');
 
+  const beforePerms = { ...(currentTeamPermissions[uid] || {}) };
   const updates = {};
   const newPerms = {};
   MEMBER_PERMISSION_KEYS.forEach(key => {
@@ -588,6 +659,18 @@ async function saveMemberPermissions() {
     await db.collection('teams').doc(currentTeamId).update(updates);
 
     currentTeamPermissions[uid] = { ...(currentTeamPermissions[uid] || {}), ...newPerms };
+    if (typeof logActivityForUser === 'function' && currentTeamData) {
+      const diffMessage = buildPermissionChangeMessage(beforePerms, currentTeamPermissions[uid]);
+      if (diffMessage) {
+        const actorName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : 'A captain';
+        logActivityForUser(uid, {
+          type: 'permission-changed',
+          teamId: currentTeamId,
+          teamName: currentTeamData.name || 'this team',
+          message: `${actorName} updated your permissions in "${currentTeamData.name || 'this team'}": ${diffMessage}`
+        });
+      }
+    }
     if (currentTeamData) {
       currentTeamData.permissions = currentTeamPermissions;
     }
@@ -648,6 +731,25 @@ function transferCaptaincy(newCaptainUid) {
         updates[`roles.${newCaptainUid}`] = 'captain';
         updates[`permissions.${currentUser.uid}`] = fullPermissions;
         updates[`permissions.${newCaptainUid}`] = fullPermissions;
+
+        // Written BEFORE the roles/permissions update below, not after — the
+        // captain-only write rule for this cross-user log entry checks that
+        // the ACTOR currently captains this team, and this very update is
+        // what demotes them to a regular member. Logging first, while
+        // they're still captain, is what firestore.rules' emulator testing
+        // this round caught as the only ordering that actually satisfies it.
+        if (typeof logActivityForUser === 'function' && currentTeamData) {
+          const actorName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : 'The previous captain';
+          // Only the NEW captain gets a log entry about this — the outgoing
+          // captain initiated the action themselves, so a self-referential
+          // notice about their own click would be noise.
+          await logActivityForUser(newCaptainUid, {
+            type: 'captaincy-transferred',
+            teamId: currentTeamId,
+            teamName: currentTeamData.name || 'this team',
+            message: `${actorName} made you captain of "${currentTeamData.name || 'this team'}".`
+          });
+        }
 
         await db.collection('teams').doc(currentTeamId).update(updates);
 
@@ -1148,6 +1250,19 @@ function handleRemovedFromTeam(teamId) {
   // message instead of clobbering each other — see queueRemovedTeamNotice().
   if (typeof queueRemovedTeamNotice === 'function') {
     queueRemovedTeamNotice(teamName);
+  }
+
+  // Self-write activity log entry — the live-detection counterpart to
+  // auth.js's next-login reconciliation self-write (same event, different
+  // detection point: this one fires the instant a listener sees it, while
+  // the app is already open).
+  if (typeof logActivitySelf === 'function') {
+    logActivitySelf({
+      type: 'kicked',
+      teamId,
+      teamName,
+      message: `You were removed from "${teamName}".`
+    });
   }
 }
 

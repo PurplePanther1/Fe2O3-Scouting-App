@@ -4,9 +4,9 @@
 // search text — all in sessionStorage, scoped to this browser tab only (not
 // localStorage), so a refresh restores exactly where the user was, but
 // closing the tab/browser (or opening the app fresh in a new tab) starts
-// clean at the default Scouting → Team Information state with no event
-// selected. Switching between teams shows each team's own event/search
-// state (empty if that team has never had one set), never another team's.
+// clean at the default My Team state with no event selected. Switching
+// between teams shows each team's own event/search state (empty if that
+// team has never had one set), never another team's.
 
 const SESSION_STATE_KEY = 'fe2o3_session_state';
 
@@ -15,8 +15,21 @@ const SESSION_STATE_KEY = 'fe2o3_session_state';
 // already stored so every OTHER team's perTeam entry survives untouched. ======
 function saveSessionState() {
   try {
-    const activeDashboardTab = document.querySelector('#dashboard-tabs .tab.active');
-    const dashboardTab = activeDashboardTab ? activeDashboardTab.dataset.dtab : 'scouting';
+    // My Account/Account Activity are standalone pages, not dashboard tabs —
+    // #dashboard-tabs has no button for either, so there's nothing for the
+    // .tab.active lookup below to find while one of them is open. Read the
+    // active dtab-content directly in that case (screen-main.standalone-mode)
+    // so a refresh while viewing either page still restores to it, same as
+    // before either became a standalone page.
+    const mainScreen = document.getElementById('screen-main');
+    let dashboardTab;
+    if (mainScreen && mainScreen.classList.contains('standalone-mode')) {
+      const activeContent = document.querySelector('.dtab-content.active');
+      dashboardTab = activeContent ? activeContent.id.replace('dtab-', '') : 'account';
+    } else {
+      const activeDashboardTab = document.querySelector('#dashboard-tabs .tab.active');
+      dashboardTab = activeDashboardTab ? activeDashboardTab.dataset.dtab : 'myteam';
+    }
     const scoutingSubtab = typeof lastActiveScoutingSubTab !== 'undefined' ? lastActiveScoutingSubTab : 'info';
 
     const existing = loadSessionState();
@@ -42,10 +55,22 @@ function saveSessionState() {
     // logic needed here.
     const sortDirection = typeof currentTeamSortDirection !== 'undefined' ? currentTeamSortDirection : 1;
 
+    // The Account Activity page's own active sub-tab/type-filter
+    // (activity-log.js) — saved unconditionally like dashboardTab/
+    // scoutingSubtab above, harmless when dashboardTab isn't 'activity'
+    // since restoreOrDefaultSessionState() only ever reads these back in
+    // that case. Kept in sync live by activity-log.js's own tab-click/
+    // filter-change listeners (not just here), so a refresh mid-browsing
+    // this page always resumes exactly where it left off.
+    const activityTab = typeof activityLogActiveTab !== 'undefined' ? activityLogActiveTab : 'general';
+    const activityTypeFilter = typeof activityLogTypeFilter !== 'undefined' ? activityLogTypeFilter : '';
+
     sessionStorage.setItem(SESSION_STATE_KEY, JSON.stringify({
       dashboardTab,
       scoutingSubtab,
       sortDirection,
+      activityTab,
+      activityTypeFilter,
       perTeam
     }));
   } catch (err) {
@@ -68,8 +93,8 @@ function loadSessionState() {
 // Session-restore is meant for refreshing while still logged in, not for a
 // fresh login — without this, signing out and back in within the same tab
 // would resurrect the previous login's tab/subtab/event(s) instead of
-// landing on the Scouting → Team Information default a fresh login should
-// get. Clearing the single top-level key wipes every team's perTeam entry
+// landing on the My Team default a fresh login should get. Clearing the
+// single top-level key wipes every team's perTeam entry
 // too, so no separate per-team cleanup is needed here.
 function clearSessionState() {
   try {
@@ -149,11 +174,10 @@ async function restorePerTeamEventState() {
 
 // ====== Apply saved dashboard tab/subtab, then the active team's saved
 // event/search state — on login/refresh, or fall back to the existing
-// default (Scouting → Team Information, no event) if this is a fresh
-// session. ======
+// default (My Team, no event) if this is a fresh session. ======
 async function restoreOrDefaultSessionState() {
   const saved = loadSessionState();
-  const dashboardTab = (saved && saved.dashboardTab) || 'scouting';
+  const dashboardTab = (saved && saved.dashboardTab) || 'myteam';
   const scoutingSubtab = (saved && saved.scoutingSubtab) || 'info';
 
   // Restored before restorePerTeamEventState() below, so if that ends up
@@ -179,7 +203,24 @@ async function restoreOrDefaultSessionState() {
   // switchActiveTeam() for the same reason.
   await restorePerTeamEventState();
 
-  if (typeof window.activateDashboardTab === 'function') {
+  // 'account'/'activity' are standalone pages now, not dashboard tabs —
+  // routing them through the raw activateDashboardTab() below would show the
+  // right content but skip the standalone-mode class toggle, the Back
+  // button's label/visibility, and (for 'activity') which page Back should
+  // return to. Route through the same openers the buttons themselves use.
+  if (dashboardTab === 'account' && typeof openStandaloneMyAccount === 'function') {
+    openStandaloneMyAccount('dashboard');
+  } else if (dashboardTab === 'activity' && typeof openStandaloneMyAccount === 'function') {
+    openStandaloneMyAccount('dashboard');
+    // showAccountActivityPage() (not openAccountActivity()) deliberately —
+    // a refresh restores whatever active tab/type-filter was last saved
+    // rather than resetting it, unlike the button's own click handler. See
+    // activity-log.js's resetActivityLogViewState()/applyActivityLogViewState().
+    if (typeof applyActivityLogViewState === 'function') {
+      applyActivityLogViewState(saved && saved.activityTab, saved && saved.activityTypeFilter);
+    }
+    if (typeof showAccountActivityPage === 'function') showAccountActivityPage();
+  } else if (typeof window.activateDashboardTab === 'function') {
     window.activateDashboardTab(dashboardTab);
   }
   if (typeof window.activateScoutingSubTab === 'function') {

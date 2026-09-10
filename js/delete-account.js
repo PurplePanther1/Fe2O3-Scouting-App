@@ -488,6 +488,7 @@ async function confirmDeleteAccount() {
         }
 
         showLoading('Deleting your account data...');
+        await withStep('Deleting activity log', () => deleteActivityLogSubcollection(uid));
         await withStep('Deleting private contact doc', () => db.collection('users').doc(uid).collection('private').doc('contact').delete());
         await withStep('Deleting user profile doc', () => db.collection('users').doc(uid).delete());
 

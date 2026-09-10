@@ -51,23 +51,23 @@ function resetTeamTabs() {
   });
 }
 
-// ====== Reset to Scouting → Team Information the same way handleAuthenticatedUser()
-// does on login. Called after create/join succeeds — without this, whatever
+// ====== Reset to My Team the same way handleAuthenticatedUser() does on
+// login. Called after create/join succeeds — without this, whatever
 // dashboard tab was left active from a PRIOR account's session in this same
 // browser tab (e.g. still on My Account, if that's where a just-deleted
 // account's session left off) would stay active instead of resetting for a
 // brand-new team, since create/join is a separate code path from login. ======
 function resetDashboardOnEnterTeam() {
-  // Always land on Scouting → Team Information here — unlike a refresh
-  // (where restoring saved state is exactly the point), joining/creating a
-  // team is always the START of a dashboard session in this tab, so there's
-  // nothing legitimate to restore. Calling restoreOrDefaultSessionState()
-  // here was wrong: it restores whatever's saved if anything is, and
-  // browsing the standalone My Account view (before joining) saves
-  // dashboardTab: 'account' as a side effect of activating that tab — which
-  // then got restored right back after joining instead of defaulting.
+  // Always land on My Team here — unlike a refresh (where restoring saved
+  // state is exactly the point), joining/creating a team is always the
+  // START of a dashboard session in this tab, so there's nothing legitimate
+  // to restore. Calling restoreOrDefaultSessionState() here was wrong: it
+  // restores whatever's saved if anything is, and browsing the standalone
+  // My Account view (before joining) saves dashboardTab: 'account' as a
+  // side effect of activating that tab — which then got restored right back
+  // after joining instead of defaulting.
   if (typeof window.activateDashboardTab === 'function') {
-    window.activateDashboardTab('scouting');
+    window.activateDashboardTab('myteam');
   }
   if (typeof window.activateScoutingSubTab === 'function') {
     window.activateScoutingSubTab('info');

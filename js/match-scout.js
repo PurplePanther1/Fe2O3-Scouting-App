@@ -224,6 +224,15 @@ async function attachMatchLiveSession(docId, fields, baseFieldsIfNew) {
           message: 'This entry was just saved by another editor. Since it\'s now been scouted, only its owner, a captain, or someone with edit-others permission can continue editing it — you were disconnected. Any of your edits that had already synced remain saved; anything typed in the last moment before this may not have.'
         });
       }
+      if (typeof logActivitySelf === 'function') {
+        const liveTeamName = (currentTeamData && currentTeamData.name) || 'this team';
+        logActivitySelf({
+          type: 'live-edit-disconnected',
+          teamId,
+          teamName: liveTeamName,
+          message: `You were disconnected from a match scouting entry in "${liveTeamName}" — it was saved by another editor while you were still working on it.`
+        });
+      }
     },
     onSnapshotData: (data) => {
       if (!currentMatchFormController || !currentMatchFields) return;

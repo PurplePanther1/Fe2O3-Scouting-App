@@ -214,16 +214,27 @@ function moveFileToFolder(fileId, folderId) {
 }
 
 // ====== Formatting helpers ======
+// Both timestamp-formatting paths below use the user's saved timezone
+// preference (js/activity-log.js's formatInUserTimezone(), backed by
+// users/{uid}.timezone) rather than the browser's local zone — deliberately
+// scoped to just these two call sites, not the live match-scores clock
+// elsewhere in the app.
 function formatCellValue(val) {
   if (val === null || val === undefined) return '';
-  if (typeof val === 'object' && typeof val.toDate === 'function') return val.toDate().toLocaleString();
+  if (typeof val === 'object' && typeof val.toDate === 'function') {
+    return typeof formatInUserTimezone === 'function' ? formatInUserTimezone(val.toDate()) : val.toDate().toLocaleString();
+  }
   return val;
 }
 
 function formatTimestamp(ts) {
   if (!ts) return '';
-  if (typeof ts.toDate === 'function') return ts.toDate().toLocaleString();
-  if (ts instanceof Date) return ts.toLocaleString();
+  if (typeof ts.toDate === 'function') {
+    return typeof formatInUserTimezone === 'function' ? formatInUserTimezone(ts.toDate()) : ts.toDate().toLocaleString();
+  }
+  if (ts instanceof Date) {
+    return typeof formatInUserTimezone === 'function' ? formatInUserTimezone(ts) : ts.toLocaleString();
+  }
   return String(ts);
 }
 

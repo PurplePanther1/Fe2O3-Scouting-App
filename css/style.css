@@ -612,11 +612,13 @@ input[type="password"]::placeholder {
   gap: 12px;
 }
 
-/* Standalone My Account view, reached from the Join/Create Team screen before
-   the user has a team — shows just the My Account tab content, no team name
-   banner or tab bar (there's no team/other tabs to navigate to yet). */
-#screen-main.standalone-account-mode #dashboard-header,
-#screen-main.standalone-account-mode #dashboard-tabs {
+/* Standalone My Account / Account Activity pages — reached either from the
+   Join/Create Team screen (before the user has a team) or from the dashboard
+   header's "My Account" button. Hides the team name banner and dashboard tab
+   bar, since My Account/Account Activity are no longer dashboard tabs
+   themselves (see openStandaloneMyAccount()/openAccountActivity(), auth.js). */
+#screen-main.standalone-mode #dashboard-header,
+#screen-main.standalone-mode #dashboard-tabs {
   display: none;
 }
 
@@ -858,6 +860,85 @@ input[type="password"]::placeholder {
   font-size: 0.8rem;
   color: var(--text-muted);
   margin-top: 1px;
+}
+
+/* ====== Account Activity Log ====== */
+/* #account-activity-nav-badge: the badge on the Account page's "Account
+   Activity" button. #account-activity-nav-badge-header: the same count
+   mirrored on the dashboard header's "My Account" button.
+   #account-activity-nav-badge-team: the same count mirrored on the
+   Join/Create Team screen's own "My Account" button (updateActivityBadgeDom(),
+   activity-log.js, keeps all three in sync). */
+#account-activity-nav-badge,
+#account-activity-nav-badge-header,
+#account-activity-nav-badge-team {
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.activity-subtab {
+  flex: 0 0 auto;
+  min-width: 90px;
+}
+
+.activity-log-entry {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.activity-log-entry:last-child {
+  border-bottom: none;
+}
+
+.activity-log-entry.unread .activity-log-entry-message {
+  font-weight: 700;
+}
+
+.activity-log-entry-message {
+  margin: 0 0 2px 0;
+}
+
+.activity-log-entry-meta {
+  margin: 0;
+}
+
+.activity-log-entry-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.activity-log-entry-toggle-read-btn {
+  flex-shrink: 0;
+  white-space: nowrap;
+  width: auto;
+  font-size: 0.7rem;
+  padding: 4px 8px;
+}
+
+/* Larger/more noticeable than the original 8px dot — live testing feedback
+   found it too easy to miss. */
+.activity-log-unread-dot {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 3px rgba(233, 69, 96, 0.25);
+  margin-top: 4px;
+}
+
+/* Always rendered (never removed from the DOM) so the toggle-read button
+   below it never shifts position between read/unread — visibility:hidden
+   keeps this reserving the same layout space a display:none dot wouldn't. */
+.activity-log-unread-dot-hidden {
+  visibility: hidden;
 }
 
 .member-item .member-role-badge {

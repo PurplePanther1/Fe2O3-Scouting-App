@@ -65,17 +65,22 @@ async function ensureUserProfile(user) {
       if (!profile.displayName && user.displayName) updates.displayName = user.displayName;
       // Self-heal: this doc predates the public/private split and still has a raw email on it — move it off.
       if (profile.email) updates.email = firebase.firestore.FieldValue.delete();
+      // Self-heal: this doc predates the timezone preference — default it
+      // once, from the browser, same as a brand-new profile below. Never
+      // overwrites a timezone the user (or an earlier login on another
+      // device) already set.
+      if (!profile.timezone) updates.timezone = detectBrowserTimezone();
       if (Object.keys(updates).length > 0) {
         await ref.set(updates, { merge: true });
         profile = { ...profile, ...updates, email: undefined };
       }
     } else {
-      profile = { displayName: user.displayName || '', photoURL: user.photoURL || null };
+      profile = { displayName: user.displayName || '', photoURL: user.photoURL || null, timezone: detectBrowserTimezone() };
       await ref.set({ ...profile, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
     }
   } catch (err) {
     console.warn('Failed to load/create user profile:', err);
-    profile = { displayName: user.displayName || '', photoURL: user.photoURL || null };
+    profile = { displayName: user.displayName || '', photoURL: user.photoURL || null, timezone: detectBrowserTimezone() };
   }
 
   currentUserProfile = {
@@ -84,9 +89,21 @@ async function ensureUserProfile(user) {
     email: user.email || '',
     // True only once the user has explicitly gone through saveDisplayName() —
     // an auto-filled Google name doesn't count until they've actually confirmed it.
-    displayNameConfirmed: !!profile.displayNameConfirmed
+    displayNameConfirmed: !!profile.displayNameConfirmed,
+    timezone: profile.timezone || detectBrowserTimezone()
   };
   return currentUserProfile;
+}
+
+// Best-effort browser timezone lookup, used only as a fallback default (first
+// login, or a profile that predates this preference) — the user can always
+// override it from the Account tab afterward (see input-account-card-timezone).
+function detectBrowserTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch (err) {
+    return 'UTC';
+  }
 }
 
 /**
@@ -250,20 +267,28 @@ async function ensureJoinCodeDoc(teamId, joinCode, teamName) {
  * prompt, and the post-login "set a display name" gate for existing users.
  * Always marks the name as explicitly confirmed — calling this at all means the
  * user saw the field (pre-filled or not) and pressed a button to proceed with it.
+ *
+ * timezone is optional — passed by the account-creation name gate so the
+ * timezone chosen in that same step lands in this one write instead of a
+ * separate follow-up write; other callers omit it and leave timezone alone.
  */
-async function saveDisplayName(name) {
+async function saveDisplayName(name, timezone) {
   const trimmed = (name || '').trim();
   if (!trimmed) throw new Error('Please enter a name.');
   if (!currentUser) throw new Error('You must be signed in.');
 
-  await db.collection('users').doc(currentUser.uid).set({
+  const updates = {
     displayName: trimmed,
     photoURL: currentUser.photoURL || null,
     displayNameConfirmed: true,
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-  }, { merge: true });
+  };
+  if (timezone) updates.timezone = timezone;
+
+  await db.collection('users').doc(currentUser.uid).set(updates, { merge: true });
 
   currentUserProfile = { ...(currentUserProfile || {}), displayName: trimmed, displayNameConfirmed: true };
+  if (timezone) currentUserProfile.timezone = timezone;
   return trimmed;
 }
 
@@ -798,9 +823,12 @@ $('btn-set-display-name-continue').addEventListener('click', async () => {
   }
   if (!currentUser) return;
 
+  const timezoneSelect = document.getElementById('input-set-display-name-timezone');
+  const timezone = timezoneSelect ? timezoneSelect.value : null;
+
   showLoading('Saving...');
   try {
-    await saveDisplayName(name);
+    await saveDisplayName(name, timezone);
     hideLoading();
     // Re-run the post-login flow now that the name is set — mirrors the
     // "I've verified — continue" pattern above.
@@ -855,6 +883,9 @@ function renderAccountInfo() {
     methodEl.textContent = hasPassword ? 'Email & Password' : `Google (${currentUser.email || 'no email on this account'})`;
   }
 
+  const tzEl = document.getElementById('account-card-timezone-display');
+  if (tzEl) tzEl.textContent = (currentUserProfile && currentUserProfile.timezone) || detectBrowserTimezone();
+
   const convertSection = document.getElementById('account-google-convert-section');
   if (convertSection) convertSection.classList.toggle('hidden', hasPassword);
   const convertCurrentEmailEl = document.getElementById('account-google-convert-current-email');
@@ -878,6 +909,9 @@ function enterAccountCardEditMode() {
   document.getElementById('input-account-card-email').value = hasPassword ? (currentUser.email || '') : '';
   document.getElementById('input-account-card-new-password').value = '';
   document.getElementById('input-account-card-confirm-password').value = '';
+  if (typeof populateTimezoneSelect === 'function') {
+    populateTimezoneSelect('input-account-card-timezone', (currentUserProfile && currentUserProfile.timezone) || detectBrowserTimezone());
+  }
   document.getElementById('account-card-error').textContent = '';
   document.getElementById('account-card-success').textContent = '';
 
@@ -1084,6 +1118,8 @@ $('btn-account-card-save').addEventListener('click', async () => {
   const newEmail = hasPassword ? document.getElementById('input-account-card-email').value.trim() : null;
   const newPassword = hasPassword ? document.getElementById('input-account-card-new-password').value : '';
   const confirmPassword = hasPassword ? document.getElementById('input-account-card-confirm-password').value : '';
+  const timezoneSelect = document.getElementById('input-account-card-timezone');
+  const newTimezone = timezoneSelect ? timezoneSelect.value : null;
 
   if (!newName) {
     errorEl.textContent = 'Please enter a name.';
@@ -1127,6 +1163,12 @@ $('btn-account-card-save').addEventListener('click', async () => {
     if (hasPassword && newPassword) {
       showLoading('Updating password...');
       await currentUser.updatePassword(newPassword);
+    }
+
+    if (newTimezone && newTimezone !== (currentUserProfile && currentUserProfile.timezone)) {
+      showLoading('Saving timezone...');
+      await db.collection('users').doc(currentUser.uid).set({ timezone: newTimezone }, { merge: true });
+      if (currentUserProfile) currentUserProfile.timezone = newTimezone;
     }
 
     hideLoading();
@@ -1409,13 +1451,21 @@ async function signOut() {
     // this same tab would see whatever the previous account had typed.
     const eventSearchInput = $('input-event-search');
     if (eventSearchInput) eventSearchInput.value = '';
-    // In case sign-out happened from the standalone My Account view (reached
-    // from the Join/Create Team screen) — don't leave screen-main stuck
-    // hiding its dashboard header/tabs for whoever logs in next.
+    // In case sign-out happened from the standalone My Account/Account
+    // Activity view (reached from the Join/Create Team screen OR the
+    // dashboard header) — don't leave screen-main stuck hiding its dashboard
+    // header/tabs for whoever logs in next.
     const mainScreen = document.getElementById('screen-main');
-    if (mainScreen) mainScreen.classList.remove('standalone-account-mode');
+    if (mainScreen) mainScreen.classList.remove('standalone-mode');
     const standaloneBackBtn = document.getElementById('btn-my-account-standalone-back');
     if (standaloneBackBtn) standaloneBackBtn.classList.add('hidden');
+    standaloneAccountOrigin = null;
+    // Same "same tab, next login shouldn't see the previous account's UI
+    // state" reasoning as everything else in this block — the Account
+    // Activity page's own active tab/type-filter (activity-log.js) are
+    // plain in-memory vars that otherwise survive a sign-out/sign-in in this
+    // same tab.
+    if (typeof resetActivityLogViewState === 'function') resetActivityLogViewState();
     // A refresh gets this reset for free from the HTML defaults — sign-out
     // needs to do it explicitly so Sign Up doesn't stay active into the next
     // session in this same tab.
@@ -1448,6 +1498,11 @@ function confirmSignOut() {
 
 $('btn-sign-out').addEventListener('click', confirmSignOut);
 $('btn-main-sign-out').addEventListener('click', confirmSignOut);
+// Neither standalone page (My Account, Account Activity) previously had any
+// way to sign out at all — same button/position/style as the dashboard
+// header's, just duplicated onto each standalone page's own header row.
+$('btn-account-page-sign-out').addEventListener('click', confirmSignOut);
+$('btn-activity-page-sign-out').addEventListener('click', confirmSignOut);
 
 // ====== My Account tab: list of every team this user currently belongs to,
 // each with an inline (optional) per-team display-name override — merged
@@ -1579,32 +1634,84 @@ async function savePerTeamDisplayName(teamId, input, statusEl) {
   }
 }
 
-// ====== Standalone My Account view (from the Join/Create Team screen, for a
-// user who doesn't have a team yet — e.g. right after deleting their old
-// account and signing up fresh). Reuses the same #dtab-account markup/logic
-// as the normal My Account tab; just hides the dashboard header/tab bar
-// (there's no team name or other tabs to show yet) and adds a Back button. ======
-function openStandaloneMyAccount() {
+// ====== Standalone My Account page ======
+// My Account is always a standalone page, never a dashboard tab — reached
+// either from the Join/Create Team screen (a user with no team yet, e.g.
+// right after deleting their old account and signing up fresh) or from the
+// "My Account" button in the dashboard header (a user who DOES have a team).
+// Both cases reuse the same #dtab-account markup/logic and the same
+// #screen-main.standalone-mode CSS (hides the dashboard header/tab bar —
+// there's nothing else to navigate to from here); only the Back button's
+// label/destination differs, tracked via standaloneAccountOrigin so
+// closeStandaloneMyAccount() knows which screen to return to.
+let standaloneAccountOrigin = null; // 'team' | 'dashboard' | null
+
+function openStandaloneMyAccount(origin) {
+  standaloneAccountOrigin = origin || (typeof currentTeamId !== 'undefined' && currentTeamId ? 'dashboard' : 'team');
   const mainScreen = document.getElementById('screen-main');
-  if (mainScreen) mainScreen.classList.add('standalone-account-mode');
+  if (mainScreen) mainScreen.classList.add('standalone-mode');
   showScreen('screen-main');
   if (typeof activateDashboardTab === 'function') activateDashboardTab('account');
   renderAccountInfo();
   renderAccountTeamsList();
+  if (typeof refreshActivityBadge === 'function') refreshActivityBadge();
   const backBtn = document.getElementById('btn-my-account-standalone-back');
-  if (backBtn) backBtn.classList.remove('hidden');
+  if (backBtn) {
+    backBtn.classList.remove('hidden');
+    backBtn.textContent = standaloneAccountOrigin === 'team' ? '← Back to Join/Create Team' : '← Back to Dashboard';
+  }
 }
 
 function closeStandaloneMyAccount() {
   const mainScreen = document.getElementById('screen-main');
-  if (mainScreen) mainScreen.classList.remove('standalone-account-mode');
+  if (mainScreen) mainScreen.classList.remove('standalone-mode');
   const backBtn = document.getElementById('btn-my-account-standalone-back');
   if (backBtn) backBtn.classList.add('hidden');
-  showScreen('screen-team');
+  if (standaloneAccountOrigin === 'team') {
+    showScreen('screen-team');
+  } else {
+    showScreen('screen-main');
+    if (typeof activateDashboardTab === 'function') activateDashboardTab('myteam');
+  }
+  standaloneAccountOrigin = null;
 }
 
-$('btn-open-my-account-standalone').addEventListener('click', openStandaloneMyAccount);
+$('btn-open-my-account-standalone').addEventListener('click', () => openStandaloneMyAccount('team'));
+$('btn-open-my-account-from-dashboard').addEventListener('click', () => openStandaloneMyAccount('dashboard'));
 $('btn-my-account-standalone-back').addEventListener('click', closeStandaloneMyAccount);
+
+// ====== Standalone Account Activity page ======
+// A second layer of the same standalone-page pattern: opened FROM the My
+// Account page (never directly from the dashboard), so closing it returns to
+// My Account, not to wherever My Account itself was opened from —
+// standaloneAccountOrigin (and #screen-main.standalone-mode) both stay
+// exactly as My Account left them the whole time this is open.
+//
+// showAccountActivityPage() is the shared low-level "show" step —
+// activateDashboardTab('activity') (members.js) already calls
+// renderAccountActivity() itself, so nothing further is needed here.
+// openAccountActivity() (the button's own handler) wraps it with a reset of
+// the page's own active-tab/type-filter state first — normal in-app
+// navigation into this page always starts at General/All Types.
+// restoreOrDefaultSessionState() (session-state.js), the REFRESH path, calls
+// showAccountActivityPage() directly instead, after applying whatever
+// tab/filter was last saved — a refresh is meant to preserve that, not reset
+// it. See activity-log.js's resetActivityLogViewState()/applyActivityLogViewState().
+function showAccountActivityPage() {
+  if (typeof activateDashboardTab === 'function') activateDashboardTab('activity');
+}
+
+function openAccountActivity() {
+  if (typeof resetActivityLogViewState === 'function') resetActivityLogViewState();
+  showAccountActivityPage();
+}
+
+function closeAccountActivity() {
+  if (typeof activateDashboardTab === 'function') activateDashboardTab('account');
+}
+
+$('btn-open-account-activity').addEventListener('click', openAccountActivity);
+$('btn-account-activity-back').addEventListener('click', closeAccountActivity);
 
 // ====== Handle authenticated user (team lookup + navigation) ======
 async function handleAuthenticatedUser(user) {
@@ -1645,12 +1752,29 @@ async function handleAuthenticatedUser(user) {
     // the diff below rather than treating "no baseline" as "every team was
     // removed."
     const previouslyKnownTeams = getStoredKnownTeams(user.uid);
-    const removedTeamNames = previouslyKnownTeams
-      ? previouslyKnownTeams
-          .filter(pt => !teams.some(t => t.id === pt.id))
-          .map(pt => pt.name || 'a team')
+    const removedTeams = previouslyKnownTeams
+      ? previouslyKnownTeams.filter(pt => !teams.some(t => t.id === pt.id))
       : [];
+    const removedTeamNames = removedTeams.map(pt => pt.name || 'a team');
     setStoredKnownTeams(user.uid, teams.map(t => ({ id: t.id, name: t.name || '' })));
+
+    // Self-write an activity log entry for each team found missing here —
+    // this is the "next login" detection point (the other is the live path,
+    // handleRemovedFromTeam() in members.js, for a removal that happens
+    // while the app is already open). Worded neutrally, same as the notice
+    // modal below — this signal can't tell a kick apart from a self-initiated
+    // leave on another device, so it never says "kicked." Fire-and-forget:
+    // shouldn't block the login flow.
+    if (typeof logActivitySelf === 'function') {
+      removedTeams.forEach(pt => {
+        logActivitySelf({
+          type: 'kicked',
+          teamId: pt.id,
+          teamName: pt.name || 'this team',
+          message: `You're no longer a member of "${pt.name || 'this team'}".`
+        });
+      });
+    }
 
     // Shown after the dashboard/screen-team has fully settled (both call
     // sites below are right after their own hideLoading()), never blocking
@@ -1677,6 +1801,9 @@ async function handleAuthenticatedUser(user) {
       hideLoading();
       const nameInput = document.getElementById('input-set-display-name');
       if (nameInput) nameInput.value = (currentUserProfile && currentUserProfile.displayName) || '';
+      if (typeof populateTimezoneSelect === 'function') {
+        populateTimezoneSelect('input-set-display-name-timezone', (currentUserProfile && currentUserProfile.timezone) || detectBrowserTimezone());
+      }
       showScreen('screen-set-display-name');
       return;
     }
@@ -1746,11 +1873,11 @@ async function handleAuthenticatedUser(user) {
       // Restore whatever tab/subtab/event this browser tab had before a
       // refresh (sessionStorage — cleared when the tab/browser closes, so a
       // brand-new session still starts clean), or fall back to the same
-      // default a fresh page load starts on (Scouting → Team Information, no
-      // event). Runs after showScreen so the dashboard is already in the DOM,
-      // but the loading overlay (hidden below, once this settles) stays up
-      // for it too, so the dashboard's un-restored default state never
-      // flashes on screen before it settles into the real one.
+      // default a fresh page load starts on (My Team, no event). Runs after
+      // showScreen so the dashboard is already in the DOM, but the loading
+      // overlay (hidden below, once this settles) stays up for it too, so
+      // the dashboard's un-restored default state never flashes on screen
+      // before it settles into the real one.
       if (typeof restoreOrDefaultSessionState === 'function') {
         try {
           await restoreOrDefaultSessionState();
@@ -1759,7 +1886,7 @@ async function handleAuthenticatedUser(user) {
         }
       } else {
         if (typeof window.activateDashboardTab === 'function') {
-          window.activateDashboardTab('scouting');
+          window.activateDashboardTab('myteam');
         }
         if (typeof window.activateScoutingSubTab === 'function') {
           window.activateScoutingSubTab('info');
@@ -1767,20 +1894,32 @@ async function handleAuthenticatedUser(user) {
       }
       hideLoading();
       showRemovedTeamsNoticeIfAny();
+      if (typeof refreshActivityBadge === 'function') refreshActivityBadge();
     } else {
       hideLoading();
       clearErrors();
-      // A refresh while viewing My Account with zero teams (openStandaloneMyAccount()
-      // above) must land back there, not on the Join/Create screen — the saved
+      // A refresh while viewing My Account (or Account Activity) with zero
+      // teams (openStandaloneMyAccount()/openAccountActivity() above) must
+      // land back there, not on the Join/Create screen — the saved
       // dashboardTab is the only signal of that, since this branch has no team
       // to key a real per-team session entry off of.
       const savedState = (typeof loadSessionState === 'function') ? loadSessionState() : null;
-      if (savedState && savedState.dashboardTab === 'account' && typeof openStandaloneMyAccount === 'function') {
-        openStandaloneMyAccount();
+      if (savedState && (savedState.dashboardTab === 'account' || savedState.dashboardTab === 'activity') && typeof openStandaloneMyAccount === 'function') {
+        openStandaloneMyAccount('team');
+        // A refresh restores whatever activity tab/filter was last active
+        // (applyActivityLogViewState()) rather than resetting it — unlike
+        // openAccountActivity()'s own click handler, which always resets.
+        if (savedState.dashboardTab === 'activity') {
+          if (typeof applyActivityLogViewState === 'function') {
+            applyActivityLogViewState(savedState.activityTab, savedState.activityTypeFilter);
+          }
+          if (typeof showAccountActivityPage === 'function') showAccountActivityPage();
+        }
       } else {
         showScreen('screen-team');
       }
       showRemovedTeamsNoticeIfAny();
+      if (typeof refreshActivityBadge === 'function') refreshActivityBadge();
     }
   } catch (err) {
     hideLoading();

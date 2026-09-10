@@ -105,6 +105,11 @@
         the Account tab.
       </p>
       <input type="text" id="input-set-display-name" placeholder="e.g. Alex P." maxlength="40" />
+      <div class="pit-field" style="text-align:left; margin-top:12px">
+        <label for="input-set-display-name-timezone">Timezone</label>
+        <select id="input-set-display-name-timezone"></select>
+        <p class="help-text" style="margin-top:4px">Used for timestamps in Account Activity and exported spreadsheets. Detected automatically — change it if it's wrong.</p>
+      </div>
       <button id="btn-set-display-name-continue" class="btn btn-primary" style="margin-top:8px">Continue</button>
       <p id="set-display-name-error" class="error-message"></p>
     </div>
@@ -153,7 +158,7 @@
       <div class="user-info" id="user-info">
         <img id="user-avatar" src="" alt="" />
         <span id="user-name"></span>
-        <button id="btn-open-my-account-standalone" class="btn btn-small btn-outline">My Account</button>
+        <button id="btn-open-my-account-standalone" class="btn btn-small btn-outline">My Account <span id="account-activity-nav-badge-team" class="match-count-badge hidden"></span></button>
         <button id="btn-sign-out" class="btn btn-small btn-outline">Sign Out</button>
       </div>
 
@@ -196,14 +201,16 @@
         <div id="dashboard-team-info">
           <h2 id="main-team-name"></h2>
         </div>
-        <button id="btn-main-sign-out" class="btn btn-small btn-outline">Sign Out</button>
+        <div style="display:flex; align-items:center; gap:8px; flex-shrink:0">
+          <button id="btn-open-my-account-from-dashboard" class="btn btn-small btn-outline">My Account <span id="account-activity-nav-badge-header" class="match-count-badge hidden"></span></button>
+          <button id="btn-main-sign-out" class="btn btn-small btn-outline">Sign Out</button>
+        </div>
       </div>
 
       <!-- Dashboard tab bar -->
       <div id="dashboard-tabs" class="tabs" style="margin-top:16px">
         <button class="tab active" data-dtab="scouting">Scouting</button>
         <button class="tab" data-dtab="myteam">My Team</button>
-        <button class="tab" data-dtab="account">My Account</button>
       </div>
 
       <!-- ====== SCOUTING TAB ====== -->
@@ -451,11 +458,24 @@
 
       </div>
 
-      <!-- ====== MY ACCOUNT TAB ====== -->
+      <!-- ====== MY ACCOUNT PAGE (standalone — see openStandaloneMyAccount()/
+           closeStandaloneMyAccount() in js/auth.js) ====== -->
       <div id="dtab-account" class="dtab-content">
 
-        <!-- Only shown when reached standalone from the Join/Create Team screen -->
-        <button id="btn-my-account-standalone-back" class="btn btn-outline hidden" style="width:100%; margin-bottom:20px">← Back to Join/Create Team</button>
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap">
+          <!-- Back label/target set dynamically by openStandaloneMyAccount() depending on
+               whether this was reached from the dashboard or the Join/Create Team screen -->
+          <button id="btn-my-account-standalone-back" class="btn btn-outline hidden" style="width:auto">← Back</button>
+          <div style="display:flex; align-items:center; gap:8px; flex-shrink:0; margin-left:auto">
+            <!-- Same btn-small/btn-outline treatment as the dashboard header's
+                 "My Account" button (#btn-open-my-account-from-dashboard) —
+                 also what makes the unread badge below actually stand out
+                 (a solid-red btn-primary background clashed with the badge's
+                 own solid-red fill). -->
+            <button id="btn-open-account-activity" class="btn btn-small btn-outline" style="width:auto">Account Activity <span id="account-activity-nav-badge" class="match-count-badge hidden"></span></button>
+            <button id="btn-account-page-sign-out" class="btn btn-small btn-outline">Sign Out</button>
+          </div>
+        </div>
 
         <!-- Consolidated account info card: name, email, login method.
              View-only by default; "Edit" switches to an editable state
@@ -481,7 +501,9 @@
               <p id="account-card-email-display" style="margin-bottom:12px"></p>
             </div>
             <p class="help-text" style="margin-bottom:4px">Login Method</p>
-            <p id="account-card-login-method-display" style="margin-bottom:0"></p>
+            <p id="account-card-login-method-display" style="margin-bottom:12px"></p>
+            <p class="help-text" style="margin-bottom:4px">Timezone</p>
+            <p id="account-card-timezone-display" style="margin-bottom:0"></p>
           </div>
 
           <!-- Edit mode -->
@@ -514,6 +536,11 @@
                 <input type="password" id="input-account-card-confirm-password" autocomplete="new-password" />
                 <button type="button" class="btn-toggle-password" data-target="input-account-card-confirm-password" aria-label="Show password">👁</button>
               </div>
+            </div>
+            <div class="pit-field">
+              <label for="input-account-card-timezone">Timezone</label>
+              <select id="input-account-card-timezone"></select>
+              <p class="help-text" style="margin-top:4px">Used for timestamps in Account Activity and exported spreadsheets.</p>
             </div>
             <p id="account-card-error" class="error-message"></p>
             <p id="account-card-success" class="success-message"></p>
@@ -550,6 +577,40 @@
           <button id="btn-open-delete-account" class="btn" style="width:100%; background:var(--error); color:#fff; border-color:var(--error);">Delete Account</button>
         </div>
 
+      </div>
+
+      <!-- ====== ACCOUNT ACTIVITY PAGE (standalone — see openAccountActivity()/
+           closeAccountActivity() in js/auth.js). Per-user notification log
+           (removed-from-team, live-edit disconnects, permission changes,
+           captaincy transfers). Tabs are a client-side filter over one flat
+           query — see js/activity-log.js's renderAccountActivity(). ====== -->
+      <div id="dtab-activity" class="dtab-content">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap">
+          <button id="btn-account-activity-back" class="btn btn-outline" style="width:auto">← Back to My Account</button>
+          <button id="btn-activity-page-sign-out" class="btn btn-small btn-outline" style="width:auto; margin-left:auto">Sign Out</button>
+        </div>
+
+        <div class="account-section-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px">
+            <h3 style="font-size:1rem; color:var(--text-muted); margin:0">ACCOUNT ACTIVITY</h3>
+            <button id="btn-account-activity-mark-all-read" class="btn btn-small btn-outline">Mark All As Read</button>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px">
+            <div id="account-activity-tabs" class="tabs" style="flex-wrap:wrap; height:auto; flex:1"></div>
+            <button id="btn-account-activity-mark-tab-read" class="btn btn-small btn-outline" style="white-space:nowrap; width:auto">Mark This Tab As Read</button>
+          </div>
+          <div style="display:flex; gap:8px; margin-bottom:12px">
+            <input type="text" id="input-account-activity-search" placeholder="Search activity..." style="flex:1" />
+            <select id="select-account-activity-type-filter" class="awards-season-select team-list-filter-control" style="flex-shrink:0; font-size:0.85rem; padding:6px 26px 6px 10px; max-width:180px">
+              <option value="">All Types</option>
+              <option value="kicked">Removed from Team</option>
+              <option value="live-edit-disconnected">Live Edit Disconnected</option>
+              <option value="permission-changed">Permissions Changed</option>
+              <option value="captaincy-transferred">Captaincy Transferred</option>
+            </select>
+          </div>
+          <div id="account-activity-list"></div>
+        </div>
       </div>
 
     </div>
@@ -1132,6 +1193,7 @@
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="/js/firebase-config.js"></script>
   <script src="/js/auth.js"></script>
+  <script src="/js/activity-log.js"></script>
   <script src="/js/team.js"></script>
   <script src="/js/members.js"></script>
   <script src="/js/first-api.js"></script>

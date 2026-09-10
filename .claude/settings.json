@@ -209,7 +209,11 @@
       "Bash(curl -s https://fe2o3scouting.pages.dev/js/dynamic-form.js?cb=__CMDSUB_OUTPUT__ -o /tmp/cf-dynamic-form.js)",
       "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" \"https://fe2o3scouting.pages.dev/scouting/index.html?cb=$\\(date +%s\\)\")",
       "Bash(curl -s \"https://scouting-app-9b4c4.web.app/scouting/index.html?cb=$\\(date +%s\\)\")",
-      "Bash(curl -sL https://fe2o3scouting.pages.dev/scouting/index.html?cb=__CMDSUB_OUTPUT__ -o /tmp/cf-scouting-index2.html)"
+      "Bash(curl -sL https://fe2o3scouting.pages.dev/scouting/index.html?cb=__CMDSUB_OUTPUT__ -o /tmp/cf-scouting-index2.html)",
+      "Bash(git filter-repo *)",
+      "Bash(where git-filter-repo *)",
+      "Bash(python -m git_filter_repo --version)",
+      "Bash(pip show *)"
     ]
   }
 }

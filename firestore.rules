@@ -283,6 +283,23 @@ service cloud.firestore {
                 && before.permissions.diff(after.permissions).affectedKeys().hasOnly([removed[0]])));
     }
 
+    // Shared shape check for users/{userId}/activityLog/{entryId} writes
+    // (both the self-write and captain-authored create rules below) — a log
+    // entry is create-once (see that match block's update rule, which locks
+    // every field except `read`), so every field but `read` needs validating
+    // only here, at create time.
+    function isValidActivityLog() {
+      return request.resource.data.type is string
+        && request.resource.data.message is string
+        && request.resource.data.message.size() > 0
+        && request.resource.data.message.size() <= 500
+        && request.resource.data.read == false
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.expireAt is timestamp
+        && (request.resource.data.teamId == null || request.resource.data.teamId is string)
+        && (request.resource.data.teamName == null || request.resource.data.teamName is string);
+    }
+
     match /teams/{teamId} {
       // Only real members can read the full document. resource.data is already the
       // document being evaluated, so no get()/isTeamMember() (and no dependency on
@@ -578,6 +595,41 @@ service cloud.firestore {
         allow read: if isAuth() && request.auth.uid == userId;
         allow write: if isAuth() && request.auth.uid == userId;
         allow delete: if isAuth() && request.auth.uid == userId;
+      }
+
+      // Account Activity Log: self-readable notices about this account
+      // (removed from a team, disconnected from a live edit) plus
+      // captain-authored notices about actions a captain took affecting this
+      // user specifically (permission changes, captaincy transfer). Entries
+      // are create-once — every field but `read` is locked after creation.
+      match /activityLog/{entryId} {
+        allow read: if isAuth() && request.auth.uid == userId;
+
+        allow update: if isAuth() && request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read'])
+          && request.resource.data.read is bool;
+
+        allow delete: if isAuth() && request.auth.uid == userId;
+
+        // Self-writes: the account's own client reporting something it just
+        // detected about itself (kicked-from-team, live-edit disconnected).
+        allow create: if isAuth() && request.auth.uid == userId
+          && isValidActivityLog()
+          && request.resource.data.type in ['kicked', 'live-edit-disconnected'];
+
+        // Captain-authored: written to the AFFECTED member's own log by
+        // their team's captain. The path only carries userId (not which team
+        // this is about), so teamId comes off the entry's own field and is
+        // cross-checked against the real team doc — the acting captain must
+        // actually captain that team, and userId must actually be (or have
+        // been) a member of it.
+        allow create: if isAuth() && request.auth.uid != userId
+          && isValidActivityLog()
+          && request.resource.data.type in ['permission-changed', 'captaincy-transferred']
+          && request.resource.data.teamId is string
+          && exists(/databases/$(database)/documents/teams/$(request.resource.data.teamId))
+          && isCaptain(get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data)
+          && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.members.hasAny([userId]);
       }
     }
 
