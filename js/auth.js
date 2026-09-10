@@ -61,7 +61,11 @@ async function ensureUserProfile(user) {
     if (doc.exists) {
       profile = doc.data();
       const updates = {};
-      if (user.photoURL && profile.photoURL !== user.photoURL) updates.photoURL = user.photoURL;
+      // Never overwrite a custom-uploaded picture (photoIsCustom) with
+      // whatever Google supplies at sign-in — this self-heal exists to pick
+      // up a Google user's photo the FIRST time (or if it changes on their
+      // Google account), not to clobber one they set within this app.
+      if (user.photoURL && !profile.photoIsCustom && profile.photoURL !== user.photoURL) updates.photoURL = user.photoURL;
       if (!profile.displayName && user.displayName) updates.displayName = user.displayName;
       // Self-heal: this doc predates the public/private split and still has a raw email on it — move it off.
       if (profile.email) updates.email = firebase.firestore.FieldValue.delete();
@@ -86,6 +90,7 @@ async function ensureUserProfile(user) {
   currentUserProfile = {
     displayName: profile.displayName || '',
     photoURL: profile.photoURL || null,
+    photoIsCustom: !!profile.photoIsCustom,
     email: user.email || '',
     // True only once the user has explicitly gone through saveDisplayName() —
     // an auto-filled Google name doesn't count until they've actually confirmed it.
@@ -136,6 +141,91 @@ async function ensureMemberContact(teamId, uid, email) {
  */
 let teamDocUnsubscribe = null;
 let memberDisplayNamesUnsubscribe = null;
+let formConfigUnsubscribe = null;
+
+/**
+ * A member's resolved email visibility depends on THIS user's own captain/
+ * canViewMemberEmails status, not on anything that changes the target
+ * member's own data — so unlike a memberDisplayNames or account-profile
+ * change (which the dedicated listeners below already catch), a permission
+ * GRANT/REVOKE has to be noticed by diffing the team doc's permissions field
+ * against what was last seen for the current user, per team (so switching to
+ * a team where the diff looks different isn't mistaken for a real change).
+ * Checked from refreshActiveTeamData() below, on every team-doc snapshot.
+ */
+let lastKnownOwnCanViewEmailsByTeam = {};
+
+function checkOwnEmailVisibilityChanged(teamId, teamData) {
+  if (!currentUser) return;
+  const isCaptain = teamData.roles && teamData.roles[currentUser.uid] === 'captain';
+  const perms = teamData.permissions && teamData.permissions[currentUser.uid];
+  const canViewNow = !!(isCaptain || (perms && perms.canViewMemberEmails === true));
+  const prev = lastKnownOwnCanViewEmailsByTeam[teamId];
+  if (prev !== undefined && prev !== canViewNow && typeof invalidateMemberInfoCacheForTeam === 'function') {
+    // Newly granted (or revoked): every cached row for this team was
+    // resolved under the OLD visibility, so its email field is stale (either
+    // wrongly blank, or — on revoke — would otherwise just keep showing the
+    // last-fetched value forever since nothing else re-fetches it). Same
+    // "just invalidate the whole team's cache" approach as the listeners
+    // below, rather than trying to patch just the email field in place.
+    invalidateMemberInfoCacheForTeam(teamId);
+  }
+  lastKnownOwnCanViewEmailsByTeam[teamId] = canViewNow;
+}
+
+/**
+ * Live per-member account-profile listener — a teammate's account-level
+ * displayName/photoURL (users/{uid}, NOT the per-team memberDisplayNames
+ * override) has no team-scoped subcollection to watch the way
+ * memberDisplayNames does, so this queries the top-level users collection
+ * directly, scoped to the active team's current member list. Re-subscribes
+ * only when the actual set of member uids changes (join/kick/leave) — a
+ * permission or name-only team-doc change calls this again too (it's driven
+ * from refreshActiveTeamData(), the same funnel every other team-doc-derived
+ * listener uses) but is a cheap no-op when the member set itself is
+ * unchanged, thanks to the membersKey comparison below.
+ */
+let teamMemberProfilesUnsubscribes = [];
+let teamMemberProfilesWatchedTeamId = null;
+let teamMemberProfilesWatchedMembersKey = null;
+
+function watchTeamMemberProfiles(teamId, members) {
+  const sortedMembers = Array.isArray(members) ? [...members].sort() : [];
+  const membersKey = sortedMembers.join(',');
+  if (teamMemberProfilesWatchedTeamId === teamId && teamMemberProfilesWatchedMembersKey === membersKey) {
+    return; // same team, same member set — existing listeners already cover it
+  }
+
+  teamMemberProfilesUnsubscribes.forEach(unsub => unsub());
+  teamMemberProfilesUnsubscribes = [];
+  teamMemberProfilesWatchedTeamId = teamId;
+  teamMemberProfilesWatchedMembersKey = membersKey;
+
+  if (sortedMembers.length === 0) return;
+
+  // Firestore 'in' queries cap at 30 comparison values — chunk for teams
+  // larger than that. Unlikely for an FTC team's roster, but cheap to handle
+  // correctly rather than silently dropping coverage past 30 members.
+  const CHUNK_SIZE = 30;
+  for (let i = 0; i < sortedMembers.length; i += CHUNK_SIZE) {
+    const chunk = sortedMembers.slice(i, i + CHUNK_SIZE);
+    const unsub = db.collection('users')
+      .where(firebase.firestore.FieldPath.documentId(), 'in', chunk)
+      .onSnapshot(() => {
+        // A teammate's account-level displayName/photoURL changed — same
+        // "just invalidate this team's cache and re-render" approach as the
+        // memberDisplayNames listener below (cheap given how small/infrequent
+        // this is), rather than diffing which specific member's doc changed.
+        if (typeof invalidateMemberInfoCacheForTeam === 'function') invalidateMemberInfoCacheForTeam(teamId);
+        if (currentTeamId === teamId && currentTeamData && typeof loadTeamMembers === 'function') {
+          loadTeamMembers(teamId, currentTeamData);
+        }
+      }, (err) => {
+        console.warn('Team member profiles listener error:', err);
+      });
+    teamMemberProfilesUnsubscribes.push(unsub);
+  }
+}
 
 /**
  * Point currentTeamData (and everything derived from it: member list,
@@ -154,6 +244,9 @@ function refreshActiveTeamData(teamId, teamData) {
 
   const nameEl = document.getElementById('main-team-name');
   if (nameEl) nameEl.textContent = teamData.name || 'Your Team';
+
+  checkOwnEmailVisibilityChanged(teamId, teamData);
+  watchTeamMemberProfiles(teamId, teamData.members);
 
   if (typeof loadTeamMembers === 'function') {
     loadTeamMembers(teamId, teamData);
@@ -199,6 +292,21 @@ function watchTeamDoc(teamId) {
     memberDisplayNamesUnsubscribe();
     memberDisplayNamesUnsubscribe = null;
   }
+  if (formConfigUnsubscribe) {
+    formConfigUnsubscribe();
+    formConfigUnsubscribe = null;
+  }
+  // Same teardown as the two above — watchTeamMemberProfiles() only
+  // re-subscribes on the NEXT refreshActiveTeamData() call, which never
+  // comes for the OLD team once this function moves on (a real team switch)
+  // or stops entirely (teamId null, e.g. sign-out), so it can't tear down
+  // its own stale listeners on its own; this is the single place that does.
+  if (teamMemberProfilesUnsubscribes.length) {
+    teamMemberProfilesUnsubscribes.forEach(unsub => unsub());
+    teamMemberProfilesUnsubscribes = [];
+  }
+  teamMemberProfilesWatchedTeamId = null;
+  teamMemberProfilesWatchedMembersKey = null;
   if (!teamId) return;
 
   teamDocUnsubscribe = db.collection('teams').doc(teamId).onSnapshot((doc) => {
@@ -229,16 +337,35 @@ function watchTeamDoc(teamId) {
   // already takes.
   memberDisplayNamesUnsubscribe = db.collection('teams').doc(teamId).collection('memberDisplayNames')
     .onSnapshot(() => {
-      if (memberInfoCache) {
-        Object.keys(memberInfoCache).forEach(key => {
-          if (key.startsWith(`${teamId}_`)) delete memberInfoCache[key];
-        });
-      }
+      if (typeof invalidateMemberInfoCacheForTeam === 'function') invalidateMemberInfoCacheForTeam(teamId);
       if (currentTeamId === teamId && currentTeamData && typeof loadTeamMembers === 'function') {
         loadTeamMembers(teamId, currentTeamData);
       }
     }, (err) => {
       console.warn('memberDisplayNames listener error:', err);
+    });
+
+  // teams/{teamId}/formConfig (dynamic-form.js) holds one doc per
+  // season+type ("{season}_pitScouting"/"{season}_matchScouting") — a Form
+  // Builder edit only writes Firestore, never touches formConfigCache/
+  // matchFormConfigCache on any OTHER client, so without this a teammate kept
+  // seeing the config as of whenever THEY last loaded it until they reopened
+  // the tab. This only refreshes what a NEXT-opened pit/match entry form (or
+  // a NEXT-opened Form Builder) sees — deliberately NOT rebuilding a
+  // scouting-entry form a teammate already has open mid-edit, which would
+  // mean tearing down and re-wiring the live-collaboration session
+  // (live-entry-sync.js) bound to it and deciding how to handle values for
+  // fields that no longer exist; out of scope here by design. Just
+  // invalidate both caches for every season at once on any change — same
+  // "cheap given how small/infrequent this is" reasoning as
+  // memberDisplayNames above, rather than resolving which specific
+  // season/type doc changed.
+  formConfigUnsubscribe = db.collection('teams').doc(teamId).collection('formConfig')
+    .onSnapshot(() => {
+      if (typeof invalidateFormConfigCache === 'function') invalidateFormConfigCache(teamId);
+      if (typeof invalidateMatchFormConfigCache === 'function') invalidateMatchFormConfigCache(teamId);
+    }, (err) => {
+      console.warn('formConfig listener error:', err);
     });
 }
 
@@ -277,9 +404,15 @@ async function saveDisplayName(name, timezone) {
   if (!trimmed) throw new Error('Please enter a name.');
   if (!currentUser) throw new Error('You must be signed in.');
 
+  // photoURL is deliberately NOT touched here — ensureUserProfile() (already
+  // run before this is ever reachable) is the sole place that syncs Google's
+  // photo in, and it already guards against clobbering a custom-uploaded one
+  // (photoIsCustom). This used to unconditionally overwrite photoURL with
+  // currentUser.photoURL on every save (even a plain rename), which — once a
+  // custom picture existed — would silently wipe it back to Google's photo
+  // (or null, for an email/password account) any time the name was saved.
   const updates = {
     displayName: trimmed,
-    photoURL: currentUser.photoURL || null,
     displayNameConfirmed: true,
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
   };
@@ -302,6 +435,28 @@ function getCurrentUserDisplayName() {
   if (currentUser && currentUser.displayName) return currentUser.displayName;
   if (currentUser && currentUser.email) return currentUser.email;
   return 'Unknown';
+}
+
+/**
+ * Shared avatar-rendering helper — every <img> that shows a user's picture
+ * (the screen-team header, each member-list row, the Account tab preview)
+ * routes through this. Two things it centralizes that were previously
+ * missing everywhere: referrerpolicy="no-referrer" (Google's photo CDN,
+ * lh3.googleusercontent.com, intermittently rejects hot-linked requests that
+ * carry a cross-origin Referer header — this was the cause of "broken"
+ * Google avatars at sign-in) and an onerror fallback to a generated
+ * placeholder if the real picture still fails to load for any reason.
+ */
+function setAvatarSrc(imgEl, photoURL, displayName) {
+  if (!imgEl) return;
+  const fallback = 'https://ui-avatars.com/api/?name=' + encodeURIComponent(displayName || 'U') + '&background=16213e&color=a0a0b8';
+  imgEl.referrerPolicy = 'no-referrer';
+  imgEl.onerror = () => {
+    imgEl.onerror = null; // avoid looping if the fallback itself ever fails to load
+    imgEl.src = fallback;
+  };
+  imgEl.src = photoURL || fallback;
+  imgEl.alt = displayName || 'User';
 }
 
 /**
@@ -895,6 +1050,8 @@ function renderAccountInfo() {
   const emailToGoogleSection = document.getElementById('account-email-to-google-section');
   if (emailToGoogleSection) emailToGoogleSection.classList.toggle('hidden', !hasPassword || hasGoogle);
 
+  if (typeof renderProfilePicture === 'function') renderProfilePicture();
+
   // Always land back in view mode when this re-renders (tab switched to,
   // login, a live team-list update, ...) — an edit in progress showing now-
   // stale field values would be confusing, and Cancel already does the same.
@@ -1188,6 +1345,162 @@ $('btn-account-card-save').addEventListener('click', async () => {
   }
 });
 
+// ====== Profile Picture (My Account tab) ======
+// Independent of the consolidated account card's Edit/reauth flow above — a
+// picture isn't a security-sensitive field, so there's no reauth gate here,
+// just an immediate save on picking a file. Stored as a small base64 data
+// URI directly on users/{uid}.photoURL — the SAME field Google's own photo
+// already lives in (see ensureUserProfile()) — rather than Firebase Storage,
+// since Storage isn't set up for this project and provisioning a new bucket
+// now requires the Blaze plan. photoIsCustom marks it so it's never
+// clobbered by ensureUserProfile()'s Google-photo self-heal or the
+// Google<->Email conversion flows.
+const PROFILE_PICTURE_MAX_DIMENSION = 256; // square, cover-cropped
+const PROFILE_PICTURE_MAX_DATA_URL_LENGTH = 200000; // ~200KB — comfortably under firestore.rules' 300KB hard cap and Firestore's 1MiB doc limit
+
+function renderProfilePicture() {
+  const img = document.getElementById('account-profile-picture-preview');
+  if (!img) return;
+  const photoURL = (currentUserProfile && currentUserProfile.photoURL) || (currentUser && currentUser.photoURL) || null;
+  const displayName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : '';
+  setAvatarSrc(img, photoURL, displayName);
+
+  const removeBtn = document.getElementById('btn-remove-profile-picture');
+  if (removeBtn) removeBtn.classList.toggle('hidden', !(currentUserProfile && currentUserProfile.photoIsCustom));
+}
+
+// Resize/compress a picked image file into a small square JPEG data URI,
+// shrinking quality until it clears PROFILE_PICTURE_MAX_DATA_URL_LENGTH — a
+// phone photo straight off a camera can be several MB, so this always needs
+// to actually shrink it, not just reject what's "too big" upfront.
+function resizeImageFileToDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read the selected file.'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("That file doesn't look like a valid image."));
+      img.onload = () => {
+        try {
+          const size = PROFILE_PICTURE_MAX_DIMENSION;
+          const canvas = document.createElement('canvas');
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext('2d');
+          // Cover-crop to a centered square — same idea as CSS
+          // object-fit:cover — so the stored picture always matches the
+          // circular avatar UI it's rendered into everywhere, never squished.
+          const srcSize = Math.min(img.naturalWidth, img.naturalHeight);
+          const srcX = (img.naturalWidth - srcSize) / 2;
+          const srcY = (img.naturalHeight - srcSize) / 2;
+          ctx.drawImage(img, srcX, srcY, srcSize, srcSize, 0, 0, size, size);
+
+          let quality = 0.85;
+          let dataUrl = canvas.toDataURL('image/jpeg', quality);
+          while (dataUrl.length > PROFILE_PICTURE_MAX_DATA_URL_LENGTH && quality > 0.3) {
+            quality -= 0.15;
+            dataUrl = canvas.toDataURL('image/jpeg', quality);
+          }
+          if (dataUrl.length > PROFILE_PICTURE_MAX_DATA_URL_LENGTH) {
+            reject(new Error('Image is too complex to compress small enough. Try a simpler or smaller picture.'));
+            return;
+          }
+          resolve(dataUrl);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function handleProfilePictureFileChosen(file) {
+  // setStatusMessage/clearStatusMessage (sheets-export.js) — same shared
+  // transient-status helper every other status-line message in the app uses
+  // (join-another-team, create-another-team, leave-team, myteam-joincode,
+  // form-builder, exports...): auto-clears itself after 5s AND is cleared
+  // immediately on navigating away by activateDashboardTab() (members.js).
+  // A raw textContent write here (as this used to be) gets neither — it sat
+  // on screen until a full page refresh, including after switching tabs.
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('profile-picture');
+  if (!file || !currentUser) return;
+
+  if (!file.type.startsWith('image/')) {
+    if (typeof setStatusMessage === 'function') setStatusMessage('profile-picture', 'error', 'Please choose an image file.');
+    return;
+  }
+
+  showLoading('Uploading picture...');
+  try {
+    const dataUrl = await resizeImageFileToDataURL(file);
+    await db.collection('users').doc(currentUser.uid).set({
+      photoURL: dataUrl,
+      photoIsCustom: true
+    }, { merge: true });
+
+    currentUserProfile = { ...(currentUserProfile || {}), photoURL: dataUrl, photoIsCustom: true };
+    renderProfilePicture();
+    // The My Team member list's own row for this user reads currentUserProfile
+    // directly (members.js) but only on its own render pass — force one now
+    // so the new picture shows there immediately too, not just on the Account tab.
+    if (typeof loadTeamMembers === 'function' && currentTeamId && currentTeamData) {
+      loadTeamMembers(currentTeamId, currentTeamData);
+    }
+    hideLoading();
+    if (typeof setStatusMessage === 'function') setStatusMessage('profile-picture', 'success', 'Profile picture updated!');
+  } catch (err) {
+    hideLoading();
+    console.error('Profile picture upload error:', err);
+    if (typeof setStatusMessage === 'function') setStatusMessage('profile-picture', 'error', (err && err.message) || 'Failed to upload picture. Please try again.');
+  }
+}
+
+async function removeProfilePicture() {
+  if (!currentUser) return;
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('profile-picture');
+
+  showLoading('Removing picture...');
+  try {
+    // Falls back to Google's own picture (if linked) rather than blanking it
+    // outright — matches what a brand-new Google sign-in would have stored.
+    const fallbackPhotoURL = currentUser.photoURL || null;
+    const updates = { photoIsCustom: false };
+    if (fallbackPhotoURL) {
+      updates.photoURL = fallbackPhotoURL;
+    } else {
+      updates.photoURL = firebase.firestore.FieldValue.delete();
+    }
+    await db.collection('users').doc(currentUser.uid).set(updates, { merge: true });
+
+    currentUserProfile = { ...(currentUserProfile || {}), photoURL: fallbackPhotoURL, photoIsCustom: false };
+    renderProfilePicture();
+    if (typeof loadTeamMembers === 'function' && currentTeamId && currentTeamData) {
+      loadTeamMembers(currentTeamId, currentTeamData);
+    }
+    hideLoading();
+    if (typeof setStatusMessage === 'function') setStatusMessage('profile-picture', 'success', 'Profile picture removed.');
+  } catch (err) {
+    hideLoading();
+    console.error('Profile picture remove error:', err);
+    if (typeof setStatusMessage === 'function') setStatusMessage('profile-picture', 'error', 'Failed to remove picture. Please try again.');
+  }
+}
+
+const btnChangeProfilePicture = document.getElementById('btn-change-profile-picture');
+const inputProfilePictureFile = document.getElementById('input-profile-picture-file');
+if (btnChangeProfilePicture && inputProfilePictureFile) {
+  btnChangeProfilePicture.addEventListener('click', () => inputProfilePictureFile.click());
+  inputProfilePictureFile.addEventListener('change', () => {
+    const file = inputProfilePictureFile.files && inputProfilePictureFile.files[0];
+    inputProfilePictureFile.value = ''; // allow re-picking the same file later
+    if (file) handleProfilePictureFileChosen(file);
+  });
+}
+const btnRemoveProfilePicture = document.getElementById('btn-remove-profile-picture');
+if (btnRemoveProfilePicture) btnRemoveProfilePicture.addEventListener('click', removeProfilePicture);
+
 // ====== Switch to Email + Password Login (Google-linked accounts only) ======
 // Keeps the account's existing (already-verified) email rather than
 // accepting a new one — Firebase's linkWithCredential() behavior when the
@@ -1382,7 +1695,7 @@ async function startEmailToGoogleLinkPopup() {
     // originally signed up via Google. Display name is deliberately left
     // alone: unlike a brand-new Google signup, this account already has a
     // display name the user chose, and Google's isn't more authoritative.
-    if (googlePhotoURL) {
+    if (googlePhotoURL && !(currentUserProfile && currentUserProfile.photoIsCustom)) {
       try {
         await db.collection('users').doc(currentUser.uid).set({ photoURL: googlePhotoURL }, { merge: true });
         if (currentUserProfile) currentUserProfile.photoURL = googlePhotoURL;
@@ -1420,7 +1733,7 @@ if (btnOpenEmailToGoogleConvert) btnOpenEmailToGoogleConvert.addEventListener('c
 // ====== SIGN OUT ======
 async function signOut() {
   try {
-    watchTeamDoc(null); // stop the live team doc listener
+    watchTeamDoc(null); // stop the live team doc listener (and the member-profiles listener it owns)
     // Stop every per-team myTeams listener and drop the (now stale, belongs
     // to the departing account) list itself — otherwise these listeners would
     // keep running against the OLD account's teams for whoever signs in next
@@ -1428,6 +1741,11 @@ async function signOut() {
     // them with once myTeams no longer reflects which teams they came from.
     myTeams = [];
     if (typeof watchMyTeams === 'function') watchMyTeams();
+    // Belongs to the departing account's "own visibility" — a different
+    // account signing in next (same tab) starts this from a clean slate
+    // rather than being diffed against a stranger's last-known value.
+    lastKnownOwnCanViewEmailsByTeam = {};
+    if (typeof watchActivityLog === 'function') watchActivityLog(null); // stop the live activity-log listener
     stopVerifyEmailPolling(); // in case sign-out happened from the verify-email screen
     await auth.signOut();
     clearAuthFormFields();
@@ -1720,6 +2038,12 @@ async function handleAuthenticatedUser(user) {
   // (manually, via auto-poll, or because the account was already verified).
   stopVerifyEmailPolling();
 
+  // Independent of team membership (users/{uid}/activityLog exists even for
+  // a teamless account's General-tab entries), so this starts unconditionally
+  // here rather than inside either the "has teams"/"no teams" branch below —
+  // one call covers both instead of needing it duplicated in each.
+  if (typeof watchActivityLog === 'function') watchActivityLog(user.uid);
+
   // Shown immediately, before any network calls — previously this didn't
   // appear until after ensureUserProfile() had already resolved, leaving a
   // real network round trip where the screen looked signed-out instead of
@@ -1736,9 +2060,12 @@ async function handleAuthenticatedUser(user) {
     const displayName = getCurrentUserDisplayName();
     renderAccountInfo();
 
-    // Update user info in team screen
-    $('user-avatar').src = user.photoURL || 'https://ui-avatars.com/api/?name=' + encodeURIComponent(displayName);
-    $('user-avatar').alt = displayName;
+    // Update user info in team screen. currentUserProfile.photoURL (set by
+    // ensureUserProfile() just above) takes priority over the raw Auth
+    // user.photoURL — it's the same field for a Google user who never set a
+    // custom picture, but it's the only one of the two that can ever hold a
+    // custom-uploaded picture instead.
+    setAvatarSrc($('user-avatar'), (currentUserProfile && currentUserProfile.photoURL) || user.photoURL, displayName);
     $('user-name').textContent = displayName;
 
     // Reconcile against the last-known team set for this uid (localStorage,
@@ -2040,6 +2367,22 @@ function canUserKickMembers() {
   if (currentTeamData.permissions &&
       currentTeamData.permissions[currentUser.uid] &&
       currentTeamData.permissions[currentUser.uid].canKickMembers === true) {
+    return true;
+  }
+  return false;
+}
+
+// UI-only gate for the "Regenerate" join-code button — the underlying writes
+// (teams/{teamId}.joinCode, the new joinCodes/{newCode} lookup, and deleting
+// the superseded joinCodes/{oldCode} lookup) are enforced server-side by
+// firestore.rules, which check this same captain-or-canRegenerateJoinCode
+// condition independently.
+function canUserRegenerateJoinCode() {
+  if (!currentUser || !currentTeamData) return false;
+  if (getCurrentUserRole() === 'captain') return true;
+  if (currentTeamData.permissions &&
+      currentTeamData.permissions[currentUser.uid] &&
+      currentTeamData.permissions[currentUser.uid].canRegenerateJoinCode === true) {
     return true;
   }
   return false;

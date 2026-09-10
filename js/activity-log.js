@@ -227,9 +227,13 @@ function updateActivityBadgeDom() {
   });
 }
 
-// Refresh-on-navigation, not real-time — called from activateDashboardTab()
-// (members.js) on every dashboard tab switch, and once after login, per the
-// scoped decision to skip a per-tab onSnapshot listener for this.
+// Called from activateDashboardTab() (members.js) on every dashboard tab
+// switch, and once after login — kept alongside the live listener below
+// (watchActivityLog()) rather than replaced by it, same "a little redundancy
+// here is harmless and simpler than coordinating the two" reasoning
+// watchMyTeams()/watchTeamDoc() already use for the team doc itself: this
+// one-time fetch guarantees a correct snapshot the instant a view opens,
+// without waiting on the listener's first callback.
 async function refreshActivityBadge() {
   if (!currentUser) return;
   const entries = await fetchActivityLogEntries();
@@ -238,6 +242,44 @@ async function refreshActivityBadge() {
   updateActivityBadgeDom();
 }
 window.refreshActivityBadge = refreshActivityBadge;
+
+// ====== Live activity-log listener ======
+// users/{uid}/activityLog is per-user, so this is a single listener on the
+// current user's own subcollection — no team-scoped fan-out needed, unlike
+// watchTeamMemberProfiles() (auth.js). Started once at login (see
+// handleAuthenticatedUser(), auth.js) and stopped on sign-out, independent of
+// which dashboard tab happens to be active — the unread badge is visible
+// from Scouting/My Team too, not just the Account Activity page itself, so
+// this can't be scoped to only run while that page is open.
+let activityLogUnsubscribe = null;
+
+function watchActivityLog(uid) {
+  if (activityLogUnsubscribe) {
+    activityLogUnsubscribe();
+    activityLogUnsubscribe = null;
+  }
+  if (!uid) return;
+
+  activityLogUnsubscribe = db.collection('users').doc(uid).collection('activityLog')
+    .orderBy('createdAt', 'desc')
+    .limit(300)
+    .onSnapshot((snap) => {
+      activityLogEntries = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      activityLogUnreadCounts = computeUnreadCounts(activityLogEntries);
+      updateActivityBadgeDom();
+      // Harmless (and cheap, given how infrequent entries are) to refresh
+      // these unconditionally rather than gating on whether the Account
+      // Activity page happens to be the currently active view — same "just
+      // re-render" approach the team-doc-derived listeners already take.
+      // Neither call touches activityLogSearchQuery/activityLogTypeFilter,
+      // so an in-progress search/filter survives a live update untouched.
+      if (typeof renderAccountActivityTabs === 'function') renderAccountActivityTabs();
+      if (typeof renderAccountActivityList === 'function') renderAccountActivityList();
+    }, (err) => {
+      console.warn('Activity log listener error:', err);
+    });
+}
+window.watchActivityLog = watchActivityLog;
 
 function activityLogTabList() {
   const tabs = [];

@@ -388,13 +388,21 @@
           <select id="select-active-team" class="awards-season-select team-switcher-select"></select>
         </div>
 
-        <!-- Join code section -->
+        <!-- Join code section. Regenerate is captain-only (js/team.js's
+             regenerateJoinCode() — visibility toggled by loadTeamMembers(),
+             js/members.js) — the old code stops working immediately since
+             regenerating deletes its joinCodes/{oldCode} lookup doc, but
+             current members are entirely unaffected; only a future join
+             attempt using the old code fails. -->
         <div class="join-code-card" style="margin-top:0">
           <p class="help-text" style="margin-bottom:8px">Team join code — share this with your members:</p>
           <div class="code-with-copy">
             <code id="myteam-join-code-value"></code>
             <button id="btn-copy-myteam-code" class="btn btn-small btn-outline">Copy</button>
+            <button id="btn-regenerate-join-code" class="btn btn-small btn-outline hidden">Regenerate</button>
           </div>
+          <p id="myteam-joincode-error" class="error-message"></p>
+          <p id="myteam-joincode-success" class="success-message"></p>
         </div>
 
         <!-- Join or create another team — two related options in one
@@ -475,6 +483,32 @@
             <button id="btn-open-account-activity" class="btn btn-small btn-outline" style="width:auto">Account Activity <span id="account-activity-nav-badge" class="match-count-badge hidden"></span></button>
             <button id="btn-account-page-sign-out" class="btn btn-small btn-outline">Sign Out</button>
           </div>
+        </div>
+
+        <!-- Profile picture: independent of the consolidated account card's
+             Edit/reauth flow below — not a security-sensitive field, so
+             there's no reauth gate, just an immediate save on picking a
+             file. Resized/compressed client-side into a small base64 data
+             URI stored directly on users/{uid}.photoURL (the SAME field
+             Google's own photo lives in — see ensureUserProfile() in
+             js/auth.js), never Firebase Storage (not set up for this
+             project, and provisioning a new bucket now requires the Blaze
+             plan). -->
+        <div class="account-section-card">
+          <h3 style="font-size:1rem; color:var(--text-muted); margin:0 0 12px">PROFILE PICTURE</h3>
+          <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap">
+            <img id="account-profile-picture-preview" src="" alt="" style="width:72px; height:72px; border-radius:50%; object-fit:cover; background:var(--surface); border:1px solid var(--border); flex-shrink:0" />
+            <div style="display:flex; flex-direction:column; gap:8px">
+              <div style="display:flex; gap:8px; flex-wrap:wrap">
+                <button type="button" id="btn-change-profile-picture" class="btn btn-small btn-outline">Change Picture</button>
+                <button type="button" id="btn-remove-profile-picture" class="btn btn-small btn-outline hidden">Remove Picture</button>
+              </div>
+              <input type="file" id="input-profile-picture-file" accept="image/png, image/jpeg, image/webp" class="hidden" />
+              <p class="help-text" style="margin:0">JPG, PNG, or WEBP — resized automatically.</p>
+            </div>
+          </div>
+          <p id="profile-picture-error" class="error-message"></p>
+          <p id="profile-picture-success" class="success-message"></p>
         </div>
 
         <!-- Consolidated account info card: name, email, login method.
@@ -920,6 +954,10 @@
         <div class="pit-field" style="display:flex; align-items:center; gap:8px">
           <input type="checkbox" id="perm-canKickMembers" style="width:auto; margin:0" />
           <label for="perm-canKickMembers" style="margin:0">Kick members</label>
+        </div>
+        <div class="pit-field" style="display:flex; align-items:center; gap:8px">
+          <input type="checkbox" id="perm-canRegenerateJoinCode" style="width:auto; margin:0" />
+          <label for="perm-canRegenerateJoinCode" style="margin:0">Regenerate the team's join code</label>
         </div>
         <p id="member-permissions-error" class="error-message"></p>
         <div class="pit-modal-actions" style="margin-top:20px; flex-wrap:wrap">

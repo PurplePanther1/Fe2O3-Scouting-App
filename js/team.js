@@ -117,6 +117,101 @@ function generateJoinCode(teamName) {
   return `${prefix}-${suffix}`;
 }
 
+// ====== Regenerate a team's join code (captain, or a member with the
+// canRegenerateJoinCode permission) ======
+// joinCode used to be bundled with name/roles/permissions/members as a
+// strictly captain-only field on teams/{teamId} — it now has its own
+// carve-out in firestore.rules (same pattern as pinnedEvents/canPinEvents),
+// gated on canUserRegenerateJoinCode() (auth.js), which checks captain OR
+// permissions[uid].canRegenerateJoinCode == true. Both client and server
+// enforce the same condition independently.
+//
+// Sequence matters: update the team doc's joinCode FIRST, then create the
+// new joinCodes/{newCode} lookup (its create rule checks that the team's
+// OWN joinCode already equals the code being created — reads via get() in
+// rules don't see other pending writes in the same batch, so this has to be
+// two separate sequential writes, same reasoning as Create Team above), then
+// delete the old joinCodes/{oldCode} lookup doc. That last delete is what
+// actually makes the old code stop working — the join-by-code flow only
+// checks whether a joinCodes/{code} doc exists, never whether it's still
+// the team's CURRENT code, so leaving the old lookup doc in place would let
+// it keep working forever. Current members are entirely unaffected: nothing
+// here touches teams/{teamId}.members, and every live listener (watchTeamDoc)
+// already re-renders myteam-join-code-value from teamData.joinCode on its own.
+async function regenerateJoinCode() {
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('myteam-joincode');
+
+  if (!currentTeamId || !currentTeamData) return;
+  if (!(typeof canUserRegenerateJoinCode === 'function' && canUserRegenerateJoinCode())) return;
+
+  const teamId = currentTeamId;
+  const teamName = currentTeamData.name;
+  const oldCode = currentTeamData.joinCode;
+
+  if (typeof showConfirmModal !== 'function') return;
+  showConfirmModal({
+    title: 'Regenerate Join Code?',
+    message: `This creates a new join code for "${teamName}" and immediately disables the old one${oldCode ? ` (${oldCode})` : ''}. Current members are not affected — only a future join attempt using the old code will stop working.`,
+    confirmLabel: 'Regenerate',
+    danger: true,
+    onConfirm: async () => {
+      showLoading('Regenerating join code...');
+      try {
+        // Extremely unlikely to collide even once — generateJoinCode() draws
+        // from a large space — but retry a few times the same as Create Team
+        // does, rather than surfacing a raw collision error to the user.
+        let newCode = null;
+        for (let attempt = 0; attempt < 5 && !newCode; attempt++) {
+          const candidate = generateJoinCode(teamName);
+          const codeDoc = await db.collection('joinCodes').doc(candidate).get();
+          if (!codeDoc.exists) newCode = candidate;
+        }
+        if (!newCode) {
+          const collisionErr = new Error('Please try again (code collision).');
+          collisionErr.isKnownMessage = true;
+          throw collisionErr;
+        }
+
+        const teamRef = db.collection('teams').doc(teamId);
+        await teamRef.update({ joinCode: newCode });
+        await db.collection('joinCodes').doc(newCode).set({ teamId, name: teamName });
+
+        if (oldCode) {
+          // Not best-effort: the join-by-code flow only checks whether a
+          // joinCodes/{code} doc exists, never whether it's still the
+          // team's current code — a failed delete here means the OLD code
+          // would keep letting people join, so this has to be surfaced as
+          // an error rather than swallowed.
+          try {
+            await db.collection('joinCodes').doc(oldCode).delete();
+          } catch (cleanupErr) {
+            console.warn('Failed to delete old joinCodes lookup doc:', cleanupErr);
+            hideLoading();
+            if (typeof setStatusMessage === 'function') {
+              setStatusMessage('myteam-joincode', 'error', `New code is ${newCode}, but the old code (${oldCode}) may still work — failed to disable it. Try Regenerate again to clean it up.`);
+            }
+            return;
+          }
+        }
+
+        hideLoading();
+        if (typeof setStatusMessage === 'function') {
+          setStatusMessage('myteam-joincode', 'success', `Join code regenerated — the old code no longer works.`);
+        }
+      } catch (err) {
+        hideLoading();
+        console.error('Regenerate join code error:', err);
+        if (typeof setStatusMessage === 'function') {
+          setStatusMessage('myteam-joincode', 'error', (err && err.isKnownMessage && err.message) || 'Failed to regenerate join code. Please try again.');
+        }
+      }
+    }
+  });
+}
+
+const btnRegenerateJoinCode = document.getElementById('btn-regenerate-join-code');
+if (btnRegenerateJoinCode) btnRegenerateJoinCode.addEventListener('click', regenerateJoinCode);
+
 // ====== Show join code on dashboard ======
 function showJoinCodeOnDashboard(joinCode) {
   const dashboardCode = document.getElementById('dashboard-join-code');

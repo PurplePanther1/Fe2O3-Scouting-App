@@ -313,14 +313,16 @@ service cloud.firestore {
 
       allow update: if isAuth() && (
         // An existing member updating the team (captain required to touch
-        // roles/permissions/name/joinCode/members; pinnedEvents may also be
-        // touched by a member with permissions[uid].canPinEvents == true).
-        // `members` is included here as defense in depth even though captain
-        // has no *current* legitimate reason to touch it via this branch —
-        // join/self-leave/kick each have their own dedicated branch below —
-        // without this it was unguarded here entirely: any member could
-        // rewrite `members` to anything, as long as the same write didn't
-        // also touch roles/permissions/name/joinCode.
+        // roles/permissions/name/members; joinCode may also be touched by a
+        // member with permissions[uid].canRegenerateJoinCode == true, and
+        // pinnedEvents by one with permissions[uid].canPinEvents == true —
+        // same "captain, or this one specifically-delegated permission"
+        // shape for both). `members` is included here as defense in depth
+        // even though captain has no *current* legitimate reason to touch it
+        // via this branch — join/self-leave/kick each have their own
+        // dedicated branch below — without this it was unguarded here
+        // entirely: any member could rewrite `members` to anything, as long
+        // as the same write didn't also touch roles/permissions/name.
         (
           resource.data.members.hasAny([request.auth.uid])
           // Guarded with an `in` presence check before indexing into roles —
@@ -328,8 +330,17 @@ service cloud.firestore {
           // rules (unlike plain dot-field access, which returns null), and a
           // plain member who never had roles.{uid} written would otherwise
           // throw here instead of cleanly failing the captain check.
-          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'joinCode', 'members'])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['roles', 'permissions', 'name', 'members'])
               || (request.auth.uid in resource.data.roles && resource.data.roles[request.auth.uid] == 'captain'))
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['joinCode'])
+              // .get(uid, null) rather than bracket access — same "missing
+              // key throws" hazard as roles above — so a plain member with
+              // no roles.{uid} entry cleanly fails this check instead of
+              // throwing and denying the whole OR'd expression.
+              || resource.data.roles.get(request.auth.uid, null) == 'captain'
+              || (resource.data.permissions != null
+                  && resource.data.permissions[request.auth.uid] != null
+                  && resource.data.permissions[request.auth.uid].canRegenerateJoinCode == true))
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['pinnedEvents'])
               || resource.data.roles[request.auth.uid] == 'captain'
               || (resource.data.permissions != null
@@ -570,22 +581,55 @@ service cloud.firestore {
       allow create: if isAuth()
         && !exists(/databases/$(database)/documents/joinCodes/$(code))
         && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.joinCode == code
-        && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles[request.auth.uid] == 'captain'
+        // .get(uid, null) rather than bracket access — a plain member with
+        // no roles.{uid} entry (i.e. every non-captain, unless/until this
+        // permission is why they'd be here) must cleanly fail the captain
+        // check instead of throwing and denying the whole expression, since
+        // the canRegenerateJoinCode branch right after needs an actual
+        // chance to run for them.
+        && (get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.roles.get(request.auth.uid, null) == 'captain'
+            || (get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.permissions != null
+                && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.permissions[request.auth.uid] != null
+                && get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.permissions[request.auth.uid].canRegenerateJoinCode == true))
         && request.resource.data.name == get(/databases/$(database)/documents/teams/$(request.resource.data.teamId)).data.name;
       allow update: if false;
-      // Only when the team this code points to is down to its last member —
-      // same condition as teams/{teamId}'s own delete rule, checked via the
-      // team this specific joinCodes doc's teamId field references.
       allow delete: if isAuth()
         && exists(/databases/$(database)/documents/teams/$(resource.data.teamId))
-        && get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.members.size() == 1
-        && get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.members.hasAny([request.auth.uid]);
+        && (
+          // Down to its last member — same condition as teams/{teamId}'s own
+          // delete rule, checked via the team this specific joinCodes doc's
+          // teamId field references.
+          (get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.members.size() == 1
+            && get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.members.hasAny([request.auth.uid]))
+          ||
+          // Regenerating the join code (captain, or a member with
+          // permissions[uid].canRegenerateJoinCode == true — same condition
+          // as the joinCode field itself on teams/{teamId}): once the team's
+          // OWN joinCode no longer equals this doc's id (`code`), this doc is
+          // a superseded lookup for a code that shouldn't resolve anymore —
+          // it may be cleaned up. Can never target the currently-active code
+          // this way, since that one still equals the team's joinCode.
+          (get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.joinCode != code
+            && (get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.roles.get(request.auth.uid, null) == 'captain'
+                || (get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.permissions != null
+                    && get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.permissions[request.auth.uid] != null
+                    && get(/databases/$(database)/documents/teams/$(resource.data.teamId)).data.permissions[request.auth.uid].canRegenerateJoinCode == true)))
+        );
     }
 
     match /users/{userId} {
       // Public profile: display name + avatar only — not sensitive.
       allow read: if isAuth();
-      allow create, update: if isAuth() && request.auth.uid == userId;
+      // photoURL may be a custom-uploaded picture stored as a base64 data URI
+      // (see js/auth.js's resizeImageFileToDataURL()) rather than a plain
+      // Google/http(s) URL — the client already compresses to well under this,
+      // but the cap here is defense in depth against a client that skips that
+      // step, keeping any single profile doc (and everyone's reads of it, e.g.
+      // every teammate's member-list load) bounded.
+      allow create, update: if isAuth() && request.auth.uid == userId
+        && (!('photoURL' in request.resource.data)
+            || request.resource.data.photoURL == null
+            || (request.resource.data.photoURL is string && request.resource.data.photoURL.size() < 300000));
       allow delete: if isAuth() && request.auth.uid == userId;
 
       // Private contact info (email): self only. Teammates who can see a

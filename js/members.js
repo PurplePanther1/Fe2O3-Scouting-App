@@ -18,6 +18,20 @@ let currentTeamPermissions = {};
 // cache entry per team rather than one shared/stale entry across all of them.
 let memberInfoCache = {};
 
+// ====== Drop every cached member-info entry for one team, without touching
+// other teams' entries — shared by every live signal that means "a member's
+// resolved name/email/photo for THIS team may now be stale": the
+// memberDisplayNames listener (a per-team name override changed), the new
+// per-member account-profile listener (someone's account-level displayName/
+// photoURL changed — auth.js's watchTeamMemberProfiles()), and the
+// canViewMemberEmails-change check (auth.js's refreshActiveTeamData()) —
+// rather than each duplicating this same loop inline. ======
+function invalidateMemberInfoCacheForTeam(teamId) {
+  Object.keys(memberInfoCache).forEach(key => {
+    if (key.startsWith(`${teamId}_`)) delete memberInfoCache[key];
+  });
+}
+
 // ====== Reset every bounded-scroll list nested inside a tab/subtab, not
 // just that tab/subtab's own outer container. .team-list/.event-list/
 // .match-schedule-list each have their OWN independent overflow-y:auto
@@ -118,6 +132,15 @@ function activateDashboardTab(name) {
   if (createAnotherTeamInput) createAnotherTeamInput.value = '';
   if (typeof clearStatusMessage === 'function') clearStatusMessage('create-another-team');
 
+  // Same "stale the moment ANY tab switch happens" reasoning as the two
+  // above — leave-team and myteam-joincode are also inline, persistent-view
+  // messages on the My Team tab, and profile-picture is the Account tab's
+  // equivalent. None of the three have their own input field to clear
+  // alongside them, but the message itself needs the same treatment.
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('leave-team');
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('myteam-joincode');
+  if (typeof clearStatusMessage === 'function') clearStatusMessage('profile-picture');
+
   // The Scouting tabs' sort DIRECTION deliberately persists through
   // everything else (switching sort field, switching Scouting sub-tabs, a
   // season/event switch — see clearSelectedEvent()'s separate UI-state
@@ -212,6 +235,10 @@ async function loadTeamMembers(teamId, teamData) {
   if (joinCodeEl && teamData.joinCode) {
     joinCodeEl.textContent = teamData.joinCode;
   }
+  const regenerateBtn = document.getElementById('btn-regenerate-join-code');
+  if (regenerateBtn) {
+    regenerateBtn.classList.toggle('hidden', !(typeof canUserRegenerateJoinCode === 'function' && canUserRegenerateJoinCode()));
+  }
 
   const memberList = document.getElementById('member-list');
   const status = document.getElementById('member-list-status');
@@ -242,7 +269,9 @@ async function loadTeamMembers(teamId, teamData) {
       ? {
           displayName: typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser.email || 'You'),
           email: currentUser.email || '',
-          photoURL: currentUser.photoURL || null
+          // currentUserProfile.photoURL first — it's the only one of the two
+          // that can ever hold a custom-uploaded picture instead of Google's.
+          photoURL: (currentUserProfile && currentUserProfile.photoURL) || currentUser.photoURL || null
         }
       : (memberInfoCache[`${teamId}_${uid}`] || { displayName: 'Loading…', email: '', photoURL: null });
 
@@ -294,7 +323,7 @@ async function loadTeamMembers(teamId, teamData) {
       if (!row) return;
       row.nameEl.textContent = info.displayName;
       row.emailEl.textContent = info.email;
-      if (info.photoURL) row.avatarEl.src = info.photoURL;
+      if (info.photoURL && typeof setAvatarSrc === 'function') setAvatarSrc(row.avatarEl, info.photoURL, info.displayName);
     }).catch(err => {
       console.warn(`Failed to load info for member ${uid}:`, err);
     });
@@ -313,8 +342,12 @@ function buildMemberRow(uid, role, isCaptain, isSelf, info) {
   // Avatar
   const avatar = document.createElement('img');
   avatar.className = 'member-avatar';
-  avatar.src = info.photoURL || 'https://ui-avatars.com/api/?name=U&background=16213e&color=a0a0b8';
-  avatar.alt = 'User';
+  if (typeof setAvatarSrc === 'function') {
+    setAvatarSrc(avatar, info.photoURL, info.displayName);
+  } else {
+    avatar.src = info.photoURL || 'https://ui-avatars.com/api/?name=U&background=16213e&color=a0a0b8';
+    avatar.alt = 'User';
+  }
 
   // Info
   const infoEl = document.createElement('div');
@@ -480,7 +513,7 @@ async function fetchMemberInfo(teamId, uid) {
 // of others' entries — see auth.js's canUserEditOtherEntries(). Old team docs
 // may still carry a stale permissions[uid].canBulkDelete field; it's simply
 // never read.
-const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canPinEvents', 'canViewMemberEmails', 'canKickMembers'];
+const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canPinEvents', 'canViewMemberEmails', 'canKickMembers', 'canRegenerateJoinCode'];
 
 // Human-readable labels, matching the Edit Permissions modal's checkbox
 // labels exactly — reused by the read-only "My Permissions" modal (below)
@@ -490,7 +523,8 @@ const MEMBER_PERMISSION_LABELS = {
   canEditOtherEntries: "Edit/delete others' entries (incl. bulk & team deletes)",
   canPinEvents: 'Pin/unpin events',
   canViewMemberEmails: 'View member emails',
-  canKickMembers: 'Kick members'
+  canKickMembers: 'Kick members',
+  canRegenerateJoinCode: "Regenerate the team's join code"
 };
 let memberPermissionsEditingUid = null;
 
