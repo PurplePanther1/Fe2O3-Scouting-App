@@ -178,13 +178,96 @@ function classifyLiveEntryAccess(existingData, canEditFn) {
 // (joined is already false by then, but the listener is still attached
 // until detach() runs) from re-entering this branch or falling through to
 // onSnapshotData() on a session that's already mid-teardown. ======
-function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canEditFn, onLostEditAccess }) {
+// ====== Delete an entry doc, first writing a deletionNotice marker so a
+// still-joined live session on this same doc (see createLiveEntrySession's
+// onSnapshot handler below) can detect the deletion and show who did it,
+// rather than the doc simply vanishing out from under an active editor.
+// Firestore delivers a document's own committed versions to an active
+// listener in order, so a joined session almost always observes this update
+// (data.deletionNotice set) before the follow-up delete's !exists snapshot —
+// but if it doesn't (e.g. a reconnect that jumps straight to the final
+// state), the onSnapshot handler's own !data fallback still disconnects that
+// session cleanly, just without a name. Best-effort: if the marker write
+// fails for any reason (already deleted, offline, ...), proceed straight to
+// the real delete anyway — it's an enhancement for whoever's currently
+// joined, never a precondition for deleting.
+//
+// deleterUid (bug fix): recorded alongside deletedByName so a session that's
+// STILL joined on the very entry it just deleted itself — e.g. the in-form
+// Delete button, or Team Detail's standalone delete button firing while that
+// same entry happens to be open live elsewhere under the same account — can
+// tell "I did this" apart from a genuine other-editor deletion. Every call
+// site already has the deleting uid on hand (currentUser.uid), so this is
+// always populated for any delete going through this app's own UI. ======
+async function deleteEntryWithNotice(docRef, deleterName, deleterUid) {
+  try {
+    await docRef.update({
+      deletionNotice: {
+        deletedByName: deleterName || 'another editor',
+        deletedByUid: deleterUid || null,
+        deletedAt: firebase.firestore.FieldValue.serverTimestamp()
+      }
+    });
+  } catch (err) {
+    console.warn('Writing deletion notice failed (proceeding to delete anyway):', err);
+  }
+  await docRef.delete();
+}
+
+// ====== Array-safe value equality. A button-group multi-select field's
+// value is an array, and a plain !== always treats two different array
+// instances as unequal even when their contents are identical (e.g. the same
+// stored array read back out of two separate Firestore snapshots) — so
+// commit()'s "did anything actually change since the last checkpoint" check
+// and cancelUndo()'s "does this field differ from its checkpoint" check both
+// need this instead of a raw !==, or they'd treat every array-valued field as
+// having "changed" on every single commit/cancel, even when nothing did
+// (confirmed bug: this round's audit of every checkpoint-diffing site for
+// array safety, prompted by match scouting's new multi-select
+// rankingPointsEarned field). ======
+function valuesEqual(a, b) {
+  if (Array.isArray(a) || Array.isArray(b)) {
+    const arrA = Array.isArray(a) ? a : (a == null ? [] : [a]);
+    const arrB = Array.isArray(b) ? b : (b == null ? [] : [b]);
+    if (arrA.length !== arrB.length) return false;
+    return arrA.every((v, i) => v === arrB[i]);
+  }
+  return a === b;
+}
+
+function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canEditFn, onLostEditAccess, onEntryDeleted }) {
   let detached = false;
   let joined = false;
   let handlingLostAccess = false;
   let heartbeatTimer = null;
   const debounceTimers = {};
   const pendingValues = {};
+  // Bug fix, round 2: a prior fix here (sawDocExist, now folded into
+  // attachListener()'s own comment below) patched the SYMPTOM by gating the
+  // `!data` fallback on having observed the doc exist first. That still
+  // wasn't reliable, because the underlying ordering problem was untouched:
+  // the listener was attached at construction time, BEFORE join() had ever
+  // run, so it could receive a "doesn't exist yet" snapshot, and THAT
+  // snapshot's delivery relative to join()'s transaction resolving was never
+  // actually guaranteed — a transaction is a full server round-trip outside
+  // the SDK's normal optimistic-local-write pipeline, so there's no
+  // ordering guarantee between "the transaction resolved" and "this
+  // separate onSnapshot listener has delivered its corresponding snapshot."
+  // Sometimes the stale snapshot lost the race and arrived after `joined`
+  // was already true, which looked identical to a real deletion.
+  //
+  // The actual fix: attachListener() (below) is now called from join()
+  // itself, AFTER its transaction has already resolved — never at
+  // construction time. By the time this listener exists at all, the doc is
+  // already guaranteed to exist on the server, so its very first snapshot
+  // can never be a false "doesn't exist" for a brand-new entry — there's no
+  // race left to lose. sawDocExist is set unconditionally the moment join()
+  // resolves (not just from an observed snapshot) as an extra guarantee,
+  // and kept as the `!data` fallback's gate purely as defense in depth for
+  // the same reason a NASA launch still carries a manual abort switch nobody
+  // expects to need.
+  let sawDocExist = false;
+  let unsubscribe = null;
 
   async function removeSelfFromActiveEditors() {
     try {
@@ -202,24 +285,119 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
     }
   }
 
-  const unsubscribe = docRef.onSnapshot(async (snap) => {
-    if (detached || handlingLostAccess) return;
-    const data = snap.exists ? snap.data() : null;
+  // ====== Attach the snapshot listener — called only from join(), after its
+  // transaction has already confirmed the doc exists (see the file's own
+  // comment above for why this ordering is what actually closes the race).
+  // No-ops if already attached, or if this session was torn down (detach()
+  // already called) before join() got this far — e.g. the "defensive
+  // re-entrancy guard" in openPitScoutForm/openMatchScoutForm firing a
+  // fire-and-forget cancelAndLeave() on a session whose own join() hadn't
+  // resolved yet. ======
+  function attachListener() {
+    if (unsubscribe || detached) return;
+    unsubscribe = docRef.onSnapshot(async (snap) => {
+      if (detached || handlingLostAccess) return;
+      const data = snap.exists ? snap.data() : null;
+      if (snap.exists) sawDocExist = true;
 
-    if (joined && data && typeof canEditFn === 'function'
-      && isEntryCommitted(data) && !canEditFn(data)) {
-      handlingLostAccess = true;
-      joined = false;
-      stopHeartbeat();
-      discardPendingWrites();
-      await removeSelfFromActiveEditors();
-      detach();
-      if (typeof onLostEditAccess === 'function') onLostEditAccess();
-      return;
-    }
+      // Bug fix (serious regression — delete-then-immediately-recreate at the
+      // same deterministic doc ID showed a false "Entry Deleted"): join()'s
+      // transaction is a direct server round-trip and never touches the
+      // SDK's local cache — but THIS listener, attached right after that
+      // transaction resolves, can still have its very first snapshot served
+      // straight from the local cache, which is a separate store that
+      // catches up to the transaction's result asynchronously. Deleting an
+      // entry and immediately re-scouting the same team/match reuses the
+      // exact same doc ID — for a brief window, the cache can still say
+      // "doesn't exist" (the just-prior delete) even though a brand-new
+      // transaction has already confirmed, directly against the server, that
+      // the doc exists again. Both deletion signals below used to trust that
+      // stale cached read exactly as much as a real server-confirmed one, so
+      // it was indistinguishable from a genuine deletion. Gating both on
+      // snap.metadata.fromCache === false closes this: a cache-only "gone"
+      // reading is simply ignored, and the very next (server-confirmed)
+      // snapshot corrects it — for an ALREADY-active listener that isn't a
+      // meaningful delay, since fromCache is really only ever true for a
+      // listener's first delivery or while genuinely offline. Deliberately
+      // NOT applied to onSnapshotData() below — that path needs the instant,
+      // optimistic cache echo for a responsive typing/presence experience;
+      // only "is this doc actually deleted" needs to wait for the server's
+      // word rather than the cache's guess.
+      const serverConfirmed = !snap.metadata.fromCache;
 
-    onSnapshotData(data);
-  }, (err) => console.warn('Live entry sync listener error:', err));
+      if (joined && data && typeof canEditFn === 'function'
+        && isEntryCommitted(data) && !canEditFn(data)) {
+        handlingLostAccess = true;
+        joined = false;
+        stopHeartbeat();
+        discardPendingWrites();
+        await removeSelfFromActiveEditors();
+        detach();
+        if (typeof onLostEditAccess === 'function') onLostEditAccess();
+        return;
+      }
+
+      // Deleted while joined — see deleteEntryWithNotice() above (the write
+      // side of this). join()'s transaction always creates the doc if
+      // missing, so `joined` can only be true once it genuinely exists;
+      // either signal below, once server-confirmed (see serverConfirmed
+      // above), is therefore unambiguous evidence of a real deletion.
+      //
+      // Bug fix: deleting your OWN currently-open entry (the in-form Delete
+      // button, or a standalone delete button elsewhere acting on the same
+      // doc under the same account) used to hit this exact branch too —
+      // `joined` is still true at that instant, since this session's own
+      // listener observes its own write just like anyone else's. That showed
+      // a confusing "deleted by another editor" notice for a delete the user
+      // themselves just performed, stepping on the delete flow's own
+      // "Data deleted." success message. deletedByUid (see
+      // deleteEntryWithNotice() above) lets this session recognize itself and
+      // just tear down quietly instead — the delete's own caller already owns
+      // showing the outcome and closing the modal.
+      if (joined && data && data.deletionNotice && serverConfirmed) {
+        handlingLostAccess = true;
+        joined = false;
+        stopHeartbeat();
+        discardPendingWrites();
+        // Defense in depth — see the !data fallback branch's own comment
+        // below for why this is now attempted here too, not skipped as
+        // "nothing left to remove it from."
+        await removeSelfFromActiveEditors();
+        detach();
+        const selfDeleted = !!data.deletionNotice.deletedByUid && data.deletionNotice.deletedByUid === uid;
+        if (!selfDeleted && typeof onEntryDeleted === 'function') onEntryDeleted(data.deletionNotice.deletedByName || null);
+        return;
+      }
+      if (joined && !data && sawDocExist && serverConfirmed) {
+        // Fallback: the deletionNotice update above was somehow never
+        // observed before the doc's removal itself landed. No name
+        // available, but still a clear disconnect beats every subsequent
+        // write silently failing.
+        //
+        // Bug fix (defense in depth): removeSelfFromActiveEditors() is now
+        // attempted here too, even though "the doc doesn't exist, there's
+        // nothing to remove it from" was true whenever this branch's
+        // detection was actually correct. It's a safe no-op against a
+        // genuinely deleted doc (its own transaction just returns early on
+        // !snap.exists) — but if this detection is EVER wrong again in some
+        // future edge case neither of us has found yet, this is what stops
+        // this uid's activeEditors entry from being permanently orphaned on
+        // a document that, it turns out, is still very much alive — exactly
+        // what left the "Editing: [name]" tag stuck after the false-positive
+        // this round surfaced.
+        handlingLostAccess = true;
+        joined = false;
+        stopHeartbeat();
+        discardPendingWrites();
+        await removeSelfFromActiveEditors();
+        detach();
+        if (typeof onEntryDeleted === 'function') onEntryDeleted(null);
+        return;
+      }
+
+      onSnapshotData(data);
+    }, (err) => console.warn('Live entry sync listener error:', err));
+  }
 
   function startHeartbeat() {
     stopHeartbeat();
@@ -257,8 +435,22 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
         tx.update(docRef, { activeEditors: editors });
       }
     });
+    // This session may have been torn down (detach() already called, e.g.
+    // by another open() interrupting this one before this transaction even
+    // landed) while the above was in flight — don't resurrect a session
+    // nothing is holding a reference to anymore: no heartbeat left running
+    // forever, no listener attached.
+    if (detached) return;
+    // The transaction above just confirmed this doc exists on the server —
+    // set unconditionally here (not only from an observed snapshot), since
+    // attachListener() runs next and its very first snapshot should already
+    // reflect that. See this file's own comment above attachListener() for
+    // why this ordering (join always fully resolves before the listener
+    // ever attaches) is what actually closes the false-deletion race.
+    sawDocExist = true;
     joined = true;
     startHeartbeat();
+    attachListener();
   }
 
   // ====== Remove this uid from activeEditors. No ownership decision here at
@@ -308,7 +500,7 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
         update.scoutedByName = displayName;
         update.scoutedAt = data.scoutedAt || firebase.firestore.FieldValue.serverTimestamp();
       } else if (priorCheckpoint) {
-        const changed = fields.some((f) => (newCheckpoint[f.id] ?? null) !== (priorCheckpoint[f.id] ?? null));
+        const changed = fields.some((f) => !valuesEqual(newCheckpoint[f.id] ?? null, priorCheckpoint[f.id] ?? null));
         if (changed) {
           update.lastEditedBy = uid;
           update.lastEditedByName = displayName;
@@ -374,10 +566,26 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
         if (Object.keys(editors).length === 0 && !isLegacyCommittedNoCheckpoint) {
           const checkpoint = data.checkpoint || null; // null here means genuinely never-committed -- revert to empty
           (fields || []).forEach((f) => {
+            // Bug fix (confirmed via two real corrupted docs found live,
+            // right before kickoff — both matchNumber: null, no season, empty
+            // activeEditors): matchNumber is the one config-list field that's
+            // LOCKED/structural for a live match entry, not abandonable draft
+            // data like every other field here — see match-scout.js's file
+            // header, it's fixed by whichever schedule row was clicked and is
+            // never even rendered into the live form, so there's no
+            // "abandoned edit" to revert. Before this fix, cancelling out of
+            // (or the re-entrancy guard silently abandoning) a brand-new,
+            // never-committed live match entry reverted it to null just like
+            // every other field, since a never-committed entry has no
+            // checkpoint at all — permanently orphaning the document, since
+            // findExistingMatchDoc()'s query can never match a null
+            // matchNumber again. Pit entries have no field with this id, so
+            // this exclusion is a no-op there.
+            if (f.id === 'matchNumber') return;
             const checkpointVal = (checkpoint && Object.prototype.hasOwnProperty.call(checkpoint, f.id))
               ? checkpoint[f.id] : null;
             const liveVal = (data[f.id] !== undefined) ? data[f.id] : null;
-            if ((liveVal ?? null) !== (checkpointVal ?? null)) {
+            if (!valuesEqual(liveVal ?? null, checkpointVal ?? null)) {
               update[f.id] = checkpointVal;
             }
           });
@@ -407,15 +615,48 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
   // ====== The two real exit paths — every caller should use one of these
   // rather than calling join/commit/cancelUndo/leaveActiveEditors/detach
   // individually. ======
+  // ====== Bug fix: commit() failing (e.g. permission-denied because this
+  // uid was removed from the team, or any other write rejection) used to
+  // throw straight out of commitAndLeave() before leaveActiveEditors()/
+  // detach() ever ran — leaving this uid's activeEditors entry stuck in the
+  // doc forever (nothing else ever prunes another uid's stale entry — see
+  // the file header), on top of the caller (commitPitScoutForm/
+  // commitMatchScoutForm) having no try/catch of its own, so the failure was
+  // completely silent to the user too. The try/finally below guarantees
+  // self-removal is still attempted (isValidSelfLeaveOnly, firestore.rules,
+  // permits a self-leave regardless of team membership, so this still
+  // succeeds even for a just-kicked uid) and the session still detaches,
+  // while the original error still propagates so the caller can show it. ======
   async function commitAndLeave(fields) {
-    await commit(fields);
-    await leaveActiveEditors();
-    detach();
+    try {
+      await commit(fields);
+    } finally {
+      await leaveActiveEditors();
+      detach();
+    }
   }
+  // ====== Bug fix: detach() now runs BEFORE cancelUndo()'s revert
+  // transaction, not after. This is the only exit path ever invoked
+  // fire-and-forget rather than awaited — the re-entrancy guard in
+  // openPitScoutForm/openMatchScoutForm/openMatchScoutEdit abandons a still-
+  // open session exactly like this while immediately loading a brand-new
+  // entry into the very same shared module-level form state. With detach()
+  // last, this session's OWN listener stayed attached throughout its own
+  // teardown transaction — so that transaction's write could echo straight
+  // back into THIS callback, which reads whatever entry the caller has since
+  // moved on to render (currentFormController/currentFields already
+  // repointed at the newly-opened entry) and misapply the OLD entry's data
+  // onto it — e.g. rendering "Nobody has saved this entry yet." onto a
+  // genuinely-saved, unrelated batch-mode entry. Detaching first means this
+  // session can never observe the echo of its own teardown write at all,
+  // closing that window by construction rather than by timing luck.
+  // cancelUndo()'s own correctness is unaffected — it reads fresh
+  // server-side data in its own transaction, never anything from this
+  // session's listener. ======
   async function cancelAndLeave(fields) {
     discardPendingWrites();
-    await cancelUndo(fields);
     detach();
+    await cancelUndo(fields);
   }
 
   // ====== Write one field's value now. No attribution here anymore —
@@ -498,7 +739,11 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
   function detach() {
     if (detached) return;
     detached = true;
-    unsubscribe();
+    // unsubscribe can still be null here — detach() can now run before
+    // join() ever resolves (the re-entrancy-guard scenario in
+    // attachListener()'s own comment), in which case there's no listener to
+    // tear down yet; join() checks `detached` itself before attaching one.
+    if (unsubscribe) unsubscribe();
     Object.keys(debounceTimers).forEach((fieldId) => clearTimeout(debounceTimers[fieldId]));
   }
 
@@ -517,7 +762,9 @@ function wireLiveFormFields(formController, fields, session) {
   fields.forEach((field) => {
     const el = formController.getField(field.id);
     if (!el) return;
-    const immediate = field.type === 'dropdown';
+    // Button Group is a discrete click too (renderButtonGroup dispatches
+    // 'change', dynamic-form.js), same reasoning as dropdown.
+    const immediate = field.type === 'dropdown' || field.type === 'buttonGroup';
     const eventName = immediate ? 'change' : 'input';
     el.addEventListener(eventName, () => {
       const values = formController.getValues();

@@ -176,9 +176,11 @@ async function bulkDeleteMatchScoutData(entryIds) {
   if (!teamId) {
     return { succeeded: [], failed: [...entryIds] };
   }
+  const deleterName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser?.email || 'Unknown');
   for (const entryId of entryIds) {
     try {
-      await db.collection('teams').doc(teamId).collection('matchScouting').doc(entryId).delete();
+      const docRef = db.collection('teams').doc(teamId).collection('matchScouting').doc(entryId);
+      await deleteEntryWithNotice(docRef, deleterName, currentUser?.uid);
       results.succeeded.push(entryId);
     } catch (err) {
       console.error(`Failed to delete match scouting data for ${entryId}:`, err);
@@ -231,6 +233,27 @@ async function attachMatchLiveSession(docId, fields, baseFieldsIfNew) {
           teamId,
           teamName: liveTeamName,
           message: `You were disconnected from a match scouting entry in "${liveTeamName}" — it was saved by another editor while you were still working on it.`
+        });
+      }
+    },
+    onEntryDeleted: (deletedByName) => {
+      // Mirrors pit-scout.js's own copy of this callback — the entry this
+      // session had open was deleted (see deleteEntryWithNotice(),
+      // live-entry-sync.js) by someone else while it was still active here.
+      closeMatchScoutFormUI();
+      if (typeof showNoticeModal === 'function') {
+        showNoticeModal({
+          title: 'Entry Deleted',
+          message: `This entry was deleted by ${deletedByName || 'another editor'} while you had it open. Your changes were not saved.`
+        });
+      }
+      if (typeof logActivitySelf === 'function') {
+        const liveTeamName = (currentTeamData && currentTeamData.name) || 'this team';
+        logActivitySelf({
+          type: 'live-edit-disconnected',
+          teamId,
+          teamName: liveTeamName,
+          message: `You were disconnected from a match scouting entry in "${liveTeamName}" — it was deleted by ${deletedByName || 'another editor'} while you were still working on it.`
         });
       }
     },
@@ -693,7 +716,8 @@ async function performMatchScoutSave(fieldValues, matchNumber, teamId) {
           payload.lastEditedByTimestamp = Date.now();
         }
         if (currentMatchDocId && currentMatchDocId !== docId) {
-          await db.collection('teams').doc(teamId).collection('matchScouting').doc(currentMatchDocId).delete();
+          const oldDocRef = db.collection('teams').doc(teamId).collection('matchScouting').doc(currentMatchDocId);
+          await deleteEntryWithNotice(oldDocRef, userDisplayName, currentUser.uid);
         }
       }
 
@@ -734,7 +758,9 @@ async function performMatchScoutSave(fieldValues, matchNumber, teamId) {
 // and doesn't need the form open at all. Mirrors pit-scout.js's
 // deletePitScoutEntry(). ======
 async function deleteMatchScoutEntry(teamId, docId) {
-  await db.collection('teams').doc(teamId).collection('matchScouting').doc(docId).delete();
+  const docRef = db.collection('teams').doc(teamId).collection('matchScouting').doc(docId);
+  const deleterName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser?.email || 'Unknown');
+  await deleteEntryWithNotice(docRef, deleterName, currentUser?.uid);
   refreshOpenMatchListPanels();
   if (typeof refreshMatchTeamListCounts === 'function') refreshMatchTeamListCounts();
 }
@@ -788,6 +814,32 @@ async function deleteMatchScoutData() {
 // AFTER a session has already been resolved one way or another. ======
 function closeMatchScoutFormUI() {
   document.getElementById('match-modal').classList.add('hidden');
+
+  // Bug fix (low priority, cheap): optimistically clear this uid's own
+  // presence from the local "who's editing" cache right away, rather than
+  // waiting for leaveActiveEditors()'s write to round-trip back through this
+  // same client's OWN team-list listener before the "Editing: You" tag
+  // clears. matchActiveEditorsRawCache holds one raw activeEditors map PER
+  // match entry for this team (not doc-id-tagged — see
+  // watchMatchScoutStatus()), so this patches every entry in the array
+  // rather than one specific doc; harmless, since this uid can only actually
+  // be present in whichever one it just left. A real snapshot still arrives
+  // shortly after and reconciles this with the server's actual state either way.
+  if (currentMatchEventCode && currentMatchTeamNumber && currentUser) {
+    const key = `${currentMatchEventCode}_${currentMatchTeamNumber}`;
+    const rawList = matchActiveEditorsRawCache.get(key);
+    if (rawList && rawList.length > 0) {
+      const patchedList = rawList.map((activeEditors) => {
+        if (!activeEditors || !(currentUser.uid in activeEditors)) return activeEditors;
+        const patched = { ...activeEditors };
+        delete patched[currentUser.uid];
+        return patched;
+      });
+      matchActiveEditorsRawCache.set(key, patchedList);
+      recomputeMatchActiveEditingFromCache();
+    }
+  }
+
   currentMatchTeamNumber = null;
   currentMatchEventCode = null;
   currentMatchDocId = null;
@@ -817,8 +869,20 @@ async function commitMatchScoutForm() {
   }
   errorEl.textContent = '';
   if (currentMatchLiveSession) {
-    await currentMatchLiveSession.flushAll();
-    await currentMatchLiveSession.commitAndLeave(currentMatchFields);
+    // Bug fix: mirrors pit-scout.js's commitPitScoutForm() — commitAndLeave()
+    // can throw (permission-denied if this uid lost edit access mid-session),
+    // and this had no try/catch at all before, so a failed commit silently
+    // did nothing rather than showing an error.
+    try {
+      await currentMatchLiveSession.flushAll();
+      await currentMatchLiveSession.commitAndLeave(currentMatchFields);
+    } catch (err) {
+      console.error('Failed to save match scouting entry:', err);
+      errorEl.textContent = err && err.code === 'permission-denied'
+        ? 'Permission denied: you no longer have permission to save this entry (you may have been removed from the team, or your permissions changed). Please refresh and try again.'
+        : 'Failed to save. Please check your connection and try again.';
+      return;
+    }
   }
   closeMatchScoutFormUI();
 }
@@ -1237,7 +1301,10 @@ async function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
       metrics.style.cssText = 'font-size:0.9rem; font-weight:500; margin-bottom:8px; padding:6px 10px; background: rgba(255, 255, 255, 0.08); color: var(--text-main, #ffffff); border-radius:6px;';
       metrics.textContent = lineFields.map(f => {
         const val = entry[f.id];
-        return `${f.label}: ${(val === null || val === undefined || val === '') ? '—' : val}`;
+        const display = typeof formatFieldValueForDisplay === 'function'
+          ? formatFieldValueForDisplay(val)
+          : ((val === null || val === undefined || val === '') ? '—' : val);
+        return `${f.label}: ${display}`;
       }).join(' | ');
       item.appendChild(metrics);
     }

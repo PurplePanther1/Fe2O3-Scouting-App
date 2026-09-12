@@ -23,7 +23,7 @@ if ('serviceWorker' in navigator) {
 }
 
 // ====== Global Tab Navigation Handler ======
-let lastActiveScoutingSubTab = 'info'; // Remembers 'info', 'match', 'pit', or 'pinned'
+let lastActiveScoutingSubTab = 'info'; // Remembers 'info', 'match', 'pit', 'pinned', or 'compare'
 
 // ====== Modals always reopen scrolled to top ======
 // Every modal's scrollable region(s) — the outer .modal-card itself
@@ -89,6 +89,10 @@ document.addEventListener('DOMContentLoaded', () => {
     pinned: {
       tab: document.querySelector('[data-subtab="pinned"]'),
       view: document.getElementById('subtab-pinned')
+    },
+    compare: {
+      tab: document.querySelector('[data-subtab="compare"]'),
+      view: document.getElementById('subtab-compare')
     }
   };
 
@@ -142,6 +146,11 @@ document.addEventListener('DOMContentLoaded', () => {
       console.log('Switched to Pinned Events View');
       if (typeof renderPinnedEventsList === 'function') {
         renderPinnedEventsList();
+      }
+    } else if (subtab === 'compare') {
+      console.log('Switched to Pit vs Match View');
+      if (typeof renderComparisonTeamList === 'function' && typeof currentEventTeams !== 'undefined' && currentEventTeams.length > 0) {
+        renderComparisonTeamList(currentEventTeams);
       }
     }
 

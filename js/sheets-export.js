@@ -221,6 +221,10 @@ function moveFileToFolder(fileId, folderId) {
 // elsewhere in the app.
 function formatCellValue(val) {
   if (val === null || val === undefined) return '';
+  // Multi-select button-group values (dynamic-form.js) are an array — join
+  // into one cell rather than letting a raw array object reach the Sheets
+  // API / SheetJS, which would otherwise serialize it as "[object Object]".
+  if (Array.isArray(val)) return val.join(' + ');
   if (typeof val === 'object' && typeof val.toDate === 'function') {
     return typeof formatInUserTimezone === 'function' ? formatInUserTimezone(val.toDate()) : val.toDate().toLocaleString();
   }
@@ -1751,6 +1755,12 @@ function openExportChoiceModal(context) {
   // their own context.title.
   const titleEl = document.getElementById('export-choice-title');
   if (titleEl) titleEl.textContent = context?.title || 'Export Pit + Match Data';
+
+  // Print/PDF is opt-in per caller (currently only the Pit vs Match
+  // comparison export, js/pit-vs-match.js) — every other export entry point
+  // doesn't pass a printHandler, so this stays hidden for them, unchanged.
+  const printBtn = document.getElementById('btn-export-choice-print');
+  if (printBtn) printBtn.classList.toggle('hidden', typeof context?.printHandler !== 'function');
 }
 
 function closeExportChoiceModal() {
@@ -1826,6 +1836,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const ctx = exportChoiceContext;
       closeExportChoiceModal();
       if (ctx) ctx.sheetsHandler(ctx.statusPrefix);
+    });
+  }
+
+  const printBtn = document.getElementById('btn-export-choice-print');
+  if (printBtn) {
+    printBtn.addEventListener('click', () => {
+      const ctx = exportChoiceContext;
+      closeExportChoiceModal();
+      if (ctx && typeof ctx.printHandler === 'function') ctx.printHandler();
     });
   }
 });

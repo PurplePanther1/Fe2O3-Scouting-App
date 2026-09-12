@@ -1585,6 +1585,40 @@ input[type="password"]::placeholder {
   color: var(--text);
 }
 
+.button-group-field {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.button-group-option {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.button-group-option:hover:not(:disabled) {
+  border-color: var(--primary);
+}
+
+.button-group-option.active {
+  background: var(--primary);
+  color: #fff;
+  border-color: var(--primary);
+}
+
+.button-group-option:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .pit-modal-actions {
   display: flex;
   gap: 10px;

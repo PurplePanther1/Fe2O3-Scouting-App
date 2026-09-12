@@ -564,7 +564,9 @@ async function renderPitDataForTeam(teamNumber, eventCode) {
 
     const valueSpan = document.createElement('span');
     const val = entry[field.id];
-    valueSpan.textContent = (val === null || val === undefined || val === '') ? '—' : String(val);
+    valueSpan.textContent = typeof formatFieldValueForDisplay === 'function'
+      ? formatFieldValueForDisplay(val)
+      : ((val === null || val === undefined || val === '') ? '—' : String(val));
 
     row.appendChild(labelSpan);
     row.appendChild(valueSpan);

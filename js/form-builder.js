@@ -32,7 +32,8 @@ const FIELD_TYPES = [
   { value: 'text', label: 'Short Text' },
   { value: 'number', label: 'Number' },
   { value: 'counter', label: 'Counter (+/-)' },
-  { value: 'textarea', label: 'Long Text / Notes' }
+  { value: 'textarea', label: 'Long Text / Notes' },
+  { value: 'buttonGroup', label: 'Button Group' }
 ];
 
 // ====== Open the form builder ======
@@ -415,6 +416,8 @@ function openFieldEditor(index) {
   // existed, and brand-new fields alike) defaults to checked/shown.
   document.getElementById('bld-field-show-in-preview').checked = field?.showInPreview !== false;
   document.getElementById('bld-field-options').value = field?.options ? field.options.join('\n') : '';
+  const multiCheckbox = document.getElementById('bld-field-multi');
+  if (multiCheckbox) multiCheckbox.checked = field?.multi || false;
   document.getElementById('bld-field-id-warning').textContent = '';
   const modalErrorEl = document.getElementById('field-editor-error');
   if (modalErrorEl) modalErrorEl.textContent = '';
@@ -439,8 +442,11 @@ function toggleOptionsField() {
   const type = document.getElementById('bld-field-type').value;
   const optionsGroup = document.getElementById('bld-field-options-group');
   const counterGroup = document.getElementById('bld-field-counter-group');
-  optionsGroup.style.display = type === 'dropdown' ? 'block' : 'none';
+  const multiGroup = document.getElementById('bld-field-multi-group');
+  // Dropdown and Button Group share the same newline-delimited options list.
+  optionsGroup.style.display = (type === 'dropdown' || type === 'buttonGroup') ? 'block' : 'none';
   counterGroup.style.display = type === 'counter' ? 'block' : 'none';
+  if (multiGroup) multiGroup.style.display = type === 'buttonGroup' ? 'block' : 'none';
 }
 
 // ====== Save the field being edited ======
@@ -462,6 +468,7 @@ async function saveFieldEdit() {
   const required = document.getElementById('bld-field-required').checked;
   const showInPreview = document.getElementById('bld-field-show-in-preview').checked;
   const optionsRaw = document.getElementById('bld-field-options').value;
+  const multi = document.getElementById('bld-field-multi')?.checked || false;
   const minRaw = document.getElementById('bld-field-min').value.trim();
   const maxRaw = document.getElementById('bld-field-max').value.trim();
   const stepRaw = document.getElementById('bld-field-step').value.trim();
@@ -480,8 +487,8 @@ async function saveFieldEdit() {
     if (modalErrorEl) modalErrorEl.textContent = 'Field ID must start with a letter and contain only letters, numbers, and underscores.';
     return;
   }
-  if (type === 'dropdown' && !optionsRaw.trim()) {
-    if (modalErrorEl) modalErrorEl.textContent = 'Dropdown options are required. Enter one per line.';
+  if ((type === 'dropdown' || type === 'buttonGroup') && !optionsRaw.trim()) {
+    if (modalErrorEl) modalErrorEl.textContent = 'Options are required. Enter one per line.';
     return;
   }
   if (type === 'counter' && maxRaw !== '' && minRaw !== '' && Number(maxRaw) <= Number(minRaw)) {
@@ -503,7 +510,7 @@ async function saveFieldEdit() {
     }
   }
 
-  const options = type === 'dropdown'
+  const options = (type === 'dropdown' || type === 'buttonGroup')
     ? optionsRaw.split('\n').map(s => s.trim()).filter(Boolean)
     : [];
 
@@ -519,8 +526,12 @@ async function saveFieldEdit() {
 
     const fieldData = { id: fieldId, label, type, required, sortOrder: 0, showInPreview };
 
-    if (type === 'dropdown') {
+    if (type === 'dropdown' || type === 'buttonGroup') {
       fieldData.options = options;
+    }
+
+    if (type === 'buttonGroup') {
+      fieldData.multi = multi;
     }
 
     if (type === 'counter') {

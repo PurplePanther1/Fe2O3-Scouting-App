@@ -253,6 +253,7 @@
           <button class="tab" data-subtab="pit">Pit Scouting</button>
           <button class="tab" data-subtab="match">Match Scouting</button>
           <button class="tab" data-subtab="pinned">Pinned Events</button>
+          <button class="tab" data-subtab="compare">Pit vs Match</button>
         </div>
 
         <!-- ====== TEAM INFORMATION SUBTAB CONTENT ====== -->
@@ -375,6 +376,22 @@
           <p class="help-text">Events pinned by the captain or authorized members, for quick access shared with the whole team.</p>
           <p class="help-text" id="pinned-events-status">No events pinned yet.</p>
           <div id="pinned-events-list" class="event-list"></div>
+        </div>
+
+        <!-- ====== PIT VS MATCH SUBTAB CONTENT (js/pit-vs-match.js) ======
+             Side-by-side comparison of a team's pit-scouted claims against
+             what was actually observed across its match entries at this
+             event — no automatic field pairing (pit/match forms are
+             independent, freeform, season-scoped field sets with no shared
+             concept linking them); the comparison modal just lays both out
+             for a human to read side by side. -->
+        <div id="subtab-compare" class="subtab-content hidden" style="margin-top:16px">
+          <div style="margin-top:10px">
+            <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">TEAMS AT EVENT (PIT VS MATCH)</h3>
+            <p class="help-text" style="margin-bottom:12px">Compare a team's pit-scouted claims against what was actually observed on the field.</p>
+            <p class="help-text" id="team-list-status-compare">Select an event above to load teams.</p>
+            <div id="team-list-compare" class="team-list"></div>
+          </div>
         </div>
 
       </div>
@@ -810,6 +827,75 @@
     </div>
   </div>
 
+  <!-- ====== Pit vs Match Comparison Modal (js/pit-vs-match.js) — no
+       automatic field pairing between pit and match forms (they're
+       independent, freeform, season-scoped field sets); this just lays a
+       team's pit-scouted claims and its match-observed stats side by side
+       for a human to read together. ====== -->
+  <div id="comparison-modal" class="modal-overlay hidden">
+    <div id="comparison-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--lg">
+      <div class="modal-header">
+        <h3 id="comparison-modal-title">Compare</h3>
+        <button id="btn-comparison-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px; max-height:75vh; overflow-y:auto">
+        <div style="display:flex; gap:20px; flex-wrap:wrap;">
+          <div style="flex:1; min-width:260px;">
+            <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted); margin-bottom:8px">PIT SCOUTING DATA</p>
+            <div id="cmp-pit-data"></div>
+            <button id="btn-cmp-view-pit-entry" class="btn btn-small btn-outline" style="margin-top:10px; width:100%">See Pit Entry Used</button>
+          </div>
+          <div style="flex:1; min-width:260px;">
+            <p style="font-size:0.85rem; font-weight:600; color:var(--text-muted); margin-bottom:8px">MATCH-OBSERVED STATS</p>
+            <div id="cmp-match-stats"></div>
+            <button id="btn-cmp-view-matches" class="btn btn-small btn-outline" style="margin-top:10px; width:100%">See Matches Used</button>
+          </div>
+        </div>
+        <button id="btn-cmp-export" class="btn btn-outline" style="margin-top:20px; width:100%; font-size:0.85rem;">📤 Export Comparison</button>
+        <p id="cmp-export-error" class="error-message"></p>
+        <p id="cmp-export-success" class="success-message"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== View Entry Modal (read-only) — shared by both of the
+       comparison modal's "See ... Used" buttons (js/pit-vs-match.js) to show
+       a single pit or match entry exactly as scouted, with every field
+       disabled. ====== -->
+  <div id="view-entry-modal" class="modal-overlay hidden">
+    <div id="view-entry-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--md">
+      <div class="modal-header">
+        <h3 id="view-entry-modal-title">Entry</h3>
+        <button id="btn-view-entry-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px; max-height:75vh; overflow-y:auto">
+        <p class="help-text" style="margin-bottom:12px">View only — a read-only copy of the entry used in the comparison.</p>
+        <div id="view-entry-fields"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ====== Matches Used Modal (js/pit-vs-match.js) — lists a team's match
+       entries for this event with include/exclude checkboxes controlling
+       what feeds the comparison's match-side stats, plus a "Mismatched
+       Matches" tab (rendered only when at least one entry's match number
+       doesn't correspond to a match the team actually played per the
+       published schedule). ====== -->
+  <div id="matches-used-modal" class="modal-overlay hidden">
+    <div id="matches-used-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--lg">
+      <div class="modal-header">
+        <h3 id="matches-used-modal-title">Matches Used</h3>
+        <button id="btn-matches-used-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px; max-height:75vh; overflow-y:auto">
+        <div id="matches-used-body"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- ====== Form Builder Modal (Captain only) ====== -->
   <div id="builder-modal" class="modal-overlay hidden">
     <div id="builder-modal-overlay" class="modal-overlay-bg"></div>
@@ -879,11 +965,19 @@
             <option value="number">Number</option>
             <option value="counter">Counter (+/-)</option>
             <option value="textarea">Long Text / Notes</option>
+            <option value="buttonGroup">Button Group</option>
           </select>
         </div>
         <div class="pit-field" id="bld-field-options-group">
-          <label for="bld-field-options">Dropdown Options (one per line)</label>
+          <label for="bld-field-options">Options (one per line)</label>
           <textarea id="bld-field-options" placeholder="Option 1&#10;Option 2&#10;Option 3" rows="4"></textarea>
+        </div>
+        <div class="pit-field" id="bld-field-multi-group" style="display:none">
+          <div style="display:flex; align-items:center; gap:8px">
+            <input type="checkbox" id="bld-field-multi" style="width:auto; margin:0" />
+            <label for="bld-field-multi" style="margin:0">Allow multiple selections</label>
+          </div>
+          <p class="help-text" style="font-size:0.75rem; margin-top:4px; margin-bottom:0">Off: pick one option (like a dropdown). On: pick any number of options.</p>
         </div>
         <div class="pit-field" id="bld-field-counter-group" style="display:none">
           <label>Counter Settings</label>
@@ -1142,6 +1236,11 @@
       <div style="padding:16px 24px 24px; display:flex; flex-direction:column; gap:10px">
         <button id="btn-export-choice-excel" class="btn btn-outline">📥 Download as Excel (.xlsx)</button>
         <button id="btn-export-choice-sheets" class="btn btn-primary">📊 Export to Google Sheets</button>
+        <!-- Only shown when the calling context passes a printHandler (currently
+             just the Pit vs Match comparison export — see js/pit-vs-match.js and
+             openExportChoiceModal() in js/sheets-export.js) — hidden for every
+             other export entry point in the app, which don't pass one. -->
+        <button id="btn-export-choice-print" class="btn btn-outline hidden">🖨️ Print / Save as PDF</button>
       </div>
     </div>
   </div>
@@ -1249,6 +1348,7 @@
   <script src="/js/form-builder.js"></script>
   <script src="/js/app.js"></script>
   <script src="/js/sheets-export.js"></script>
+  <script src="/js/pit-vs-match.js"></script>
   <script src="/js/delete-account.js"></script>
 </body>
 </html>

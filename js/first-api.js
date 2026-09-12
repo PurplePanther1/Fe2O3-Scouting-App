@@ -525,8 +525,16 @@ function clearSelectedEvent() {
   const statusInfo = document.getElementById('team-list-status-info');
   if (statusInfo) statusInfo.textContent = 'Select an event above to load teams.';
 
+  const teamListCompare = document.getElementById('team-list-compare');
+  if (teamListCompare) teamListCompare.innerHTML = '';
+  const statusCompare = document.getElementById('team-list-status-compare');
+  if (statusCompare) statusCompare.textContent = 'Select an event above to load teams.';
+
   if (typeof closeTeamDetailModal === 'function') {
     closeTeamDetailModal();
+  }
+  if (typeof closeComparisonModal === 'function') {
+    closeComparisonModal();
   }
 
   const tdError = document.getElementById('td-error');
@@ -822,6 +830,9 @@ function renderTeamList(teams) {
   renderPitTeamList(teams);
   if (typeof renderTeamInfoList === 'function') {
     renderTeamInfoList(teams);
+  }
+  if (typeof renderComparisonTeamList === 'function') {
+    renderComparisonTeamList(teams);
   }
   console.timeEnd('[Timing] renderTeamList total');
 }

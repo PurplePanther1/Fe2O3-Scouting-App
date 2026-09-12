@@ -315,6 +315,9 @@ function renderDynamicForm(container, fields, existingData) {
       case 'textarea':
         input = renderTextarea(field, savedValue);
         break;
+      case 'buttonGroup':
+        input = renderButtonGroup(field, savedValue);
+        break;
       case 'text':
       default:
         input = renderText(field, savedValue);
@@ -344,6 +347,10 @@ function renderDynamicForm(container, fields, existingData) {
           val = Number(el.value);
         } else if (field.type === 'textarea') {
           val = el.value.trim() || null;
+        } else if (field.type === 'buttonGroup') {
+          // A plain string (single-select, same shape as dropdown) or an
+          // array (multi-select) — see renderButtonGroup()'s value getter.
+          val = el.value;
         }
         values[field.id] = val;
       });
@@ -355,7 +362,15 @@ function renderDynamicForm(container, fields, existingData) {
         if (!field.required) continue;
         const el = fieldElements[field.id];
         if (!el) continue;
-        const val = el.value.trim();
+        // Multi-select button-group value is an array, not a string — .trim()
+        // would throw. "Required" means at least one option chosen.
+        if (field.type === 'buttonGroup' && field.multi) {
+          if (!Array.isArray(el.value) || el.value.length === 0) {
+            return `"${field.label}" is required.`;
+          }
+          continue;
+        }
+        const val = String(el.value ?? '').trim();
         if (!val) {
           return `"${field.label}" is required.`;
         }
@@ -402,6 +417,19 @@ function renderDynamicForm(container, fields, existingData) {
       tag.textContent = name;
     }
   };
+}
+
+// ====== Format a stored field value for read-only display — array-safe for
+// multi-select button-group values (joined with " + "; an empty array reads
+// as "—", same as any other empty value), scalar otherwise. Shared by
+// team-info.js's/match-scout.js's preview-line rendering and
+// pit-vs-match.js's comparison/print views, so every place a field value is
+// shown as plain text agrees on the same rules. ======
+function formatFieldValueForDisplay(val) {
+  if (Array.isArray(val)) {
+    return val.length > 0 ? val.join(' + ') : '—';
+  }
+  return (val === null || val === undefined || val === '') ? '—' : String(val);
 }
 
 // ====== Render helpers ======
@@ -579,4 +607,94 @@ function renderTextarea(field, savedValue) {
   textarea.rows = 3;
   if (savedValue) textarea.value = savedValue;
   return textarea;
+}
+
+// ====== Button Group: a row of small toggle buttons over field.options.
+// field.multi false (default) -> radio-like, exactly one active at a time,
+// value is a single string (or null if nothing's been chosen yet) — same
+// shape as a dropdown's value. field.multi true -> independent toggles, any
+// number active at once, value is always an array (never null, [] when
+// nothing's chosen). savedValue may arrive as either shape regardless of the
+// field's current `multi` setting (a team could flip that setting after data
+// already exists), so it's normalized defensively rather than assumed. ======
+function renderButtonGroup(field, savedValue) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'button-group-field';
+  wrapper.id = 'dyn-' + field.id;
+
+  const options = field.options || [];
+  const isMulti = !!field.multi;
+  const buttons = new Map(); // option -> button element
+
+  let active = new Set();
+  if (Array.isArray(savedValue)) {
+    savedValue.forEach((v) => active.add(v));
+  } else if (savedValue != null && savedValue !== '') {
+    active.add(savedValue);
+  }
+
+  function syncButtonStates() {
+    options.forEach((opt) => {
+      const btn = buttons.get(opt);
+      if (!btn) return;
+      const isActive = active.has(opt);
+      btn.classList.toggle('active', isActive);
+      btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+  }
+
+  // Dispatched on every click so wireLiveFormFields() (live-entry-sync.js)
+  // can wire this the same generic way as a dropdown — a discrete choice,
+  // not a keystroke stream, so 'change' (not 'input') matches how it treats
+  // dropdown fields.
+  function notifyChanged() {
+    wrapper.dispatchEvent(new Event('change', { bubbles: false }));
+  }
+
+  options.forEach((opt) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'button-group-option';
+    btn.textContent = opt;
+    btn.addEventListener('click', () => {
+      if (isMulti) {
+        if (active.has(opt)) active.delete(opt);
+        else active.add(opt);
+      } else {
+        // Radio-like: clicking always selects exactly this option — no
+        // toggle-back-to-none via the buttons themselves (matching how a
+        // native radio group behaves; "required" already covers forcing a
+        // choice, and there's no blank button here the way a dropdown has).
+        active = new Set([opt]);
+      }
+      syncButtonStates();
+      notifyChanged();
+    });
+    buttons.set(opt, btn);
+    wrapper.appendChild(btn);
+  });
+
+  syncButtonStates();
+
+  // Same pattern as renderCounter()'s wrapper — exposes `.value` so the
+  // generic getValues/validate/setValues code above can read/write this
+  // like any other field element without knowing it's not a real input.
+  Object.defineProperty(wrapper, 'value', {
+    get() {
+      if (isMulti) return Array.from(active);
+      const first = active.values().next();
+      return first.done ? null : first.value;
+    },
+    set(val) {
+      active = new Set();
+      if (Array.isArray(val)) {
+        val.forEach((v) => active.add(v));
+      } else if (val != null && val !== '') {
+        active.add(val);
+      }
+      syncButtonStates();
+    }
+  });
+
+  return wrapper;
 }

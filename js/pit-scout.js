@@ -194,6 +194,28 @@ async function openPitScoutForm(teamNumber, eventCode) {
           });
         }
       },
+      onEntryDeleted: (deletedByName) => {
+        // The entry this session had open was deleted (see
+        // deleteEntryWithNotice() in live-entry-sync.js) by someone else
+        // while it was still active here — same graceful-disconnect shape as
+        // onLostEditAccess above, just a different trigger and message.
+        closePitScoutFormUI();
+        if (typeof showNoticeModal === 'function') {
+          showNoticeModal({
+            title: 'Entry Deleted',
+            message: `This entry was deleted by ${deletedByName || 'another editor'} while you had it open. Your changes were not saved.`
+          });
+        }
+        if (typeof logActivitySelf === 'function') {
+          const liveTeamName = (currentTeamData && currentTeamData.name) || 'this team';
+          logActivitySelf({
+            type: 'live-edit-disconnected',
+            teamId: teamId2,
+            teamName: liveTeamName,
+            message: `You were disconnected from a pit scouting entry in "${liveTeamName}" — it was deleted by ${deletedByName || 'another editor'} while you were still working on it.`
+          });
+        }
+      },
       onSnapshotData: (data) => {
         if (!currentFormController || !currentPitFields) return;
         applyRemoteFieldValues(currentFormController, currentPitFields, data, currentPitLiveSession);
@@ -278,8 +300,24 @@ async function commitPitScoutForm() {
   }
   errorEl.textContent = '';
   if (currentPitLiveSession) {
-    await currentPitLiveSession.flushAll();
-    await currentPitLiveSession.commitAndLeave(currentPitFields);
+    // Bug fix: commitAndLeave() can throw (e.g. permission-denied if this
+    // uid lost edit access mid-session — kicked from the team, permissions
+    // revoked) — this used to have no try/catch at all, so a failed commit
+    // just silently did nothing: no error shown, modal left open with
+    // whatever was typed, and (since commitAndLeave never reached
+    // closePitScoutFormUI) reopening later showed the same still-committed
+    // values with the edit having never landed. Now shows a clear error and
+    // keeps the modal open (with the typed values intact) instead.
+    try {
+      await currentPitLiveSession.flushAll();
+      await currentPitLiveSession.commitAndLeave(currentPitFields);
+    } catch (err) {
+      console.error('Failed to save pit scouting entry:', err);
+      errorEl.textContent = err && err.code === 'permission-denied'
+        ? 'Permission denied: you no longer have permission to save this entry (you may have been removed from the team, or your permissions changed). Please refresh and try again.'
+        : 'Failed to save. Please check your connection and try again.';
+      return;
+    }
   }
   closePitScoutFormUI();
 }
@@ -313,7 +351,9 @@ async function deletePitScoutEntry(teamId, eventCode, teamNumber) {
   // under) rather than guessing — same reasoning as findExistingPitDoc()'s own doc comment.
   const existing = await findExistingPitDoc(teamId, eventCode, teamNumber);
   if (existing) {
-    await db.collection('teams').doc(teamId).collection('pitScouting').doc(existing.id).delete();
+    const docRef = db.collection('teams').doc(teamId).collection('pitScouting').doc(existing.id);
+    const deleterName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser?.email || 'Unknown');
+    await deleteEntryWithNotice(docRef, deleterName, currentUser?.uid);
   }
   const cacheKey = `${eventCode}_${teamNumber}`;
   scoutedTeamsCache.delete(cacheKey);
@@ -377,9 +417,11 @@ async function bulkDeletePitScoutData(docIds) {
   if (!teamId) {
     return { succeeded: [], failed: [...docIds] };
   }
+  const deleterName = typeof getCurrentUserDisplayName === 'function' ? getCurrentUserDisplayName() : (currentUser?.email || 'Unknown');
   for (const docId of docIds) {
     try {
-      await db.collection('teams').doc(teamId).collection('pitScouting').doc(docId).delete();
+      const docRef = db.collection('teams').doc(teamId).collection('pitScouting').doc(docId);
+      await deleteEntryWithNotice(docRef, deleterName, currentUser?.uid);
       // pitScoutedEntriesCache is keyed by data (eventCode_teamNumber), not
       // the real doc id we have here — find which cache key holds this doc
       // to clean it up optimistically (the live listener will also catch up
@@ -407,6 +449,25 @@ async function bulkDeletePitScoutData(docIds) {
 // another (or never existed). ======
 function closePitScoutFormUI() {
   document.getElementById('pit-modal').classList.add('hidden');
+
+  // Bug fix (low priority, cheap): optimistically clear this uid's own
+  // presence from the local "who's editing" cache right away, rather than
+  // waiting for leaveActiveEditors()'s write to round-trip back through this
+  // same client's OWN team-list listener before the "Editing: You" tag
+  // clears — that round trip is exactly why it used to visibly linger a
+  // moment after you'd already left. A real snapshot still arrives shortly
+  // after and reconciles this with the server's actual state either way.
+  if (currentPitEventCode && currentPitTeamNumber && currentUser) {
+    const key = `${currentPitEventCode}_${currentPitTeamNumber}`;
+    const raw = pitActiveEditorsRawCache.get(key);
+    if (raw && currentUser.uid in raw) {
+      const patched = { ...raw };
+      delete patched[currentUser.uid];
+      pitActiveEditorsRawCache.set(key, patched);
+      recomputePitActiveEditingFromCache();
+    }
+  }
+
   currentPitTeamNumber = null;
   currentPitEventCode = null;
   currentFormController = null;
