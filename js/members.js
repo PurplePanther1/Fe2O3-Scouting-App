@@ -1250,6 +1250,7 @@ function markExpectedSelfRemoval(teamId) {
 //     switcher and show the same notice, without navigating — the user
 //     isn't looking at it, so there's nothing to navigate away from. ======
 function handleRemovedFromTeam(teamId) {
+  console.log(`[members] handleRemovedFromTeam: called for teamId=${teamId}, currentTeamId=${typeof currentTeamId !== 'undefined' ? currentTeamId : 'undefined'}, expectedSelfRemoval=${expectedSelfRemovalTeamIds.has(teamId)}`);
   if (expectedSelfRemovalTeamIds.has(teamId)) {
     expectedSelfRemovalTeamIds.delete(teamId);
     return;
@@ -1261,6 +1262,15 @@ function handleRemovedFromTeam(teamId) {
   const teamName = (teamEntry && teamEntry.name) || 'this team';
 
   if (currentTeamId === teamId) {
+    // If a pit/match scouting entry for THIS team happens to be open right
+    // now, its own live session won't reliably detect this removal on its
+    // own (see forceClosePitLiveSessionForTeam()'s comment, pit-scout.js) —
+    // close it and clear its local "Editing" badge state immediately, before
+    // anything else below tears down the listeners that would otherwise
+    // eventually (but not promptly) reflect the same thing.
+    if (typeof forceClosePitLiveSessionForTeam === 'function') forceClosePitLiveSessionForTeam();
+    if (typeof forceCloseMatchLiveSessionForTeam === 'function') forceCloseMatchLiveSessionForTeam();
+
     if (typeof watchTeamDoc === 'function') watchTeamDoc(null);
     if (typeof watchPitScoutStatus === 'function') watchPitScoutStatus(null);
     if (typeof watchMatchScoutStatus === 'function') watchMatchScoutStatus(null);

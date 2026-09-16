@@ -47,6 +47,18 @@ let pitActiveEditingCache = new Set(); // Set of "eventCode_teamNumber" keys wit
 let pitActiveEditingNamesCache = new Map(); // "eventCode_teamNumber" -> array of fresh editor names, for the team-list badge's text (CATEGORY 4) — see getTeamEditingNamesPit()
 let pitActiveEditorsRawCache = new Map(); // "eventCode_teamNumber" -> raw activeEditors map from the last snapshot received, kept so recomputePitActiveEditingFromCache() can re-derive freshness on a timer WITHOUT waiting for a new snapshot — see that function's own comment for why a snapshot-only re-evaluation can leave the "Editing" badge stuck past its intended ~45s staleness window
 let pitActiveEditingRefreshTimer = null; // setInterval handle, tied to watchPitScoutStatus()'s own listener lifecycle — see recomputePitActiveEditingFromCache()
+// Set of "eventCode_teamNumber" keys this client has locally left (closePitScoutFormUI()) but
+// whose server-side self-removal write may not have landed/been confirmed yet. Bug fix: an
+// optimistic local patch to pitActiveEditorsRawCache alone doesn't survive the NEXT snapshot —
+// watchPitScoutStatus()'s listener fires on every OTHER active editor's heartbeat too (not just
+// this uid's own writes) and wholesale-replaces pitActiveEditorsRawCache straight from the raw
+// server data every time, which still shows this uid as present until the self-removal write
+// actually lands server-side. That listener now checks this set and strips currentUser.uid back
+// out on every rebuild while a key is pending, so a stale heartbeat from someone else can't
+// resurrect the "Editing: You" badge in the gap between leaving locally and the real write
+// landing. Cleared per-key once a snapshot confirms the uid is genuinely gone, and on rejoining
+// the same entry (openPitScoutForm's join() call) so re-editing shows this uid as active again. ======
+let pitPendingSelfLeave = new Set();
 let currentFormController = null; // returned by renderDynamicForm
 let currentPitFields = null; // the field config rendered into the open form, needed by the live session's snapshot handler
 let currentPitLiveSession = null; // returned by createLiveEntrySession (live-entry-sync.js)
@@ -228,15 +240,21 @@ async function openPitScoutForm(teamNumber, eventCode) {
     // out the one case that shouldn't be allowed to (access.blocked, above).
     // Whether zero or several people are already active makes no difference
     // here for a still-uncommitted draft: firestore.rules' canJoinOrEditEntry()
-    // permits open co-editing on a draft, and testing showed gating it behind
-    // an extra "Take Over" click added friction without adding real
-    // protection. Once an entry has been committed, though, that door is
-    // closed (CATEGORY 3) — classifyLiveEntryAccess() above already accounts
-    // for this, so reaching this line means either the entry is still a
-    // draft, or this user independently qualifies to edit it.
+    // permits any team member to join a draft regardless of who else (if
+    // anyone) is already in it, and testing showed gating it behind an extra
+    // "Take Over" click added friction without adding real protection. Once
+    // an entry has been committed, though, that door is closed (CATEGORY 3)
+    // — classifyLiveEntryAccess() above already accounts for this, so
+    // reaching this line means either the entry is still a draft, or this
+    // user independently qualifies to edit it.
     // No scoutedBy/scoutedByName/scoutedAt here — those are only ever set by
     // commitPitScoutForm's first successful Done now, never at doc-creation
     // time (see createLiveEntrySession's join()/commit() for why).
+    // Rejoining this exact entry means this uid is actively present again —
+    // stop stripping it out of the raw cache (see pitPendingSelfLeave's own
+    // declaration for why a prior close could otherwise leave this uid
+    // filtered out indefinitely).
+    pitPendingSelfLeave.delete(`${eventCode}_${teamNumber}`);
     await currentPitLiveSession.join({
       eventCode,
       teamNumber: Number(teamNumber),
@@ -339,6 +357,42 @@ async function cancelPitScoutForm() {
     await currentPitLiveSession.cancelAndLeave(currentPitFields);
   }
   closePitScoutFormUI();
+}
+
+// ====== Force-disconnect an open pit-scouting live session because its
+// team was just left/kicked out from under it (handleRemovedFromTeam(),
+// members.js, calls this before navigating away) — a distinct trigger from
+// every other disconnect this module handles, since it isn't detected by
+// the entry doc's own onSnapshot listener at all: once this uid is removed
+// from the team, the READ rule on the entry (isTeamMember) stops passing
+// too, so Firestore just errors the listener out rather than delivering one
+// more snapshot for live-entry-sync.js's own lost-access detection to catch.
+// Same "clear the local UI first, clean up the session in the background"
+// order as every other involuntary-disconnect path in this app (see
+// live-entry-sync.js's attachListener() for the general reasoning): the
+// session reference is captured before closePitScoutFormUI() (which nulls
+// currentPitLiveSession as part of closing) runs, so the session can still
+// be told to leave afterward — fire-and-forget.
+//
+// Bug fix: this used to call session.cancelAndLeave(fields) here, same as a
+// normal Cancel. That's wrong specifically for a kicked uid: cancelUndo()
+// (inside cancelAndLeave) can revert EVERY configured field back to the
+// checkpoint when this uid turns out to be the last active editor of an
+// uncommitted draft — a write touching more than just activeEditors, which
+// no longer qualifies under firestore.rules' isValidSelfLeaveOnly()
+// carve-out, and every OTHER branch of that rule requires team membership.
+// For a just-kicked uid every branch was therefore denied, the whole write
+// failed outright, and activeEditors on the server was never actually
+// touched — which is exactly why OTHER team members kept seeing this uid's
+// "Editing" badge. session.disconnectAndLeave() (live-entry-sync.js) does
+// the activeEditors-only removal instead, which always satisfies
+// isValidSelfLeaveOnly() regardless of team membership. ======
+function forceClosePitLiveSessionForTeam() {
+  console.log('[pit-scout] forceClosePitLiveSessionForTeam: called, currentPitLiveSession =', !!currentPitLiveSession);
+  if (!currentPitLiveSession) return;
+  const session = currentPitLiveSession;
+  closePitScoutFormUI();
+  session.disconnectAndLeave();
 }
 
 // ====== Core delete logic: resolve the real doc, delete it, and clean up
@@ -457,8 +511,17 @@ function closePitScoutFormUI() {
   // clears — that round trip is exactly why it used to visibly linger a
   // moment after you'd already left. A real snapshot still arrives shortly
   // after and reconciles this with the server's actual state either way.
+  //
+  // Bug fix, round 2: patching pitActiveEditorsRawCache here alone didn't
+  // survive past the very next snapshot — watchPitScoutStatus()'s listener
+  // fires on every OTHER active editor's heartbeat too and rebuilds this
+  // whole cache from raw server data every time, which still showed this
+  // uid as present until the real self-removal write landed. pitPendingSelfLeave
+  // (see its own declaration) tells that rebuild to keep stripping this uid
+  // back out for this key until a snapshot actually confirms it's gone.
   if (currentPitEventCode && currentPitTeamNumber && currentUser) {
     const key = `${currentPitEventCode}_${currentPitTeamNumber}`;
+    pitPendingSelfLeave.add(key);
     const raw = pitActiveEditorsRawCache.get(key);
     if (raw && currentUser.uid in raw) {
       const patched = { ...raw };
@@ -522,6 +585,7 @@ function recomputePitActiveEditingFromCache() {
   });
   pitActiveEditingCache = newActiveEditing;
   pitActiveEditingNamesCache = newNames;
+  console.log('[pit-scout] recomputePitActiveEditingFromCache: activeEditing keys =', Array.from(newActiveEditing), '| names =', JSON.stringify(Array.from(newNames.entries())));
   if (typeof onScoutedStateChanged === 'function') {
     onScoutedStateChanged();
   }
@@ -589,16 +653,34 @@ function watchPitScoutStatus(eventCode) {
           newScoutedTeams.add(key);
           newEntries.set(key, data);
         }
-        newRawEditors.set(key, data.activeEditors);
+        // See pitPendingSelfLeave's own declaration: this uid locally left
+        // this key but the server may not have caught up yet — keep
+        // stripping it back out of this raw snapshot's data too, until a
+        // snapshot confirms it's genuinely gone (at which point the pending
+        // marker is no longer needed and is cleared here).
+        let editors = data.activeEditors;
+        if (pitPendingSelfLeave.has(key) && currentUser) {
+          if (editors && currentUser.uid in editors) {
+            editors = { ...editors };
+            delete editors[currentUser.uid];
+          } else {
+            pitPendingSelfLeave.delete(key);
+          }
+        }
+        newRawEditors.set(key, editors);
       }
 
-      if (myGeneration !== pitStatusWatchGeneration) return; // superseded by a newer snapshot
+      if (myGeneration !== pitStatusWatchGeneration) {
+        console.log(`[pit-scout] watchPitScoutStatus: snapshot SUPERSEDED (generation ${myGeneration} != ${pitStatusWatchGeneration}), discarding`);
+        return; // superseded by a newer snapshot
+      }
+      console.log(`[pit-scout] watchPitScoutStatus: snapshot processed, ${docsData.length} doc(s), rawEditors =`, JSON.stringify(Array.from(newRawEditors.entries()).map(([k, v]) => [k, v ? Object.keys(v) : v])));
       scoutedTeamsCache = newScoutedTeams;
       pitScoutedEntriesCache = newEntries;
       pitActiveEditorsRawCache = newRawEditors;
       recomputePitActiveEditingFromCache(); // also notifies via onScoutedStateChanged()
     }, (err) => {
-      console.warn('Pit scouting listener error:', err);
+      console.warn('[pit-scout] watchPitScoutStatus: listener error -', err.code, err);
     });
 
   pitActiveEditingRefreshTimer = setInterval(recomputePitActiveEditingFromCache, LIVE_PRESENCE_HEARTBEAT_MS);

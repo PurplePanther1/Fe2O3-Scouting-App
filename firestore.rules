@@ -97,27 +97,11 @@ service cloud.firestore {
     // cannot query or enumerate a collection, so "is anyone else currently
     // present" is only enforceable server-side if it's a field on the very
     // document being written) tracks who currently has this entry open for
-    // editing. hasActiveEditors() is a coarse, non-authoritative signal —
-    // whether any individual entry is "stale" is a CLIENT-SIDE display
-    // concern only (see LIVE_PRESENCE_STALE_MS in live-entry-sync.js); an
-    // unpruned crashed-tab entry just leaves the document in the MORE
-    // permissive state below forever, which can never lock anyone out, only
-    // stay collaborative longer than strictly necessary.
-    // .get('activeEditors', null) rather than entry.activeEditors — a LEGACY
-    // entry (scoutedBy set, but predating this feature entirely — see
-    // isCommittedEntry() below) never had activeEditors written to it at
-    // all, so it's genuinely, permanently absent, not just empty. Direct dot
-    // access throws in that case (same throws-on-missing-key hazard fixed
-    // elsewhere in this file — found here via emulator testing while
-    // verifying CATEGORY 3 against real legacy-shaped data, not by
-    // inspection: it had gone unnoticed until now because every entry this
-    // function was ever actually called against during earlier testing
-    // already had activeEditors written, or the error happened to be masked
-    // by this file's own OR-branches evaluating true anyway).
-    function hasActiveEditors(entry) {
-      return entry != null && entry.get('activeEditors', null) != null && entry.get('activeEditors', {}).size() > 0;
-    }
-
+    // editing, purely for the presence UI (see LIVE_PRESENCE_STALE_MS in
+    // live-entry-sync.js) — it is NOT part of the join/edit permission gate
+    // below (see canJoinOrEditEntry() for why a former hasActiveEditors()
+    // check here was a real bug, not just belt-and-suspenders).
+    //
     // Has this entry ever actually been committed? checkpoint is the
     // primary signal (js/live-entry-sync.js's commit()); scoutedBy is a
     // fallback for entries scouted before the checkpoint field existed at
@@ -133,27 +117,44 @@ service cloud.firestore {
         && (entry.get('checkpoint', null) != null || entry.get('scoutedBy', null) != null);
     }
 
-    // Someone's already actively editing an UNCOMMITTED draft -> any team
-    // member may join or edit a field alongside them (including writing a
-    // commit's checkpoint/scoutedBy/lastEditedBy, or a cancel's entry-wide
-    // revert — see js/live-entry-sync.js's commit()/cancelUndo(), neither of
-    // which needs any gate beyond this one: both are always issued by a uid
-    // already present in activeEditors at the time, same as an ordinary
-    // field write). CATEGORY 3: that door closes permanently once the entry
-    // has been committed at least once — isCommittedEntry() — regardless of
-    // who else is currently active in it; from that point on only the usual
-    // owner/captain/canEditOtherEntries gate applies, same as an entry with
-    // no live session ever attached to it at all (a batch-mode match entry,
-    // or any entry from before this feature existed). A co-editor who loses
+    // Any team member may join or edit a field on an UNCOMMITTED draft —
+    // including writing a commit's checkpoint/scoutedBy/lastEditedBy, or a
+    // cancel's entry-wide revert (js/live-entry-sync.js's commit()/
+    // cancelUndo(), neither of which needs any gate beyond this one). Once
+    // the entry has been committed at least once — isCommittedEntry() —
+    // that door closes permanently, regardless of who (if anyone) is
+    // currently active in it; from that point on only the usual owner/
+    // captain/canEditOtherEntries gate applies, same as an entry with no
+    // live session ever attached to it at all (a batch-mode match entry, or
+    // any entry from before this feature existed). A co-editor who loses
     // access THIS way, mid-session (the entry got committed by someone else
     // while they were still active), is detected and gracefully disconnected
     // client-side — see createLiveEntrySession() in js/live-entry-sync.js —
     // and can still always remove just themselves from activeEditors via
     // isValidSelfLeaveOnly() below, even though this gate now denies
     // everything else they might try.
+    //
+    // Bug fix: this used to also require hasActiveEditors(entry) — "someone
+    // else is already active" — alongside !isCommittedEntry(entry) before a
+    // non-privileged team member could join a draft at all. That's wrong: a
+    // brand-new entry doc is freely createable by any team member via the
+    // `allow create` rule below regardless of activeEditors, but the very
+    // act of the sole editor leaving (Cancel, or clicking out — see
+    // leaveActiveEditors()/cancelUndo() in live-entry-sync.js, both of which
+    // must remove that uid from activeEditors as part of leaving) drops
+    // activeEditors back to empty on the now-existing-but-still-uncommitted
+    // doc. Every later reopen then hits `allow update` (the doc now exists),
+    // where hasActiveEditors() was false and isCommittedEntry() was also
+    // false — failing the OR entirely and denying any non-privileged team
+    // member from ever reopening their own (or anyone else's) abandoned,
+    // never-saved draft. Reported as "Permission Denied" on a team whose
+    // scouted-checkmark was never showing, i.e. nothing had actually been
+    // committed. An uncommitted draft has no real data to protect, so
+    // whether anyone else happens to be in it right now is irrelevant to
+    // whether THIS user may join — only isCommittedEntry() should gate that.
     function canJoinOrEditEntry(teamId, entry) {
       return isTeamMember(teamId) && (
-        (hasActiveEditors(entry) && !isCommittedEntry(entry))
+        !isCommittedEntry(entry)
         || canEditOrDeleteEntry(teamId, entry)
       );
     }
@@ -434,16 +435,19 @@ service cloud.firestore {
       // rule (a nonexistent doc leaks nothing either way, so this is a no-op
       // change in practice, not a tightening or loosening of access).
       // allow update's first clause accepts EITHER the classic owner/captain/
-      // canEditOtherEntries gate OR canJoinOrEditEntry's "someone's already
-      // actively editing" case (live-collaboration ownership model, wishlist
+      // canEditOtherEntries gate OR canJoinOrEditEntry's "still an
+      // uncommitted draft" case (live-collaboration ownership model, wishlist
       // item 10), and scoutedBy may only be set once (isValidScoutedByWrite,
       // above) — no more transfer-on-leave. An entry that never goes through
-      // js/live-entry-sync.js (no activeEditors field ever written) behaves
-      // under this rule exactly as it did before this feature existed —
-      // hasActiveEditors() is false, canJoinOrEditEntry() reduces to
-      // canEditOrDeleteEntry(), and isValidScoutedByWrite() only ever takes
-      // its "unchanged" branch (its "newly set" branch already matches what
-      // a plain first save always did anyway). The standalone delete rule
+      // js/live-entry-sync.js (a batch-mode match entry — see
+      // performMatchScoutSave, match-scout.js) always writes scoutedBy in the
+      // very same single-shot write that creates it, so isCommittedEntry() is
+      // already true by the time any later update ever reaches this rule —
+      // canJoinOrEditEntry() reduces to canEditOrDeleteEntry() for exactly
+      // the same reason it does for any OTHER already-committed entry, and
+      // isValidScoutedByWrite() only ever takes its "unchanged" branch (its
+      // "newly set" branch already matches what a plain first save always did
+      // anyway). The standalone delete rule
       // deliberately stays on canEditOrDeleteEntry (not canJoinOrEditEntry)
       // — an earlier round of this feature widened delete to any active
       // editor so a non-privileged co-editor could delete-on-cancel, but

@@ -60,6 +60,13 @@ let matchActiveEditingCache = new Set(); // Set of "eventCode_teamNumber" keys w
 let matchActiveEditingNamesCache = new Map(); // "eventCode_teamNumber" -> array of fresh editor names across all of that team's match entries, for the team-list badge's text (CATEGORY 4) — see getTeamEditingNamesMatch()
 let matchActiveEditorsRawCache = new Map(); // "eventCode_teamNumber" -> array of raw activeEditors maps (one per that team's match entries) from the last snapshot, kept so recomputeMatchActiveEditingFromCache() can re-derive freshness on a timer WITHOUT waiting for a new snapshot — see that function's own comment
 let matchActiveEditingRefreshTimer = null; // setInterval handle, tied to watchMatchScoutStatus()'s own listener lifecycle — see recomputeMatchActiveEditingFromCache()
+// Set of "eventCode_teamNumber" keys this client has locally left (closeMatchScoutFormUI()) but
+// whose server-side self-removal write may not have landed/been confirmed yet — mirrors
+// pit-scout.js's pitPendingSelfLeave exactly (see its own declaration for the full race this
+// closes: watchMatchScoutStatus()'s listener rebuilds matchActiveEditorsRawCache from raw server
+// data on every OTHER active editor's heartbeat too, which would otherwise resurrect this uid's
+// badge in the gap between leaving locally and the real write landing).
+let matchPendingSelfLeave = new Set();
 let currentMatchFormController = null; // returned by renderDynamicForm
 let currentMatchFormMode = null; // 'live' or 'batch' — set by whichever open function ran, read by the Save/Done button handler
 let currentMatchFields = null; // the field config rendered into the open form, needed by the live session's snapshot handler (live mode only)
@@ -264,6 +271,16 @@ async function attachMatchLiveSession(docId, fields, baseFieldsIfNew) {
       renderPresenceBanner(document.getElementById('match-presence-banner'), data?.activeEditors, currentUser.uid, !!data?.checkpoint);
     }
   });
+
+  // Rejoining this team's match entries means this uid is actively present
+  // again — stop stripping it out of the raw cache (see
+  // matchPendingSelfLeave's own declaration for why a prior close could
+  // otherwise leave this uid filtered out indefinitely). Both callers of
+  // attachMatchLiveSession() set currentMatchEventCode/currentMatchTeamNumber
+  // before calling it, so these already reflect the entry being joined.
+  if (currentMatchEventCode && currentMatchTeamNumber) {
+    matchPendingSelfLeave.delete(`${currentMatchEventCode}_${currentMatchTeamNumber}`);
+  }
 
   // baseFieldsIfNew must NOT include scoutedBy/scoutedByName/scoutedAt —
   // those are only ever set by commitMatchScoutForm's first successful Done
@@ -486,10 +503,11 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
 // whichever of the two functions above ends up handling it, and this is
 // always LIVE mode (see file header). Access decision (mirrors
 // pit-scout.js's openPitScoutForm — see classifyLiveEntryAccess() in
-// live-entry-sync.js for the reasoning): zero active editors and not
-// qualified (owner/captain/canEditOtherEntries, or nothing exists yet) ->
-// blocked, Permission Denied. Otherwise -> open and join immediately,
-// whether the entry was empty or already had other active editors. ======
+// live-entry-sync.js for the reasoning): already-committed and not qualified
+// (owner/captain/canEditOtherEntries) -> blocked, Permission Denied.
+// Otherwise -> open and join immediately, whether the entry is a
+// never-committed draft (empty, or already had other active editors) or one
+// this user independently qualifies to edit. ======
 async function openMatchScoutFormFromSchedule(matchNumber, teamNumber, eventCode, teamName) {
   const teamId = currentTeamData?.id;
   if (!teamId || !currentUser) return;
@@ -825,8 +843,17 @@ function closeMatchScoutFormUI() {
   // rather than one specific doc; harmless, since this uid can only actually
   // be present in whichever one it just left. A real snapshot still arrives
   // shortly after and reconciles this with the server's actual state either way.
+  //
+  // Bug fix, round 2: patching matchActiveEditorsRawCache here alone didn't
+  // survive past the very next snapshot — watchMatchScoutStatus()'s listener
+  // fires on every OTHER active editor's heartbeat too and rebuilds this
+  // whole cache from raw server data every time, which still showed this uid
+  // as present until the real self-removal write landed. matchPendingSelfLeave
+  // (see its own declaration) tells that rebuild to keep stripping this uid
+  // back out for this key until a snapshot actually confirms it's gone.
   if (currentMatchEventCode && currentMatchTeamNumber && currentUser) {
     const key = `${currentMatchEventCode}_${currentMatchTeamNumber}`;
+    matchPendingSelfLeave.add(key);
     const rawList = matchActiveEditorsRawCache.get(key);
     if (rawList && rawList.length > 0) {
       const patchedList = rawList.map((activeEditors) => {
@@ -904,6 +931,28 @@ async function cancelMatchScoutForm() {
   closeMatchScoutFormUI();
 }
 
+// ====== Force-disconnect an open match-scouting live session because its
+// team was just left/kicked out from under it (handleRemovedFromTeam(),
+// members.js, calls this before navigating away) — mirrors pit-scout.js's
+// forceClosePitLiveSessionForTeam() exactly, see its comment for the full
+// reasoning (the entry doc's own listener can't be relied on to catch this:
+// once this uid is off the team, the read rule stops passing too, so
+// Firestore just errors the listener out instead of delivering one more
+// snapshot; and cancelAndLeave()'s cancelUndo() can attempt a multi-field
+// revert that firestore.rules denies outright for a kicked, non-team-member
+// uid, silently leaving activeEditors on the server untouched — hence
+// disconnectAndLeave() instead, an activeEditors-only removal that always
+// satisfies isValidSelfLeaveOnly() regardless of team membership). No-ops
+// for batch mode (currentMatchLiveSession is only ever set for a live,
+// match-based-view entry). ======
+function forceCloseMatchLiveSessionForTeam() {
+  console.log('[match-scout] forceCloseMatchLiveSessionForTeam: called, currentMatchLiveSession =', !!currentMatchLiveSession);
+  if (!currentMatchLiveSession) return;
+  const session = currentMatchLiveSession;
+  closeMatchScoutFormUI();
+  session.disconnectAndLeave();
+}
+
 // ====== Close the match scouting form after some OTHER action already
 // resolved the entry's fate directly (Delete — see deleteMatchScoutData
 // above), OR as batch mode's own plain Cancel/X/overlay handler (batch mode
@@ -959,6 +1008,7 @@ function recomputeMatchActiveEditingFromCache() {
   });
   matchActiveEditingCache = newActiveEditing;
   matchActiveEditingNamesCache = newNames;
+  console.log('[match-scout] recomputeMatchActiveEditingFromCache: activeEditing keys =', Array.from(newActiveEditing), '| names =', JSON.stringify(Array.from(newNames.entries())));
   if (typeof onMatchScoutedStateChanged === 'function') {
     onMatchScoutedStateChanged();
   }
@@ -1017,22 +1067,45 @@ function watchMatchScoutStatus(eventCode) {
 
       const newCache = {};
       const newRawEditors = new Map();
+      const stillPendingKeys = new Set();
       for (const data of docsData) {
         const key = `${data.eventCode}_${data.teamNumber}`;
         if (matchEntryIsCommitted(data)) {
           if (!newCache[key]) newCache[key] = [];
           newCache[key].push(data);
         }
+        // See matchPendingSelfLeave's own declaration: this uid locally left
+        // this key but the server may not have caught up yet on every one of
+        // this team's match entries — keep stripping it back out of this raw
+        // snapshot's data too, until every entry for this key confirms it's
+        // genuinely gone.
+        let editors = data.activeEditors;
+        if (matchPendingSelfLeave.has(key) && currentUser) {
+          if (editors && currentUser.uid in editors) {
+            editors = { ...editors };
+            delete editors[currentUser.uid];
+            stillPendingKeys.add(key);
+          }
+        }
         if (!newRawEditors.has(key)) newRawEditors.set(key, []);
-        newRawEditors.get(key).push(data.activeEditors);
+        newRawEditors.get(key).push(editors);
       }
+      // A pending key with no entry left confirming this uid's presence is
+      // genuinely done — the marker's job is finished, drop it.
+      matchPendingSelfLeave.forEach((key) => {
+        if (!stillPendingKeys.has(key)) matchPendingSelfLeave.delete(key);
+      });
 
-      if (myGeneration !== matchStatusWatchGeneration) return; // superseded by a newer snapshot
+      if (myGeneration !== matchStatusWatchGeneration) {
+        console.log(`[match-scout] watchMatchScoutStatus: snapshot SUPERSEDED (generation ${myGeneration} != ${matchStatusWatchGeneration}), discarding`);
+        return; // superseded by a newer snapshot
+      }
+      console.log(`[match-scout] watchMatchScoutStatus: snapshot processed, ${docsData.length} doc(s), rawEditors =`, JSON.stringify(Array.from(newRawEditors.entries()).map(([k, v]) => [k, (v || []).map((e) => e ? Object.keys(e) : e)])));
       matchEntriesCache = newCache;
       matchActiveEditorsRawCache = newRawEditors;
       recomputeMatchActiveEditingFromCache(); // also notifies via onMatchScoutedStateChanged()
     }, (err) => {
-      console.warn('Match scouting listener error:', err);
+      console.warn('[match-scout] watchMatchScoutStatus: listener error -', err.code, err);
     });
 
   matchActiveEditingRefreshTimer = setInterval(recomputeMatchActiveEditingFromCache, LIVE_PRESENCE_HEARTBEAT_MS);

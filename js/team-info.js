@@ -352,7 +352,7 @@ function renderTeamInfoList(teams) {
     item.dataset.teamNumber = team.teamNumber;
 
     const leftGroup = document.createElement('div');
-    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0;';
+    leftGroup.style.cssText = 'display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; flex:1; min-width:0;';
 
     const numSpan = document.createElement('span');
     numSpan.className = 'team-number';

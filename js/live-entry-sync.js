@@ -112,22 +112,29 @@ function isEntryCommitted(data) {
 // current data (or null for a brand-new entry) and a canEditFn (pass
 // canUserEditOtherEntries, auth.js) that mirrors firestore.rules'
 // canEditOrDeleteEntry client-side. Mirrors firestore.rules'
-// canJoinOrEditEntry() exactly — see that function's own comment for the
-// CATEGORY 3 reasoning:
-// - A never-committed draft (isEntryCommitted false): open co-editing
-//   applies — blocked only if there are zero active editors AND this user
-//   doesn't independently qualify.
+// canJoinOrEditEntry() exactly:
+// - A never-committed draft (isEntryCommitted false): always joinable by
+//   any team member, regardless of whether anyone else is currently active
+//   in it — there's no real data to protect yet.
 // - An already-committed entry (isEntryCommitted true — checkpoint, or the
-//   legacy scoutedBy-only fallback, see isEntryCommitted()): active editors
-//   no longer matter at all. Blocked unless this user independently
-//   qualifies (owner/captain/canEditOtherEntries), regardless of who else
-//   is currently in there. ======
+//   legacy scoutedBy-only fallback, see isEntryCommitted()): blocked unless
+//   this user independently qualifies (owner/captain/canEditOtherEntries).
+//
+// Bug fix: this used to also require at least one active editor already
+// present before a non-privileged user could join an uncommitted draft
+// (`!hasActiveEditors && !qualifies` below). That meant the SOLE editor of a
+// brand-new draft leaving via Cancel — which must remove them from
+// activeEditors as part of leaving, see leaveActiveEditors()/cancelUndo()
+// below — closed the door behind them: the doc now existed (so the next open
+// no longer got the `!existingData` free pass) but had zero active editors,
+// so a non-privileged team member could never reopen it again even though
+// nothing had ever been committed. Reported as a "Permission Denied" modal
+// on a team whose scouted-checkmark was never showing. See firestore.rules'
+// canJoinOrEditEntry() for the server-side half of this same fix. ======
 function classifyLiveEntryAccess(existingData, canEditFn) {
-  const activeEditors = (existingData && existingData.activeEditors) || {};
-  const hasActiveEditors = Object.keys(activeEditors).length > 0;
   const qualifies = !existingData || canEditFn(existingData);
   const committed = isEntryCommitted(existingData);
-  const blocked = committed ? !qualifies : (!hasActiveEditors && !qualifies);
+  const blocked = committed && !qualifies;
   return { blocked };
 }
 
@@ -152,32 +159,38 @@ function classifyLiveEntryAccess(existingData, canEditFn) {
 // snapshot handler itself watches for this exact transition (joined, entry
 // just became committed, canEditFn now says no) and forces a clean
 // disconnect: stop heartbeating, discard any unsent debounced edits (they
-// could never land now anyway), AWAIT removing just this uid from
-// activeEditors (see removeSelfFromActiveEditors() — permitted even now via
-// firestore.rules' isValidSelfLeaveOnly() carve-out), then detach and call
-// onLostEditAccess() so the caller can show a clear notice and close its
-// modal — mirroring how a kicked team member is already handled elsewhere
-// (handleRemovedFromTeam(), auth.js), rather than a confusing raw
-// permission-denied error the next time they happen to type.
+// could never land now anyway), detach, and call onLostEditAccess()
+// IMMEDIATELY so the caller can show a clear notice, close its modal, and —
+// critically — optimistically clear this uid's OWN entry out of its local
+// "who's editing" cache right away (see pit-scout.js's
+// closePitScoutFormUI()/match-scout.js's closeMatchScoutFormUI(), both
+// already called from onLostEditAccess/onEntryDeleted) — mirroring how a
+// kicked team member is already handled elsewhere (handleRemovedFromTeam(),
+// auth.js), rather than a confusing raw permission-denied error the next
+// time they happen to type.
 //
-// The AWAIT matters for more than this session's own bookkeeping: a team
-// list watching this same entry (pit-scout.js's watchPitScoutStatus/
-// match-scout.js's watchMatchScoutStatus) has its own, completely
-// independent onSnapshot subscription, and only updates its "Editing"
-// badge once IT receives a snapshot reflecting the removal. commit()/
-// cancelUndo() already fully await their own self-leave write before their
-// callers close the modal (commitAndLeave/cancelAndLeave), so by the time
-// those exit paths' UI visibly changes, the write has already landed and
-// any other listener can already see it. This path used to fire
-// onLostEditAccess() immediately, with the self-leave write still only
-// just-sent — confirmed via the emulator (a ~280ms gap between the notify
-// callback firing and a second, independent listener on the same doc
-// observing the removal) to be a genuine bug, not network latency alone:
-// every OTHER exit path closes that same gap by waiting, this one didn't.
-// handlingLostAccess guards against a second snapshot arriving mid-await
-// (joined is already false by then, but the listener is still attached
-// until detach() runs) from re-entering this branch or falling through to
-// onSnapshotData() on a session that's already mid-teardown. ======
+// removeSelfFromActiveEditors() (below) is fired here too, but
+// deliberately NOT awaited before the callback runs — it used to be, on the
+// theory that a team list watching this same entry (pit-scout.js's
+// watchPitScoutStatus/match-scout.js's watchMatchScoutStatus) only updates
+// its "Editing" badge once ITS OWN independent onSnapshot subscription
+// receives a snapshot reflecting the removal, so the write had to land
+// before the callback closed the modal. That reasoning no longer holds now
+// that the callback's own closePitScoutFormUI()/closeMatchScoutFormUI()
+// patches the SAME local cache that badge reads from, synchronously, the
+// instant the callback runs — the real snapshot still arrives shortly after
+// and reconciles either way, exactly like every other exit path's
+// optimistic clear. Awaiting first was actively harmful here specifically:
+// this branch only ever fires because canEditFn just turned false, which
+// means the very write being awaited (a self-leave) is itself at risk of
+// being denied for the same reason (e.g. a captain both revoking edit
+// access AND removing the uid from the team in quick succession) — blocking
+// the user's own UI on a write that may never succeed is exactly the
+// "lingers before clearing" bug this was reported as. handlingLostAccess
+// still guards against a second snapshot arriving before detach() has
+// actually unsubscribed the listener, from re-entering this branch or
+// falling through to onSnapshotData() on a session that's already
+// mid-teardown. ======
 // ====== Delete an entry doc, first writing a deletionNotice marker so a
 // still-joined live session on this same doc (see createLiveEntrySession's
 // onSnapshot handler below) can detect the deletion and show who did it,
@@ -269,19 +282,31 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
   let sawDocExist = false;
   let unsubscribe = null;
 
+  // Bug fix (real root cause of the kicked-from-team disconnect never
+  // clearing, confirmed against the actual firestore.rules via the Firestore
+  // emulator — not just by re-reading the rule): this used to be a
+  // db.runTransaction() that read the doc first (tx.get()), computed the map
+  // minus this uid, then wrote it back. That read is subject to the READ
+  // rule, which requires isTeamMember(teamId) with NO self-leave carve-out —
+  // isValidSelfLeaveOnly() only ever applies to the WRITE rule. So once this
+  // uid is no longer a team member (kicked), the transaction's own tx.get()
+  // was denied and the whole transaction threw before the write was ever
+  // even evaluated — completely independent of whether the write itself
+  // would have been permitted. A plain targeted update on the specific
+  // "activeEditors.{uid}" field path, using FieldValue.delete(), needs no
+  // read at all: the client never has to know the map's current contents,
+  // Firestore applies the delete server-side, and the WRITE rule (which
+  // isValidSelfLeaveOnly() DOES cover regardless of team membership) is the
+  // only thing evaluated. Confirmed via the emulator: this succeeds and
+  // correctly preserves every OTHER uid's own activeEditors entry, both
+  // while still a team member and after being kicked. ======
   async function removeSelfFromActiveEditors() {
+    console.log(`[live-entry-sync] removeSelfFromActiveEditors: attempting for uid=${uid} on ${docRef.path}`);
     try {
-      await db.runTransaction(async (tx) => {
-        const snap = await tx.get(docRef);
-        if (!snap.exists) return;
-        const data = snap.data();
-        if (!data.activeEditors || !(uid in data.activeEditors)) return;
-        const editors = { ...data.activeEditors };
-        delete editors[uid];
-        tx.update(docRef, { activeEditors: editors });
-      });
+      await docRef.update({ [`activeEditors.${uid}`]: firebase.firestore.FieldValue.delete() });
+      console.log(`[live-entry-sync] removeSelfFromActiveEditors: SUCCEEDED for uid=${uid} on ${docRef.path}`);
     } catch (err) {
-      console.warn('Removing self from activeEditors failed (presence will self-clear once stale):', err);
+      console.warn(`[live-entry-sync] removeSelfFromActiveEditors: FAILED for uid=${uid} on ${docRef.path} - code=${err.code}`, err);
     }
   }
 
@@ -299,6 +324,7 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
       if (detached || handlingLostAccess) return;
       const data = snap.exists ? snap.data() : null;
       if (snap.exists) sawDocExist = true;
+      console.log(`[live-entry-sync] attachListener: snapshot for uid=${uid} on ${docRef.path} - exists=${snap.exists} fromCache=${snap.metadata.fromCache} activeEditors=${data ? JSON.stringify(Object.keys(data.activeEditors || {})) : 'n/a'}`);
 
       // Bug fix (serious regression — delete-then-immediately-recreate at the
       // same deterministic doc ID showed a false "Entry Deleted"): join()'s
@@ -327,13 +353,16 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
 
       if (joined && data && typeof canEditFn === 'function'
         && isEntryCommitted(data) && !canEditFn(data)) {
+        console.log(`[live-entry-sync] attachListener: LOST EDIT ACCESS branch fired for uid=${uid} on ${docRef.path} (entry committed by someone else)`);
         handlingLostAccess = true;
         joined = false;
         stopHeartbeat();
         discardPendingWrites();
-        await removeSelfFromActiveEditors();
         detach();
         if (typeof onLostEditAccess === 'function') onLostEditAccess();
+        // Fire-and-forget: see the comment above this function's signature
+        // for why this is no longer awaited before the callback runs.
+        removeSelfFromActiveEditors();
         return;
       }
 
@@ -359,13 +388,14 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
         joined = false;
         stopHeartbeat();
         discardPendingWrites();
-        // Defense in depth — see the !data fallback branch's own comment
-        // below for why this is now attempted here too, not skipped as
-        // "nothing left to remove it from."
-        await removeSelfFromActiveEditors();
         detach();
         const selfDeleted = !!data.deletionNotice.deletedByUid && data.deletionNotice.deletedByUid === uid;
         if (!selfDeleted && typeof onEntryDeleted === 'function') onEntryDeleted(data.deletionNotice.deletedByName || null);
+        // Defense in depth, fire-and-forget (see this function's own comment
+        // above for why this is no longer awaited before the callback runs)
+        // — attempted even though "the doc's gone, there's nothing left to
+        // remove it from" is usually true; harmless no-op when it is.
+        removeSelfFromActiveEditors();
         return;
       }
       if (joined && !data && sawDocExist && serverConfirmed) {
@@ -389,14 +419,28 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
         joined = false;
         stopHeartbeat();
         discardPendingWrites();
-        await removeSelfFromActiveEditors();
         detach();
         if (typeof onEntryDeleted === 'function') onEntryDeleted(null);
+        // Fire-and-forget — see this function's own comment above for why
+        // this is no longer awaited before the callback runs.
+        removeSelfFromActiveEditors();
         return;
       }
 
       onSnapshotData(data);
-    }, (err) => console.warn('Live entry sync listener error:', err));
+    }, (err) => {
+      // This is the signal for a KICKED-mid-session disconnect (see
+      // forceClosePitLiveSessionForTeam()/forceCloseMatchLiveSessionForTeam(),
+      // pit-scout.js/match-scout.js) — once this uid is off the team, the
+      // READ rule (isTeamMember) stops passing, so instead of one more data
+      // snapshot, this listener just errors out with permission-denied. Logged
+      // here for visibility, but deliberately NOT handled here: this callback
+      // has no reliable way to tell "kicked" apart from a transient network
+      // blip, and handleRemovedFromTeam() (members.js) already reacts to the
+      // real signal (its own watchMyTeams() listener on the TEAM doc, not
+      // this one) faster and more reliably than trying to disambiguate here.
+      console.warn(`[live-entry-sync] attachListener: listener ERROR for uid=${uid} on ${docRef.path} - code=${err.code}`, err);
+    });
   }
 
   function startHeartbeat() {
@@ -460,7 +504,10 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
   // disconnect path) — best-effort: if it fails (e.g. offline), the
   // presence entry just lingers until it goes stale — see file header. ======
   async function leaveActiveEditors() {
-    if (!joined) return;
+    if (!joined) {
+      console.log(`[live-entry-sync] leaveActiveEditors: no-op for uid=${uid} on ${docRef.path} (already not joined)`);
+      return;
+    }
     joined = false;
     stopHeartbeat();
     await removeSelfFromActiveEditors();
@@ -659,6 +706,37 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
     await cancelUndo(fields);
   }
 
+  // ====== Forced disconnect with NO revert attempt at all — for when this
+  // uid's own team membership may already be gone (kicked mid-session; see
+  // pit-scout.js's/match-scout.js's forceClose*LiveSessionForTeam(), called
+  // from handleRemovedFromTeam() in members.js).
+  //
+  // Bug fix history (two real, stacked bugs here, confirmed against the
+  // actual firestore.rules via the Firestore emulator, not just by re-reading
+  // the rule):
+  //  1. This originally called cancelAndLeave() (above). cancelUndo() can
+  //     revert EVERY configured field back to its checkpoint when this uid
+  //     turns out to be the last active editor of an uncommitted draft — a
+  //     write touching more than just activeEditors, which no longer
+  //     qualifies under isValidSelfLeaveOnly(), and every OTHER branch of
+  //     that OR-gated rule requires team membership. Confirmed denied for a
+  //     kicked uid. Switched to this function (which only ever removes this
+  //     uid from activeEditors, nothing else) to fix that.
+  //  2. That alone STILL didn't fix it: leaveActiveEditors() ->
+  //     removeSelfFromActiveEditors() (below) used to be a transaction that
+  //     read the doc first — and that read is denied by the READ rule
+  //     (isTeamMember, no self-leave carve-out) for a kicked uid, so the
+  //     transaction failed before the write was ever evaluated, regardless
+  //     of what write it would have attempted. removeSelfFromActiveEditors()
+  //     itself is now a read-free targeted field delete — see its own
+  //     comment for the fix and how it was verified. ======
+  async function disconnectAndLeave() {
+    console.log(`[live-entry-sync] disconnectAndLeave: called for uid=${uid} on ${docRef.path}`);
+    discardPendingWrites();
+    detach();
+    await leaveActiveEditors();
+  }
+
   // ====== Write one field's value now. No attribution here anymore —
   // lastEditedBy is entirely commit()'s responsibility (see the checkpoint
   // comparison above), not stamped on every keystroke the way it used to
@@ -749,7 +827,7 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
 
   return {
     join, writeField, scheduleWrite, flushAll, setFocusedField, hasPendingWrite,
-    commitAndLeave, cancelAndLeave, detach,
+    commitAndLeave, cancelAndLeave, disconnectAndLeave, detach,
     isJoined: () => joined
   };
 }

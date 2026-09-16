@@ -28,9 +28,14 @@
 
 const MATCH_SCORES_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour — same as getEventSchedule()'s CACHE_TTL_MS
 
-// In-memory session cache — eventCode -> { scoresByNumber, finished }.
-// Deliberately never cleared on event switch (unlike the current* vars
-// below) so switching away and back within the same session is instant.
+// In-memory session cache — "{season}_{eventCode}" -> { scoresByNumber, finished }.
+// Keyed by season as well as event code since FIRST reuses event codes
+// across seasons for recurring events (same reasoning as the Firestore
+// events/{eventCode} doc's `season`/`matchScoresSeason` fields below) — an
+// in-session season switch must not show a stale season's scores for a
+// reused code. Deliberately never cleared on event switch (unlike the
+// current* vars below) so switching away and back within the same session
+// is instant.
 let matchScoresCacheByEvent = {};
 
 // What's currently displayed — mirrors whichever event is selected right
@@ -70,7 +75,8 @@ function onMatchScoresEventSelected(eventCode) {
   currentMatchScoresEventCode = eventCode;
   const myToken = ++matchScoresFetchToken;
 
-  const cached = matchScoresCacheByEvent[eventCode];
+  const season = Number(typeof getSelectedSeason === 'function' ? getSelectedSeason() : null);
+  const cached = matchScoresCacheByEvent[`${season}_${eventCode}`];
   if (cached) {
     applyScoresToDisplay(eventCode, cached.scoresByNumber, cached.finished, myToken);
     return;
@@ -83,12 +89,16 @@ function onMatchScoresEventSelected(eventCode) {
 // shape as getEventSchedule() (first-api.js): check events/{eventCode} for a
 // cached field first, and only hit the external API if that's missing/stale. ======
 async function loadMatchScoresForEvent(eventCode, myToken) {
+  const season = Number(typeof getSelectedSeason === 'function' ? getSelectedSeason() : null);
   try {
     const eventRef = db.collection('events').doc(eventCode);
     const doc = await eventRef.get();
     if (doc.exists) {
       const data = doc.data();
-      if (data.matchScores !== undefined) {
+      // Event codes repeat across seasons (see first-api.js's
+      // cacheEventToFirestore()/getCachedEvent() comments) — matchScoresSeason
+      // guards against serving a prior season's scores for a reused code.
+      if (data.matchScores !== undefined && data.matchScoresSeason === season) {
         const cachedAt = data.matchScoresCachedAt ? data.matchScoresCachedAt.toMillis() : 0;
         const age = Date.now() - cachedAt;
         // A finished event's scores can never change, so its cache never
@@ -96,7 +106,7 @@ async function loadMatchScoresForEvent(eventCode, myToken) {
         // subject to the normal TTL.
         const stillFresh = data.matchScoresFinished === true || age < MATCH_SCORES_CACHE_TTL_MS;
         if (stillFresh) {
-          matchScoresCacheByEvent[eventCode] = { scoresByNumber: data.matchScores, finished: !!data.matchScoresFinished };
+          matchScoresCacheByEvent[`${season}_${eventCode}`] = { scoresByNumber: data.matchScores, finished: !!data.matchScoresFinished };
           applyScoresToDisplay(eventCode, data.matchScores, !!data.matchScoresFinished, myToken);
           return;
         }
@@ -162,8 +172,8 @@ async function fetchAndCacheMatchScores(eventCode, myToken) {
     });
     const finished = !!event?.finished;
 
-    matchScoresCacheByEvent[eventCode] = { scoresByNumber, finished };
-    writeMatchScoresToFirestore(eventCode, scoresByNumber, finished);
+    matchScoresCacheByEvent[`${season}_${eventCode}`] = { scoresByNumber, finished };
+    writeMatchScoresToFirestore(eventCode, scoresByNumber, finished, season);
 
     applyScoresToDisplay(eventCode, scoresByNumber, finished, myToken);
   } catch (err) {
@@ -211,7 +221,7 @@ const RANKING_POINT_CRITERIA = [
 // comment in first-api.js for how that was confirmed against the real
 // rules). In practice the doc always exists by the time this runs (selectEvent()
 // caches name+ftcTeams before schedule/scores are ever fetched). ======
-async function writeMatchScoresToFirestore(eventCode, scoresByNumber, finished) {
+async function writeMatchScoresToFirestore(eventCode, scoresByNumber, finished, season) {
   try {
     const eventRef = db.collection('events').doc(eventCode);
     const doc = await eventRef.get();
@@ -219,6 +229,7 @@ async function writeMatchScoresToFirestore(eventCode, scoresByNumber, finished) 
     await eventRef.set({
       matchScores: scoresByNumber,
       matchScoresFinished: finished,
+      matchScoresSeason: season,
       matchScoresCachedAt: firebase.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
   } catch (err) {

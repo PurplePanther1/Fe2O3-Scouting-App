@@ -6,7 +6,11 @@
   <meta name="theme-color" content="#1a1a2e" />
   <meta name="description" content="Fe2O3 FTC Scouting App" />
   <link rel="manifest" href="/manifest.json" />
-  <link rel="apple-touch-icon" href="/icons/icon-192.svg" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Fe2O3 Scout" />
   <title>Fe2O3 Scouting</title>
   <link rel="stylesheet" href="/css/style.css" />
 </head>
@@ -170,7 +174,7 @@
       <!-- Join -->
       <div id="tab-join" class="tab-content active">
         <p class="help-text">Enter the join code shared by your team lead.</p>
-        <input type="text" id="input-join-code" placeholder="e.g. FE2O3-ABC" maxlength="12" />
+        <input type="text" id="input-join-code" placeholder="e.g. THU-3F7K" maxlength="12" />
         <button id="btn-join-team" class="btn btn-primary">Join Team</button>
         <p id="join-error" class="error-message"></p>
       </div>
@@ -178,7 +182,7 @@
       <!-- Create -->
       <div id="tab-create" class="tab-content">
         <p class="help-text">Create a new scouting team. A join code will be generated.</p>
-        <input type="text" id="input-team-name" placeholder="Team name (e.g. Fe2O3)" maxlength="50" />
+        <input type="text" id="input-team-name" placeholder="Team name (e.g. Thunderbots)" maxlength="50" />
         <button id="btn-create-team" class="btn btn-primary">Create Team</button>
         <div id="join-code-created" class="join-code-card hidden">
           <p class="help-text" style="margin-bottom:8px">✅ Team created! Your join code:</p>
@@ -432,7 +436,7 @@
           <p class="help-text" style="margin-bottom:12px">You'll keep your membership on your other team(s) too.</p>
 
           <div style="display:flex; gap:8px; align-items:flex-start">
-            <input type="text" id="input-join-another-team-code" placeholder="Join code, e.g. FE2O3-AB12" maxlength="20" style="margin-bottom:0; text-transform:uppercase" />
+            <input type="text" id="input-join-another-team-code" placeholder="Join code, e.g. THU-3F7K" maxlength="20" style="margin-bottom:0; text-transform:uppercase" />
             <button id="btn-join-another-team" class="btn btn-primary" style="width:auto; white-space:nowrap">Join</button>
           </div>
           <p id="join-another-team-error" class="error-message"></p>

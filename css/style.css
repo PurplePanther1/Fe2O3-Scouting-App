@@ -831,6 +831,7 @@ input[type="password"]::placeholder {
 .member-item {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   padding: 10px 12px;
   background: var(--surface);
@@ -844,10 +845,11 @@ input[type="password"]::placeholder {
   height: 32px;
   border-radius: 50%;
   object-fit: cover;
+  flex-shrink: 0;
 }
 
 .member-item .member-info {
-  flex: 1;
+  flex: 1 1 140px;
   min-width: 0;
 }
 
@@ -950,6 +952,7 @@ input[type="password"]::placeholder {
   border-radius: 4px;
   background: var(--primary);
   color: #fff;
+  flex-shrink: 0;
 }
 
 .member-item .member-role-badge.member {
@@ -963,6 +966,7 @@ input[type="password"]::placeholder {
   white-space: nowrap;
   font-size: 0.75rem;
   padding: 4px 10px;
+  flex-shrink: 0;
 }
 
 /* ====== Team List ====== */
@@ -975,6 +979,7 @@ input[type="password"]::placeholder {
 .team-item {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
   padding: 10px 12px;
   background: var(--surface);

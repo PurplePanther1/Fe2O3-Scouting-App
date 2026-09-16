@@ -15,11 +15,12 @@ if ('scrollRestoration' in history) {
 }
 window.scrollTo(0, 0);
 
-// Service Worker registration (for PWA — will be implemented in a later step)
+// Service Worker registration — enables offline app-shell fallback + installability
 if ('serviceWorker' in navigator) {
-  // Registration will be added when we build the PWA step
-  // navigator.serviceWorker.register('/sw.js');
-  console.log('ServiceWorker not yet registered — PWA step coming later.');
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/scouting/sw.js', { scope: '/scouting/' })
+      .catch((err) => console.error('ServiceWorker registration failed:', err));
+  });
 }
 
 // ====== Global Tab Navigation Handler ======

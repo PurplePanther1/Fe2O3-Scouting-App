@@ -267,7 +267,16 @@ async function getEventSchedule(eventCode, season) {
 
     if (doc.exists) {
       const data = doc.data();
-      if (data.schedule !== undefined) {
+      // scheduleSeason (not the doc's main `season`) since the schedule can
+      // be cached in a separate call than name/ftcTeams. Same cross-season
+      // reasoning as getCachedEvent() above: an event code reused in a later
+      // season must not serve back an earlier season's schedule — but only
+      // enforced when a caller passes `season` explicitly; callers that
+      // intentionally want whatever's cached for a possibly-historical event
+      // (e.g. sheets-export.js validating match numbers for past exports)
+      // omit it and keep the old unscoped behavior.
+      const seasonMatches = !season || data.scheduleSeason === season;
+      if (data.schedule !== undefined && seasonMatches) {
         const cachedAt = data.scheduleCachedAt ? data.scheduleCachedAt.toMillis() : 0;
         const age = Date.now() - cachedAt;
         if (age < CACHE_TTL_MS) {
@@ -279,7 +288,8 @@ async function getEventSchedule(eventCode, season) {
       }
     }
 
-    const result = await callWorker(`/schedule?eventCode=${encodeURIComponent(eventCode)}&season=${encodeURIComponent(season || getSelectedSeason())}`);
+    const effectiveSeason = season || getSelectedSeason();
+    const result = await callWorker(`/schedule?eventCode=${encodeURIComponent(eventCode)}&season=${encodeURIComponent(effectiveSeason)}`);
     const schedule = result.schedule || [];
     console.log(`[schedule] fetched ${schedule.length} match(es) for ${eventCode} from worker:`, schedule);
 
@@ -287,6 +297,7 @@ async function getEventSchedule(eventCode, season) {
       try {
         await eventRef.set({
           schedule,
+          scheduleSeason: effectiveSeason,
           scheduleCachedAt: firebase.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
       } catch (err) {
@@ -305,7 +316,14 @@ async function getEventSchedule(eventCode, season) {
 }
 
 // ====== Cache event data to Firestore ======
-async function cacheEventToFirestore(eventData, ftcTeams) {
+// Event codes are only unique WITHIN a season — FIRST reuses the same code
+// year over year for recurring events (e.g. a championship at the same
+// venue), so the events/{code} doc is tagged with the season it was cached
+// for (`season`) and getCachedEvent() below refuses to serve a doc back for
+// a different season than the one it was cached under. Without this, a
+// season with no published roster yet would silently show the PRIOR
+// season's roster for the same event code instead of "not yet confirmed."
+async function cacheEventToFirestore(eventData, ftcTeams, season) {
   if (!eventData || !eventData.code) return;
 
   console.time('[Timing] Firestore cache write (cacheEventToFirestore)');
@@ -325,6 +343,7 @@ async function cacheEventToFirestore(eventData, ftcTeams) {
         country: t.country || '',
         opr: typeof t.opr === 'number' ? t.opr : null
       })),
+      season: season || getSelectedSeason(),
       cachedAt: firebase.firestore.FieldValue.serverTimestamp()
     }, { merge: true });
     console.timeEnd('[Timing] Firestore cache write (cacheEventToFirestore)');
@@ -336,13 +355,24 @@ async function cacheEventToFirestore(eventData, ftcTeams) {
 }
 
 // ====== Load cached event from Firestore ======
-async function getCachedEvent(eventCode) {
+// `season`, when given, is validated against the doc's own `season` field
+// (see cacheEventToFirestore() above) — a mismatch (including a doc cached
+// before this field existed, i.e. `season` undefined) is treated as a cache
+// miss rather than risking another season's roster being reused. Callers
+// that intentionally want whatever's cached regardless of season (e.g.
+// sheets-export.js building a name map for a past export's own historical
+// event) simply omit the argument, preserving the old behavior.
+async function getCachedEvent(eventCode, season) {
   console.time('[Timing] Firestore cache read (getCachedEvent)');
   try {
     const doc = await db.collection('events').doc(eventCode).get();
     console.timeEnd('[Timing] Firestore cache read (getCachedEvent)');
     if (doc.exists) {
       const data = doc.data();
+      if (season && data.season !== season) {
+        console.log(`[cache] events/${eventCode} was cached for season ${data.season}, not requested season ${season} — treating as a miss`);
+        return null;
+      }
       // Normalize ftcTeams if stored as numbers or objects
       if (data.ftcTeams) {
         data.ftcTeams = data.ftcTeams.map(t => {
@@ -684,7 +714,7 @@ async function selectEvent(eventData) {
   try {
     // Try cache first
     let ftcTeams = null;
-    const cached = await getCachedEvent(eventData.code);
+    const cached = await getCachedEvent(eventData.code, getSelectedSeason());
     if (cached && cached.ftcTeams && cached.ftcTeams.length > 0 && cached.ftcTeams.some(t => t.name && t.name.trim() !== '')) {
       ftcTeams = cached.ftcTeams.map(t => typeof t === 'number' ? { teamNumber: t, name: '' } : t);
     } else {
@@ -777,7 +807,7 @@ async function selectEvent(eventData) {
       }
 
       // Cache result with populated names
-      await cacheEventToFirestore(eventData, ftcTeams);
+      await cacheEventToFirestore(eventData, ftcTeams, getSelectedSeason());
     }
 
     hideLoading();
@@ -1561,7 +1591,16 @@ function renderMatchTeamList(teams) {
     item.dataset.teamNumber = team.teamNumber;
 
     const leftGroup = document.createElement('div');
-    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0;';
+    // flex: 1 1 160px (not flex:1, i.e. flex-basis 0) — a 0 basis never
+    // participates in this row's flex-wrap: it just keeps shrinking toward
+    // nothing to stay on the same line as the non-shrinking button group,
+    // squeezing team-number/team-name/OPR into a sliver so narrow their own
+    // wrapped lines visually run under the buttons (mobile bug: "+ Match
+    // Scout" overlapping the team name at 375-414px). A real basis gives the
+    // row's wrap something concrete to compare against, so the button group
+    // drops to its own line below once there's genuinely no room, same
+    // pattern as .member-item's .member-info (css/style.css).
+    leftGroup.style.cssText = 'display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; flex: 1 1 160px; min-width:0;';
 
     const numSpan = document.createElement('span');
     numSpan.className = 'team-number';
@@ -1733,10 +1772,10 @@ function renderPitTeamList(teams) {
     item.style.cssText = 'display:flex; flex-direction:column; align-items:stretch; gap:4px;';
 
     const topRow = document.createElement('div');
-    topRow.style.cssText = 'display:flex; align-items:center; justify-content:space-between; gap:8px;';
+    topRow.style.cssText = 'display:flex; align-items:center; flex-wrap:wrap; justify-content:space-between; gap:8px;';
 
     const leftGroup = document.createElement('div');
-    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0;';
+    leftGroup.style.cssText = 'display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; flex:1; min-width:0;';
 
     const numSpan = document.createElement('span');
     numSpan.className = 'team-number';
@@ -1986,6 +2025,16 @@ document.getElementById('select-season').addEventListener('change', async () => 
   // Clear all previous state immediately
   clearSelectedEvent();
   document.getElementById('input-event-search').value = '';
+
+  // Persist this team's own season choice (session-state.js's perTeam
+  // entry) so it survives a refresh instead of resetting back to the
+  // current season every time — bug fix, this was never saved anywhere
+  // before. clearSelectedEvent() above already saves its own
+  // selectedEvent-is-now-null change, so this would happen anyway on the
+  // NEXT save regardless, but saving explicitly here means the season
+  // itself is never transiently unpersisted between this change and
+  // whatever happens to trigger the next save.
+  if (typeof saveSessionState === 'function') saveSessionState();
 
   // If we don't have this season cached yet, pre-load it in the background
   if (!eventCache[season]) {

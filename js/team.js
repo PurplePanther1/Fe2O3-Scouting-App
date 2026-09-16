@@ -87,6 +87,39 @@ function resetDashboardOnEnterTeam() {
   if (typeof clearSelectedEvent === 'function') {
     clearSelectedEvent();
   }
+
+  // Bug fix: matchViewMode (session-state.js's perTeam.matchViewMode,
+  // match-schedule-view.js) has the exact same gap season did — a
+  // module-level variable this path never resets, so a brand-new team just
+  // inherited whatever view a PRIOR account/team's session in this same tab
+  // last left it on instead of MATCH_VIEW_DEFAULT.
+  if (typeof matchViewMode !== 'undefined' && typeof MATCH_VIEW_DEFAULT !== 'undefined') {
+    matchViewMode = MATCH_VIEW_DEFAULT;
+    if (typeof applyMatchViewMode === 'function') applyMatchViewMode();
+  }
+
+  // Bug fix: the season selector (session-state.js's perTeam.season) was
+  // missing from this reset entirely — a genuinely brand-new team has no
+  // saved season of its own, but this path never calls
+  // restorePerTeamEventState() (see this function's own comment for why),
+  // so nothing here ever told the <select> to fall back to current either.
+  // It just kept showing whatever a PRIOR account's session in this same
+  // browser tab had it on — confirmed reproducible via delete account ->
+  // create a new one, still in the same tab: the season silently carried
+  // over from the deleted account instead of resetting. Same "current
+  // season" fallback restorePerTeamEventState() uses for a team with no
+  // saved season of its own.
+  const seasonSelect = document.getElementById('select-season');
+  if (seasonSelect && typeof getCurrentFtcSeason === 'function') {
+    const currentSeason = String(getCurrentFtcSeason());
+    console.log(`[team] resetDashboardOnEnterTeam: resetting season selector from ${seasonSelect.value} to current (${currentSeason})`);
+    if (seasonSelect.value !== currentSeason) {
+      seasonSelect.value = currentSeason;
+      if (typeof eventCache !== 'undefined' && !eventCache[currentSeason] && typeof ensureEventsLoaded === 'function') {
+        ensureEventsLoaded(currentSeason).catch(() => {});
+      }
+    }
+  }
 }
 
 // ====== Derive a join-code prefix from the team's own name — first word,

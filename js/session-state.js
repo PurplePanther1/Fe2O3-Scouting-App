@@ -43,7 +43,15 @@ function saveSessionState() {
       perTeam[currentTeamId] = {
         selectedEvent: eventToSave,
         searchText: searchInput ? searchInput.value : '',
-        matchViewMode: (typeof matchViewMode !== 'undefined') ? matchViewMode : undefined
+        matchViewMode: (typeof matchViewMode !== 'undefined') ? matchViewMode : undefined,
+        // Per-team, same as selectedEvent/searchText above — the season
+        // selector otherwise reset to the current season on every refresh
+        // (populateSeasonDropdown() always re-selects "current" with nothing
+        // to restore from). Inherits the exact same reset-on-sign-out/
+        // delete-account/leave-team guarantees as the rest of this object for
+        // free, since it's just another field on it — see
+        // restorePerTeamEventState() below for the restore side.
+        season: (typeof getSelectedSeason === 'function') ? getSelectedSeason() : undefined
       };
     }
 
@@ -132,8 +140,48 @@ async function restorePerTeamEventState() {
   const teamEntry = (saved && saved.perTeam && typeof currentTeamId !== 'undefined' && currentTeamId)
     ? saved.perTeam[currentTeamId]
     : null;
+  console.log(`[session-state] restorePerTeamEventState: currentTeamId=${typeof currentTeamId !== 'undefined' ? currentTeamId : 'undefined'}, teamEntry=`, teamEntry ? JSON.stringify(teamEntry) : teamEntry, '| select-season element present =', !!document.getElementById('select-season'), '| option count =', document.getElementById('select-season') ? document.getElementById('select-season').options.length : 'n/a');
 
   const searchInput = document.getElementById('input-event-search');
+
+  // Restore this team's saved season selection BEFORE anything below that
+  // depends on it — selectEvent()/doSearch() both read getSelectedSeason()
+  // fresh when they run. Falls back to whatever's already selected (the
+  // current season — populateSeasonDropdown() always pre-selects that) if
+  // this team has never had one saved, or the saved value isn't one of the
+  // dropdown's actual <option>s (e.g. outside populateSeasonDropdown()'s
+  // rolling 8-year window) — set .value to a nonexistent option is a no-op
+  // in every browser, but the explicit hasOption check keeps this from ever
+  // calling ensureEventsLoaded() for a season the dropdown doesn't offer.
+  // Deliberately sets .value directly rather than dispatching the select's
+  // own 'change' event — that handler clears the just-about-to-be-restored
+  // event/search state, which is exactly what a real user picking a
+  // different season should do, but not what restoring a previously-saved
+  // season/event/search combination together should do.
+  // Unconditionally resolved to saved-or-default (never left at whatever a
+  // PREVIOUSLY active team happened to have it on) — same pattern as
+  // matchViewMode just below, for the same reason: switching to a team with
+  // no saved season of its own must show the current season, not carry over
+  // a different team's selection.
+  const seasonSelect = document.getElementById('select-season');
+  if (seasonSelect) {
+    const savedSeason = (teamEntry && teamEntry.season) ? String(teamEntry.season) : null;
+    const hasOption = !!savedSeason && Array.from(seasonSelect.options).some((opt) => opt.value === savedSeason);
+    const targetSeason = hasOption ? savedSeason
+      : String(typeof getCurrentFtcSeason === 'function' ? getCurrentFtcSeason() : seasonSelect.value);
+    console.log(`[session-state] restorePerTeamEventState: season restore - savedSeason=${savedSeason}, hasOption=${hasOption}, currentSelectValue=${seasonSelect.value}, targetSeason=${targetSeason}`);
+    if (seasonSelect.value !== targetSeason) {
+      seasonSelect.value = targetSeason;
+      if (typeof eventCache !== 'undefined' && !eventCache[targetSeason] && typeof ensureEventsLoaded === 'function') {
+        try {
+          await ensureEventsLoaded(targetSeason);
+        } catch (err) {
+          // Silently fail — selectEvent()/doSearch() below will surface any
+          // real error through their own existing error handling.
+        }
+      }
+    }
+  }
 
   // Restore the match-based view's team-vs-match toggle BEFORE selectEvent()
   // below — selectEvent() applies matchViewMode as a side effect of loading

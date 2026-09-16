@@ -2636,7 +2636,7 @@ function watchMyTeams() {
         renderAccountTeamsList();
       }
     }, (err) => {
-      console.warn(`myTeams listener error for team ${teamId}:`, err);
+      console.warn(`[auth] watchMyTeams: listener error for team ${teamId} - code=${err.code}`, err);
       // A permission-denied error here means this uid is no longer in this
       // team's `members` — the only way that happens to a previously-
       // working listener (kicked, or removed from a different tab/device).
