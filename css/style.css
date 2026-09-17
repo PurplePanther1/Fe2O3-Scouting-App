@@ -442,6 +442,55 @@ input[type="password"]::placeholder {
   display: block;
 }
 
+/* Scouting sub-tab bar (#scouting-subtabs) holds 5 tabs (Team Info/Pit/Match/
+   Pinned/Compare) — at phone widths their combined min-content text width
+   (buttons don't have white-space:nowrap, but each still has a non-zero
+   min-content floor from its longest word) exceeds the bar's width. The
+   shared .tabs/.tab rules above assume everything always fits: .tab's
+   flex:1/flex-basis:0% shrinks tabs toward that floor but no further, and
+   .tabs' overflow:hidden then silently clips whatever doesn't fit — with no
+   scrollbar (overflow:hidden, not auto), the clipped tabs (Pinned Events,
+   Compare) become genuinely unreachable rather than just visually cramped.
+   Scope the fix to this bar only: the other .tabs bars (auth/dashboard/
+   builder-type) all have 2 tabs that already fit and should keep their
+   current equal-width look, not switch to scroll-and-shrink-to-content. */
+#scouting-subtabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+}
+
+#scouting-subtabs .tab {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* Desktop/tablet regression from the mobile fix above: flex:0 0 auto made
+   the bar scroll-at-natural-width at EVERY viewport, including ones with
+   plenty of room, so the tabs stopped filling the bar edge-to-edge the way
+   every other .tabs bar in the app still does. Investigated (not guessed)
+   breakpoint: the 5 tabs' own natural (nowrap) content widths sum to 594px;
+   measured against the real deployed page — #scouting-subtabs sits inside
+   BOTH .screen's own 20px padding AND .page-shell's 20px padding, which
+   stack (40px/side) and subtract from the bar's available width — the bar
+   first fits all 5 at natural width with no scrolling needed at a 675px
+   viewport (674px still needed to scroll). 700px keeps a ~25px margin above
+   that exact threshold for scrollbar-width/sub-pixel variance across
+   browsers/OS without meaningfully changing where the switchover lands. At
+   or above it, restore the original edge-to-edge flex:1 fill (this bar
+   never needed to shrink OR scroll at these widths before the mobile fix);
+   below it, keep the scroll-at-natural-width behavior from that fix. */
+@media (min-width: 700px) {
+  #scouting-subtabs {
+    overflow-x: visible;
+  }
+
+  #scouting-subtabs .tab {
+    flex: 1;
+  }
+}
+
 /* ====== Auth Forms ====== */
 .auth-form input {
   margin-bottom: 12px;
@@ -1588,6 +1637,30 @@ input[type="password"]::placeholder {
   font-size: 1.3rem;
   font-weight: 700;
   color: var(--text);
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 2px 4px;
+}
+
+.counter-display:hover,
+.counter-display:focus {
+  background: var(--surface);
+  outline: none;
+}
+
+/* Replaces .counter-display for the duration of a direct-edit (renderCounter's
+   beginEdit(), dynamic-form.js) — same footprint/typography so the swap
+   doesn't visibly shift the +/- buttons on either side. */
+.counter-edit-input {
+  width: 64px;
+  text-align: center;
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--primary);
+  border-radius: 6px;
+  padding: 2px 4px;
 }
 
 .button-group-field {
@@ -1622,6 +1695,28 @@ input[type="password"]::placeholder {
 .button-group-option:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* ====== Stopwatch helper for a `number` field (field.stopwatch: true,
+   dynamic-form.js's wrapNumberWithStopwatch()) — the plain number input on
+   top, Start/Stop/Reset + elapsed-time readout below it. ====== */
+.stopwatch-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.stopwatch-btn {
+  width: auto;
+}
+
+.stopwatch-time {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .pit-modal-actions {
@@ -2055,4 +2150,59 @@ input[type="password"]::placeholder {
 .static-page-actions .btn {
   width: auto;
   text-decoration: none;
+}
+
+/* ====== Floating feedback button (#screen-main only — see its own HTML
+   comment) ====== */
+.feedback-fab {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 18px;
+  border: none;
+  border-radius: 999px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  transition: background 0.2s;
+}
+
+.feedback-fab:hover {
+  background: var(--primary-hover);
+}
+
+/* Icon-only on narrow (phone) widths — a full "💬 Feedback" pill is wide
+   enough to crowd whatever's scrolled beneath it on a phone screen; the
+   label is dropped, not the whole button, matching a standard FAB. */
+@media (max-width: 480px) {
+  .feedback-fab {
+    padding: 14px;
+    font-size: 1.2rem;
+  }
+
+  .feedback-fab-label {
+    display: none;
+  }
+}
+
+/* ====== Feedback attachment dropzone (drag-and-drop + paste target,
+   js/feedback.js) — a dashed border that highlights on drag-over, same
+   affordance convention as every OS-level file drop target. ====== */
+.feedback-dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.feedback-dropzone.drag-over {
+  border-color: var(--primary);
+  background: var(--surface);
 }

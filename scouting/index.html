@@ -669,6 +669,13 @@
       </div>
 
     </div>
+
+    <!-- Floating feedback button — scoped to #screen-main (post-sign-in
+         dashboard only) by living inside it, same reasoning #screen-main's
+         own .active display:block rule already relies on for every other
+         child here: display:none on a hidden ancestor hides this regardless
+         of its own position:fixed. -->
+    <button type="button" id="btn-open-feedback" class="feedback-fab" title="Send Feedback" aria-label="Send Feedback">💬<span class="feedback-fab-label">Feedback</span></button>
   </section>
 
   <!-- ====== Pit Scouting Modal ====== -->
@@ -917,14 +924,13 @@
         <p class="help-text" style="margin-bottom:16px">
           Add, edit, reorder, or remove fields. Changes affect all team members immediately.
         </p>
-        <p id="builder-season-label" class="help-text" style="margin-bottom:8px; font-weight:600"></p>
-        <!-- Shown only when this season/type has no saved config yet (wishlist item 26) -->
-        <div id="builder-fresh-season-banner" class="hidden" style="margin-bottom:16px; padding:10px 12px; background:var(--surface); border:1px solid var(--border); border-radius:8px">
-          <p id="builder-fresh-season-text" class="help-text" style="margin:0 0 8px 0"></p>
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap">
-            <select id="builder-copy-season-select" style="flex:1; min-width:160px"></select>
-            <button id="btn-builder-copy-season" class="btn btn-outline btn-small">Copy Fields</button>
-          </div>
+        <!-- Season being edited — defaults to the app's globally-selected season on open,
+             but is independently switchable here so a captain can build/maintain a past
+             season's form (or hop between seasons) without leaving the builder to change
+             the app's main season selector first. -->
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap">
+          <label for="builder-season-select" class="help-text" style="font-weight:600; margin:0">Editing season:</label>
+          <select id="builder-season-select" class="awards-season-select" style="flex:1; min-width:160px; padding:10px 30px 10px 12px; font-size:0.95rem"></select>
         </div>
         <div id="builder-field-list" class="builder-field-list"></div>
         <button id="btn-builder-add-field" class="btn btn-outline" style="margin-top:12px; width:100%">+ Add Field</button>
@@ -1311,6 +1317,61 @@
     </div>
   </div>
 
+  <!-- Feedback modal — opened by the floating feedback button (#screen-main
+       only, see that button's own comment). Writes straight to the
+       feedback/{autoId} collection (js/feedback.js); no in-app viewer, Tim
+       reviews submissions via the Firestore console. -->
+  <div id="feedback-modal" class="modal-overlay hidden">
+    <div id="feedback-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>Send Feedback</h3>
+        <button id="btn-feedback-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div style="padding:16px 24px 24px">
+        <div class="pit-field">
+          <label for="feedback-category">Category</label>
+          <select id="feedback-category">
+            <option value="">Select a category...</option>
+            <option value="Bug Report">Bug Report</option>
+            <option value="Feature Request">Feature Request</option>
+            <option value="General Feedback">General Feedback</option>
+            <option value="Positive Feedback">Positive Feedback</option>
+            <option value="Beta Testing">Beta Testing</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div class="pit-field">
+          <label for="feedback-message">Message</label>
+          <textarea id="feedback-message" rows="5" placeholder="What's on your mind?"></textarea>
+        </div>
+        <div class="pit-field">
+          <label for="feedback-email">Your email (optional)</label>
+          <input type="email" id="feedback-email" placeholder="you@example.com" />
+          <p class="help-text" style="margin-top:4px">So I can follow up if this gets addressed.</p>
+        </div>
+        <div class="pit-field">
+          <label>Attachment (optional)</label>
+          <div id="feedback-attachment-dropzone" class="feedback-dropzone">
+            <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap">
+              <button type="button" id="btn-feedback-attach" class="btn btn-small btn-outline">Add Screenshot</button>
+              <button type="button" id="btn-feedback-remove-attachment" class="btn btn-small btn-outline hidden">Remove Screenshot</button>
+            </div>
+            <input type="file" id="input-feedback-attachment" accept="image/png, image/jpeg, image/gif, image/webp" class="hidden" />
+            <p class="help-text" style="margin:8px 0 0">JPEG, PNG, GIF, or WEBP — max 5MB. Drag & drop or paste an image here too.</p>
+            <img id="feedback-attachment-preview" src="" alt="" class="hidden" style="max-width:100%; max-height:180px; border-radius:8px; border:1px solid var(--border); margin-top:8px" />
+          </div>
+        </div>
+        <p id="feedback-error" class="error-message"></p>
+        <p id="feedback-success" class="success-message"></p>
+        <div class="pit-modal-actions" style="margin-top:20px">
+          <button type="button" id="btn-feedback-cancel" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-feedback-submit" class="btn btn-primary">Submit</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Loading overlay -->
   <div id="loading-overlay" class="loading-overlay hidden">
     <div class="spinner"></div>
@@ -1353,6 +1414,7 @@
   <script src="/js/app.js"></script>
   <script src="/js/sheets-export.js"></script>
   <script src="/js/pit-vs-match.js"></script>
+  <script src="/js/feedback.js"></script>
   <script src="/js/delete-account.js"></script>
 </body>
 </html>

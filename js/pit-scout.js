@@ -331,6 +331,29 @@ async function commitPitScoutForm() {
       await currentPitLiveSession.commitAndLeave(currentPitFields);
     } catch (err) {
       console.error('Failed to save pit scouting entry:', err);
+      // Bug fix: someone else deleted this entry (deleteEntryWithNotice)
+      // between this session opening it and this Done click — commit()
+      // (live-entry-sync.js) now detects that inside its own transaction
+      // instead of silently recreating an empty stub, but that leaves this
+      // click with no visible error unless handled here too. Same popup
+      // onEntryDeleted shows for the "listener catches it first" race — this
+      // is just the other ordering, where the delete fully lands before this
+      // commit's own read rather than before the next snapshot. Guard against
+      // showing it twice: if that listener race already fired first, it's
+      // already closed pit-modal by the time this catch runs.
+      if (err && err.code === 'entry-deleted') {
+        const modalEl = document.getElementById('pit-modal');
+        if (modalEl && !modalEl.classList.contains('hidden')) {
+          closePitScoutFormUI();
+          if (typeof showNoticeModal === 'function') {
+            showNoticeModal({
+              title: 'Entry Deleted',
+              message: `This entry was deleted by ${err.deletedByName || 'another editor'} while you had it open. Your changes were not saved.`
+            });
+          }
+        }
+        return;
+      }
       errorEl.textContent = err && err.code === 'permission-denied'
         ? 'Permission denied: you no longer have permission to save this entry (you may have been removed from the team, or your permissions changed). Please refresh and try again.'
         : 'Failed to save. Please check your connection and try again.';

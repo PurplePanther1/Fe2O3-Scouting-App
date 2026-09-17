@@ -2085,18 +2085,32 @@ async function handleAuthenticatedUser(user) {
     const removedTeamNames = removedTeams.map(pt => pt.name || 'a team');
     setStoredKnownTeams(user.uid, teams.map(t => ({ id: t.id, name: t.name || '' })));
 
+    // This account lost access to each of these teams' Account Activity tabs
+    // the moment membership ended — delete that tab (every entry with this
+    // teamId) so any stale team-specific notices (permission changes, etc.
+    // from while still a member) don't linger unreadably. Fire-and-forget,
+    // same reasoning as the self-write below.
+    if (typeof deleteActivityLogTeamTab === 'function') {
+      removedTeams.forEach(pt => {
+        deleteActivityLogTeamTab(user.uid, pt.id);
+      });
+    }
+
     // Self-write an activity log entry for each team found missing here —
     // this is the "next login" detection point (the other is the live path,
     // handleRemovedFromTeam() in members.js, for a removal that happens
     // while the app is already open). Worded neutrally, same as the notice
     // modal below — this signal can't tell a kick apart from a self-initiated
-    // leave on another device, so it never says "kicked." Fire-and-forget:
-    // shouldn't block the login flow.
+    // leave on another device, so it never says "kicked." Written to the
+    // GENERAL tab (teamId: null), not this team's own tab — that tab is being
+    // deleted right above, and writing this notice into it would create it
+    // there only to have it erased (or never seen at all, if the delete above
+    // resolves first). Fire-and-forget: shouldn't block the login flow.
     if (typeof logActivitySelf === 'function') {
       removedTeams.forEach(pt => {
         logActivitySelf({
           type: 'kicked',
-          teamId: pt.id,
+          teamId: null,
           teamName: pt.name || 'this team',
           message: `You're no longer a member of "${pt.name || 'this team'}".`
         });

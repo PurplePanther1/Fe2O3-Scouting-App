@@ -532,10 +532,33 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
   //    (always called right after, via commitAndLeave). There's no
   //    per-editor undo state left to reset here now that cancelUndo() is
   //    last-editor-triggered rather than per-user (see file header). ======
+  // Bug fix: this used to read the doc and, if it no longer existed, just
+  // proceeded anyway — tx.set(docRef, update, {merge:true}) below silently
+  // RECREATES a doc that someone else just deleted out from under this
+  // session, as a near-empty stub (every checkpoint field null, since
+  // there's no surviving data left to read it from). No error, no popup —
+  // Done would appear to succeed while quietly resurrecting a corrupted
+  // shell of the entry someone else just deleted. The doc can also still
+  // exist but be mid-delete (deleteEntryWithNotice writes deletionNotice
+  // BEFORE its own docRef.delete() — see that function's own comment) —
+  // committing onto it would write a real checkpoint onto a doc about to
+  // vanish a moment later. Both cases now throw a distinguishable error
+  // instead of writing anything, so the caller (commitPitScoutForm/
+  // commitMatchScoutForm) can show the exact same "Entry Deleted" popup
+  // this same deletion already shows a still-attached listener via
+  // onEntryDeleted — this is just the other race window, where the delete
+  // fully lands before THIS commit's own transaction reads the doc, rather
+  // than before the listener's next snapshot. ======
   async function commit(fields) {
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(docRef);
-      const data = snap.exists ? snap.data() : {};
+      if (!snap.exists || (snap.data() || {}).deletionNotice) {
+        const err = new Error('This entry was deleted before this save could land.');
+        err.code = 'entry-deleted';
+        err.deletedByName = (snap.exists && snap.data().deletionNotice && snap.data().deletionNotice.deletedByName) || null;
+        throw err;
+      }
+      const data = snap.data();
       const priorCheckpoint = data.checkpoint || null;
       const newCheckpoint = {};
       fields.forEach((f) => { newCheckpoint[f.id] = (data[f.id] != null) ? data[f.id] : null; });

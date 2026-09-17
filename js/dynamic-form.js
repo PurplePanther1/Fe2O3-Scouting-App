@@ -11,114 +11,98 @@
 // one exists, so existing teams' already-configured forms aren't silently
 // reset. See loadSeasonScopedFormConfig() below.
 
-// ====== Default field configuration (matches original hardcoded form) ======
-const DEFAULT_PIT_FIELDS = [
-  {
-    id: 'driveType',
-    label: 'Drive Type',
-    type: 'dropdown',
-    required: true,
-    options: ['Tank (2-motor, left/right)', 'Mecanum', 'Swerve', 'X-Drive / Omni', 'H-Drive', 'Other'],
-    sortOrder: 0,
-    showInPreview: true
-  },
-  {
-    id: 'autoCapability',
-    label: 'Auto Capability',
-    type: 'dropdown',
-    required: false,
-    options: ['None (park only)', 'Basic (1 preload + park)', 'Intermediate (scoring + park)', 'Advanced (multi-cycle auto)', 'Custom / Hybrid'],
-    sortOrder: 1,
-    showInPreview: true
-  },
-  {
-    id: 'claimedAvgAutoScore',
-    label: 'Claimed Avg Auto Score',
-    type: 'number',
-    required: false,
-    sortOrder: 2,
-    showInPreview: true
-  },
-  {
-    id: 'claimedAvgTeleopScore',
-    label: 'Claimed Avg Teleop Score',
-    type: 'number',
-    required: false,
-    sortOrder: 3,
-    showInPreview: true
-  },
-  {
-    id: 'claimedCycleTime',
-    label: 'Claimed Cycle Time (seconds)',
-    type: 'number',
-    required: false,
-    sortOrder: 4,
-    showInPreview: true
-  },
-  {
-    id: 'notes',
-    label: 'Notes',
-    type: 'textarea',
-    required: false,
-    sortOrder: 5,
-    showInPreview: true
-  }
+// ====== Default field configuration is SEASON-SCOPED, not global — a game
+// changes every year, so the "no custom config yet" fallback has to change
+// with it. Two tiers:
+//   - GENERIC_*_FIELDS: the original game-agnostic field set (predates any
+//     season-specific defaults), used for every season with no more specific
+//     entry below.
+//   - DECODE_*_FIELDS: the 2025 season's (2025-2026, DECODE) field set,
+//     rebuilt to spec this round (an earlier round's version never actually
+//     landed in production Firestore, and a still-earlier attempt this round
+//     wrote it under the WRONG season key, "2026" — the 2026-2027 season is
+//     a different, not-yet-named game — before being moved to "2025", the
+//     season key confirmed via the app's own FTC Events API game-name lookup,
+//     first-api.js's ensureSeasonGameNameLoaded()).
+// SEASON_DEFAULT_PIT_FIELDS/SEASON_DEFAULT_MATCH_FIELDS map a season string
+// to its field set; getDefaultPitFields()/getDefaultMatchFields() below are
+// the actual lookup used everywhere (falls back to the generic set for any
+// season not listed) — a team whose own formConfig doc already exists is
+// untouched by any of this (loadSeasonScopedFormConfig() only ever reads a
+// default for a genuinely missing doc); see
+// scripts/migrate-add-decode-default-fields.js for how an EXISTING doc
+// catches up with newly-added fields here instead. ======
+const GENERIC_PIT_FIELDS = [
+  { id: 'driveType', label: 'Drive Type', type: 'dropdown', required: true, options: ['Tank (2-motor, left/right)', 'Mecanum', 'Swerve', 'X-Drive / Omni', 'H-Drive', 'Other'], sortOrder: 0, showInPreview: true },
+  { id: 'autoCapability', label: 'Auto Capability', type: 'dropdown', required: false, options: ['None (park only)', 'Basic (1 preload + park)', 'Intermediate (scoring + park)', 'Advanced (multi-cycle auto)', 'Custom / Hybrid'], sortOrder: 1, showInPreview: true },
+  { id: 'claimedAvgAutoScore', label: 'Claimed Avg Auto Score', type: 'number', required: false, sortOrder: 2, showInPreview: true },
+  { id: 'claimedAvgTeleopScore', label: 'Claimed Avg Teleop Score', type: 'number', required: false, sortOrder: 3, showInPreview: true },
+  { id: 'claimedCycleTime', label: 'Claimed Cycle Time (seconds)', type: 'number', required: false, sortOrder: 4, showInPreview: true },
+  { id: 'notes', label: 'Notes', type: 'textarea', required: false, sortOrder: 5, showInPreview: true }
 ];
 
-// ====== Default match scouting field configuration ======
-const DEFAULT_MATCH_FIELDS = [
-  {
-    id: 'matchNumber',
-    label: 'Match Number',
-    type: 'number',
-    required: true,
-    sortOrder: 0,
-    // Already shown in the entry list's own header ("Match #N") — defaulting
-    // this to false avoids a redundant line in the preview. A team can still
-    // check it on if they want it repeated there.
-    showInPreview: false
-  },
-  {
-    id: 'autoScore',
-    label: 'Auto Score',
-    type: 'number',
-    required: false,
-    sortOrder: 1,
-    showInPreview: true
-  },
-  {
-    id: 'teleopScore',
-    label: 'Teleop Score',
-    type: 'number',
-    required: false,
-    sortOrder: 2,
-    showInPreview: true
-  },
-  {
-    id: 'endgameScore',
-    label: 'Endgame Score',
-    type: 'number',
-    required: false,
-    sortOrder: 3,
-    showInPreview: true
-  },
-  {
-    id: 'cycleTime',
-    label: 'Cycle Time (seconds)',
-    type: 'number',
-    required: false,
-    sortOrder: 4,
-    showInPreview: true
-  },
-  {
-    id: 'notes',
-    label: 'Notes',
-    type: 'textarea',
-    required: false,
-    sortOrder: 5,
-    showInPreview: true
-  }
+const GENERIC_MATCH_FIELDS = [
+  // Already shown in the entry list's own header ("Match #N") — defaulting
+  // this to false avoids a redundant line in the preview. A team can still
+  // check it on if they want it repeated there.
+  { id: 'matchNumber', label: 'Match Number', type: 'number', required: true, sortOrder: 0, showInPreview: false },
+  { id: 'autoScore', label: 'Auto Score', type: 'number', required: false, sortOrder: 1, showInPreview: true },
+  { id: 'teleopScore', label: 'Teleop Score', type: 'number', required: false, sortOrder: 2, showInPreview: true },
+  { id: 'endgameScore', label: 'Endgame Score', type: 'number', required: false, sortOrder: 3, showInPreview: true },
+  { id: 'cycleTime', label: 'Cycle Time (seconds)', type: 'number', required: false, sortOrder: 4, showInPreview: true },
+  { id: 'notes', label: 'Notes', type: 'textarea', required: false, sortOrder: 5, showInPreview: true }
 ];
+
+const DECODE_PIT_FIELDS = [
+  { id: 'drivetrainType', label: 'Drivetrain type', type: 'dropdown', required: false, options: ['Mecanum', 'Tank', 'Other'], sortOrder: 0, showInPreview: true },
+  { id: 'chassisSize', label: 'Chassis size', type: 'dropdown', required: false, options: ['Small', 'Big'], sortOrder: 1, showInPreview: false },
+  { id: 'weightClass', label: 'Weight class', type: 'dropdown', required: false, options: ['Light', 'Medium', 'Heavy'], sortOrder: 2, showInPreview: true },
+  { id: 'parkMethod', label: 'Park Method', type: 'buttonGroup', required: false, multi: false, options: ['Drive-In', 'Lift', 'Tilter', 'Other'], sortOrder: 3, showInPreview: true },
+  { id: 'transferType', label: 'Transfer type', type: 'buttonGroup', required: false, multi: false, options: ['Single-Stage/Constant', 'Sorter/Indexer'], sortOrder: 4, showInPreview: false },
+  { id: 'shootingRange', label: 'Shooting range', type: 'buttonGroup', required: false, multi: false, options: ['Far', 'Medium', 'Near', 'Anywhere'], sortOrder: 5, showInPreview: true },
+  { id: 'artifactLoading', label: 'Artifact loading', type: 'dropdown', required: false, options: ['Human-Player Loaded', 'Self-Intake'], sortOrder: 6, showInPreview: false },
+  { id: 'humanPlayerInterop', label: 'Human player interop', type: 'dropdown', required: false, options: ['Needs Own HP', 'Can Use Ours'], sortOrder: 7, showInPreview: false },
+  { id: 'claimedArtifactsScoredAuto', label: 'Claimed artifacts scored (auto)', type: 'number', required: false, sortOrder: 8, showInPreview: true },
+  { id: 'claimedArtifactsScoredTeleop', label: 'Claimed artifacts scored (teleop)', type: 'number', required: false, sortOrder: 9, showInPreview: true },
+  { id: 'leavesLaunchLine', label: 'Leaves launch line?', type: 'dropdown', required: false, options: ['Yes', 'No'], sortOrder: 10, showInPreview: false },
+  { id: 'claimedAvgSoloMatchScore', label: 'Claimed avg solo match score', type: 'number', required: false, sortOrder: 11, showInPreview: false },
+  { id: 'claimedCycleTimeSec', label: 'Claimed cycle time (sec)', type: 'number', required: false, sortOrder: 12, showInPreview: false },
+  { id: 'notes', label: 'Notes', type: 'textarea', required: false, sortOrder: 13, showInPreview: true }
+];
+
+const DECODE_MATCH_FIELDS = [
+  // Structural, not part of the season's real field spec — kept ahead of it
+  // (explicit decision) because match-scout.js's BATCH mode (Team-based
+  // Match View: still live from search results/Team Detail's Scout
+  // button/Matches Scouted's re-scout) renders this as a real form field and
+  // needs it to exist in the config at all. LIVE/schedule mode already
+  // filters id==='matchNumber' out of its rendered fields regardless of
+  // config (openMatchScoutFormFromSchedule's lockedMatchNumber path), so it
+  // never shows there either way. Already shown in the entry list's own
+  // header ("Match #N") — defaulting showInPreview to false avoids a
+  // redundant line in the preview.
+  { id: 'matchNumber', label: 'Match Number', type: 'number', required: true, sortOrder: 0, showInPreview: false },
+  { id: 'artifactsScoredAuto', label: 'Artifacts scored (auto)', type: 'counter', required: false, min: 0, step: 1, sortOrder: 1, showInPreview: true },
+  { id: 'leavesLaunchLine', label: 'Leaves launch line?', type: 'dropdown', required: false, options: ['Yes', 'No'], sortOrder: 2, showInPreview: true },
+  { id: 'artifactsScoredTeleop', label: 'Artifacts scored (teleop)', type: 'counter', required: false, min: 0, step: 1, sortOrder: 3, showInPreview: true },
+  // stopwatch: true — dynamic-form.js's wrapNumberWithStopwatch() adds a
+  // Start/Stop/Reset control alongside the plain number input, filling it
+  // with the elapsed seconds (1 decimal) on Stop.
+  { id: 'cycleTimeSec', label: 'Cycle time (sec)', type: 'number', required: false, stopwatch: true, sortOrder: 4, showInPreview: true },
+  { id: 'rankingPointsEarned', label: 'Ranking points earned', type: 'buttonGroup', required: false, multi: true, options: ['2 Win RPs', 'Movement RP', 'Goal RP', 'Pattern RP'], sortOrder: 5, showInPreview: true },
+  { id: 'notes', label: 'Notes', type: 'textarea', required: false, sortOrder: 6, showInPreview: true }
+];
+
+const SEASON_DEFAULT_PIT_FIELDS = { '2025': DECODE_PIT_FIELDS };
+const SEASON_DEFAULT_MATCH_FIELDS = { '2025': DECODE_MATCH_FIELDS };
+
+function getDefaultPitFields(season) {
+  return SEASON_DEFAULT_PIT_FIELDS[String(season)] || GENERIC_PIT_FIELDS;
+}
+
+function getDefaultMatchFields(season) {
+  return SEASON_DEFAULT_MATCH_FIELDS[String(season)] || GENERIC_MATCH_FIELDS;
+}
 
 // ====== Resolve the FTC season a form config lookup/save should target when
 // no explicit season is given — always "whatever the app's season selector
@@ -162,13 +146,8 @@ const matchFormConfigCache = new Map();
 // doc — a new season always starts from a clean form, per design. The legacy
 // doc itself is left in place afterward (unused, harmless) rather than
 // deleted. ======
-// Returns { fields, season, wasFresh }. wasFresh is true only when NO
-// season-scoped doc existed yet and the hardcoded defaults had to be seeded
-// (i.e. there was nothing — not even a legacy config — to inherit) — used by
-// form-builder.js to show its "fresh form" banner and copy-from-past-season
-// action. Inheriting the legacy config counts as already-configured, not
-// fresh, since the team has real content either way. ======
-async function loadSeasonScopedFormConfig(teamId, season, configType, defaults, cache) {
+// Returns { fields, season }.
+async function loadSeasonScopedFormConfig(teamId, season, configType, defaultsFn, cache) {
   const resolvedSeason = resolveFormConfigSeason(season);
   const cacheKey = `${teamId}_${resolvedSeason}`;
   if (cache.has(cacheKey)) {
@@ -184,7 +163,7 @@ async function loadSeasonScopedFormConfig(teamId, season, configType, defaults, 
     if (doc.exists) {
       const data = doc.data();
       const sorted = (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-      const result = { fields: sorted, season: resolvedSeason, wasFresh: false };
+      const result = { fields: sorted, season: resolvedSeason };
       cache.set(cacheKey, result);
       return result;
     }
@@ -197,29 +176,33 @@ async function loadSeasonScopedFormConfig(teamId, season, configType, defaults, 
       if (legacyDoc.exists) {
         const legacyFields = (legacyDoc.data().fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
         await configRef.set({ fields: legacyFields });
-        const result = { fields: legacyFields, season: resolvedSeason, wasFresh: false };
+        const result = { fields: legacyFields, season: resolvedSeason };
         cache.set(cacheKey, result);
         return result;
       }
     }
 
     // No season-scoped doc, no legacy doc to inherit — fresh default config.
-    const defaultConfig = defaults.map(f => ({ ...f }));
+    // Seasons have entirely different game elements, so there's no copy-from-
+    // another-season option here — this is always just the plain generic
+    // (or, for the one season keyed in SEASON_DEFAULT_*_FIELDS, DECODE)
+    // default, straight from getDefaultPitFields()/getDefaultMatchFields().
+    const defaultConfig = defaultsFn(resolvedSeason).map(f => ({ ...f }));
     await configRef.set({ fields: defaultConfig });
-    const result = { fields: defaultConfig, season: resolvedSeason, wasFresh: true };
+    const result = { fields: defaultConfig, season: resolvedSeason };
     cache.set(cacheKey, result);
     return result;
   } catch (err) {
     console.warn(`Failed to load ${configType} form config for season ${resolvedSeason}, using defaults:`, err);
     // Fall back to defaults without saving
-    return { fields: defaults.map(f => ({ ...f })), season: resolvedSeason, wasFresh: true };
+    return { fields: defaultsFn(resolvedSeason).map(f => ({ ...f })), season: resolvedSeason };
   }
 }
 
 // ====== Load (or create/migrate) pit scouting form config for a team +
 // season. season defaults to the app's currently-selected season. ======
 async function loadFormConfig(teamId, season) {
-  const { fields } = await loadSeasonScopedFormConfig(teamId, season, 'pitScouting', DEFAULT_PIT_FIELDS, formConfigCache);
+  const { fields } = await loadSeasonScopedFormConfig(teamId, season, 'pitScouting', getDefaultPitFields, formConfigCache);
   return fields;
 }
 
@@ -253,29 +236,8 @@ function invalidateMatchFormConfigCache(teamId, season) {
 // ====== Load (or create/migrate) match scouting form config for a team +
 // season. season defaults to the app's currently-selected season. ======
 async function loadMatchFormConfig(teamId, season) {
-  const { fields } = await loadSeasonScopedFormConfig(teamId, season, 'matchScouting', DEFAULT_MATCH_FIELDS, matchFormConfigCache);
+  const { fields } = await loadSeasonScopedFormConfig(teamId, season, 'matchScouting', getDefaultMatchFields, matchFormConfigCache);
   return fields;
-}
-
-// ====== List every OTHER season that has a real saved config for the given
-// type ("pitScouting"/"matchScouting"), newest first — used by the form
-// builder's "copy fields from a past season" action (wishlist item 26).
-// Reads the whole (small — a couple docs per season) formConfig collection
-// and picks out doc IDs of the form "{season}_{configType}", since Firestore
-// can't query by ID suffix. excludeSeason is normally whichever season the
-// builder currently has open, so it can't "copy" a season onto itself. ======
-async function listOtherSeasonsWithFormConfig(teamId, configType, excludeSeason) {
-  const snap = await db.collection('teams').doc(teamId).collection('formConfig').get();
-  const suffix = `_${configType}`;
-  const seasons = [];
-  snap.forEach(doc => {
-    if (!doc.id.endsWith(suffix)) return;
-    const season = doc.id.slice(0, -suffix.length);
-    if (!/^\d+$/.test(season)) return; // skip the un-prefixed legacy doc
-    if (season === String(excludeSeason)) return;
-    seasons.push(season);
-  });
-  return seasons.sort((a, b) => Number(b) - Number(a));
 }
 
 // ====== Render a dynamic form into a container element ======
@@ -472,14 +434,124 @@ function renderNumber(field, savedValue) {
   input.min = '0';
   if (field.required) input.required = true;
   if (savedValue != null) input.value = savedValue;
-  // The match form's Cycle Time field shows a browser-native autocomplete
-  // dropdown of previously typed values (no name attribute is set on these
-  // dynamic inputs, so Chrome falls back to keying its form-value history off
-  // id, which is stable/reused across every render of this field) — other
-  // fields don't show it, so scope the fix to just this one rather than
-  // disabling autocomplete on every dynamic number field.
-  if (field.id === 'cycleTime') input.autocomplete = 'off';
-  return input;
+  // A cycle-time-style field shows a browser-native autocomplete dropdown of
+  // previously typed values (no name attribute is set on these dynamic
+  // inputs, so Chrome falls back to keying its form-value history off id,
+  // which is stable/reused across every render of this field) — every match
+  // has a genuinely different value here, so that history is pure noise.
+  // Other number fields don't show it, so scope the fix to just
+  // stopwatch-driven fields rather than disabling autocomplete on every
+  // dynamic number field. (Previously scoped to the literal id "cycleTime"
+  // — generalized to field.stopwatch since that's the actual reason, not
+  // that specific id, and the DECODE rebuild's cycle-time field uses a
+  // different id.)
+  if (field.stopwatch) input.autocomplete = 'off';
+  if (!field.stopwatch) return input;
+  return wrapNumberWithStopwatch(field, input);
+}
+
+// ====== Optional stopwatch helper for a `number` field (field.stopwatch:
+// true in its config) — Start/Stop/Reset alongside the plain number input,
+// filling it with the elapsed seconds (1 decimal place) on Stop rather than
+// requiring the seconds to be counted by hand and typed in. The field is
+// still just a number underneath — the stopwatch only ever writes into
+// `input`, never replaces the underlying value contract, and the number can
+// still be typed/edited directly regardless of whether the stopwatch was
+// used at all. Returns a wrapper div exposing a `.value` proxy onto the real
+// input, same pattern as renderCounter()/renderButtonGroup()'s wrappers, so
+// every generic caller (getValues/validate/setValues, live-entry-sync's
+// wireLiveFormFields/applyRemoteFieldValues) keeps working without knowing
+// this field is anything other than a plain input. ======
+function wrapNumberWithStopwatch(field, input) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'number-stopwatch-field';
+
+  const controls = document.createElement('div');
+  controls.className = 'stopwatch-controls';
+
+  const timeDisplay = document.createElement('span');
+  timeDisplay.className = 'stopwatch-time';
+  timeDisplay.textContent = '0.0s';
+
+  const startBtn = document.createElement('button');
+  startBtn.type = 'button';
+  startBtn.className = 'btn btn-small btn-outline stopwatch-btn';
+  startBtn.textContent = 'Start';
+
+  const stopBtn = document.createElement('button');
+  stopBtn.type = 'button';
+  stopBtn.className = 'btn btn-small btn-outline stopwatch-btn';
+  stopBtn.textContent = 'Stop';
+  stopBtn.disabled = true;
+
+  const resetBtn = document.createElement('button');
+  resetBtn.type = 'button';
+  resetBtn.className = 'btn btn-small btn-outline stopwatch-btn';
+  resetBtn.textContent = 'Reset';
+
+  let startedAt = null;
+  let rafId = null;
+
+  function tick() {
+    if (startedAt == null) return;
+    timeDisplay.textContent = ((Date.now() - startedAt) / 1000).toFixed(1) + 's';
+    rafId = requestAnimationFrame(tick);
+  }
+
+  function stopTicking() {
+    if (rafId != null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
+  startBtn.addEventListener('click', () => {
+    if (startedAt != null) return;
+    startedAt = Date.now();
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    tick();
+  });
+
+  stopBtn.addEventListener('click', () => {
+    if (startedAt == null) return;
+    const elapsedSec = Math.round(((Date.now() - startedAt) / 1000) * 10) / 10;
+    startedAt = null;
+    stopTicking();
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    timeDisplay.textContent = elapsedSec.toFixed(1) + 's';
+    input.value = elapsedSec;
+    // Setting .value via JS doesn't fire a native input/change event —
+    // dispatch one (bubbling, so the wrapper's own listener — set up
+    // generically by wireLiveFormFields, live-entry-sync.js — catches it
+    // the same way it catches a real keystroke) so the stopwatch-filled
+    // value actually gets saved/synced, not just displayed.
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  resetBtn.addEventListener('click', () => {
+    startedAt = null;
+    stopTicking();
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    timeDisplay.textContent = '0.0s';
+  });
+
+  controls.appendChild(startBtn);
+  controls.appendChild(stopBtn);
+  controls.appendChild(resetBtn);
+  controls.appendChild(timeDisplay);
+
+  wrapper.appendChild(input);
+  wrapper.appendChild(controls);
+
+  Object.defineProperty(wrapper, 'value', {
+    get() { return input.value; },
+    set(val) { input.value = (val != null) ? val : ''; }
+  });
+
+  return wrapper;
 }
 
 function renderText(field, savedValue) {
@@ -512,6 +584,12 @@ function renderCounter(field, savedValue) {
 
   const display = document.createElement('span');
   display.className = 'counter-display';
+  // Direct editing (see beginEdit() below): the displayed number is also a
+  // click/tap target and keyboard-focusable, not just a label between the
+  // +/- buttons.
+  display.tabIndex = 0;
+  display.setAttribute('role', 'button');
+  display.title = 'Click to type a value directly';
 
   const plusBtn = document.createElement('button');
   plusBtn.type = 'button';
@@ -549,6 +627,87 @@ function renderCounter(field, savedValue) {
     render();
     playCounterTone('up');
     notifyChanged();
+  });
+
+  // ====== Direct editing — click/tap the displayed number (or Enter/Space
+  // while it has keyboard focus) to type a value straight in, instead of
+  // only ever stepping one tap at a time. Swaps the span for a real
+  // <input type="number"> for the duration of the edit; the span stays what
+  // the rest of the form (getValues/validate/setValues, via wrapper.value
+  // below) actually reads — an in-progress edit's typed-but-uncommitted
+  // value is never that source of truth, same as any other field never
+  // reporting a value until it's actually settled. ======
+  let editInput = null;
+  // Bug fix (found via testing, not just review): removing the focused
+  // editInput — cancel()'s job on Escape — itself fires a native 'blur' on
+  // it, which the commit() listener below is ALSO subscribed to. Without
+  // this guard, pressing Escape ran cancel() then immediately ran commit()
+  // too (via that blur), silently re-committing whatever had been typed —
+  // exactly the "Escape does nothing" bug this direct-editing feature must
+  // not have. cancel() sets this right before removing the input so
+  // commit() can tell "this blur is cancel() tearing down" apart from "the
+  // user actually clicked/tabbed away" and skip re-running itself.
+  let suppressBlurCommit = false;
+  function beginEdit() {
+    if (editInput) return; // already editing
+    editInput = document.createElement('input');
+    editInput.type = 'number';
+    editInput.className = 'counter-edit-input';
+    editInput.value = String(current);
+    editInput.min = String(min);
+    if (max !== null) editInput.max = String(max);
+    editInput.step = String(step);
+
+    const commit = () => {
+      if (!editInput) return;
+      if (suppressBlurCommit) {
+        suppressBlurCommit = false;
+        return;
+      }
+      const raw = editInput.value.trim();
+      let num = raw === '' ? current : Number(raw);
+      if (!Number.isFinite(num)) num = current;
+      num = Math.max(min, num);
+      if (max !== null) num = Math.min(max, num);
+      const changed = num !== current;
+      current = num;
+      editInput.remove();
+      editInput = null;
+      display.classList.remove('hidden');
+      render();
+      if (changed) notifyChanged();
+    };
+    const cancel = () => {
+      if (!editInput) return;
+      suppressBlurCommit = true;
+      editInput.remove();
+      editInput = null;
+      display.classList.remove('hidden');
+    };
+
+    editInput.addEventListener('blur', commit);
+    editInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        editInput.blur(); // triggers commit via the blur listener above
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        cancel();
+      }
+    });
+
+    display.classList.add('hidden');
+    display.insertAdjacentElement('afterend', editInput);
+    editInput.focus();
+    editInput.select();
+  }
+
+  display.addEventListener('click', beginEdit);
+  display.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      beginEdit();
+    }
   });
 
   render();
@@ -660,11 +819,16 @@ function renderButtonGroup(field, savedValue) {
       if (isMulti) {
         if (active.has(opt)) active.delete(opt);
         else active.add(opt);
+      } else if (active.has(opt)) {
+        // Bug fix (decision reversed from an earlier round): single-select
+        // used to be strictly radio-like — clicking the already-active
+        // option did nothing, with no way to get back to "nothing selected"
+        // short of deleting/retyping the entry. Every OTHER single-select
+        // field type (a dropdown always has its blank "— Select —" option)
+        // already supports clearing back to unset; this brings Button Group
+        // in line with that instead of being the one exception.
+        active = new Set();
       } else {
-        // Radio-like: clicking always selects exactly this option — no
-        // toggle-back-to-none via the buttons themselves (matching how a
-        // native radio group behaves; "required" already covers forcing a
-        // choice, and there's no blank button here the way a dropdown has).
         active = new Set([opt]);
       }
       syncButtonStates();

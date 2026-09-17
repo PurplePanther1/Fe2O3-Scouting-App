@@ -86,6 +86,36 @@ async function deleteActivityLogSubcollection(uid) {
   }
 }
 
+// ====== Delete one team's whole Account Activity tab (every entry with that
+// teamId) from the CURRENT user's own log — self-delete, so this is always
+// called as (or on behalf of) the affected user, never by a captain acting
+// on someone else's log (there's no cross-user delete rule for this, and
+// none is needed). Called whenever this account loses membership on a team
+// for any reason OTHER than deleting the whole account (voluntary leave, a
+// kick, any other path that removes membership) — account deletion instead
+// wipes the ENTIRE log via deleteActivityLogSubcollection() above, so
+// calling this too would just be redundant reads/writes on the way out, not
+// wrong, but every account-deletion call site intentionally skips it.
+// Same page-of-500 loop as deleteActivityLogSubcollection() above, for the
+// same reason (an arbitrary, unbounded number of entries can exist for one
+// team, even if that's rare in practice). ======
+async function deleteActivityLogTeamTab(uid, teamId) {
+  if (!uid || !teamId) return;
+  try {
+    const collectionRef = db.collection('users').doc(uid).collection('activityLog').where('teamId', '==', teamId);
+    for (;;) {
+      const snap = await collectionRef.limit(500).get();
+      if (snap.empty) return;
+      const batch = db.batch();
+      snap.docs.forEach(doc => batch.delete(doc.ref));
+      await batch.commit();
+      if (snap.size < 500) return;
+    }
+  } catch (err) {
+    console.warn(`Failed to delete activity log tab for team ${teamId}:`, err);
+  }
+}
+
 // ====== Timezone ======
 // Per-user preference (users/{uid}.timezone), defaulted at first login from
 // the browser (see detectBrowserTimezone(), auth.js) and editable from the

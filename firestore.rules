@@ -740,5 +740,37 @@ service cloud.firestore {
       );
       allow delete: if isAuth() && canEditOrDeleteEntry(resource.data.teamId, resource.data);
     }
+
+    match /feedback/{feedbackId} {
+      // Any authenticated user can submit feedback; nobody can read,
+      // update, or delete it through the app — no in-app viewer exists
+      // yet, Tim reviews submissions via the Firestore console (an
+      // admin/console client bypasses these rules entirely, so this
+      // doesn't block that).
+      allow read, update, delete: if false;
+      allow create: if isAuth()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.category in ['Bug Report', 'Feature Request', 'General Feedback', 'Positive Feedback', 'Beta Testing', 'Other']
+        && request.resource.data.message is string
+        && request.resource.data.message.size() > 0
+        && request.resource.data.message.size() <= 5000
+        && request.resource.data.displayName is string
+        && (request.resource.data.teamId == null || request.resource.data.teamId is string)
+        && (request.resource.data.teamName == null || request.resource.data.teamName is string)
+        && request.resource.data.createdAt == request.time
+        // email is optional — sent only when the user fills in "Your email
+        // (optional)" (js/feedback.js). 254 is the practical RFC 5321 max
+        // length; the client already does a plausibility check, this is
+        // just a bound, not real validation.
+        && (!('email' in request.resource.data)
+            || (request.resource.data.email is string && request.resource.data.email.size() <= 254))
+        // screenshot may be a base64 data URI (js/feedback.js's
+        // resizeFeedbackScreenshotToDataURL()) — the client already
+        // compresses to well under this, but the cap here is defense in
+        // depth against a client that skips that step, same convention as
+        // users/{userId}'s photoURL cap just above.
+        && (!('screenshot' in request.resource.data)
+            || (request.resource.data.screenshot is string && request.resource.data.screenshot.size() < 900000));
+    }
   }
 }

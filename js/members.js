@@ -1159,6 +1159,17 @@ async function performLeaveTeam(isSoleMember, leftTeamId, leftTeamData) {
       }
     }
 
+    // Voluntary leave (either branch above) — this account just lost access
+    // to this team's Account Activity tab, so delete it (every entry with
+    // this teamId), same as the kicked/removed paths (handleRemovedFromTeam()
+    // in this file, and the next-login reconciliation path in auth.js). Not
+    // called from the account-deletion flow (delete-account.js calls
+    // selfLeaveTeam()/deleteEntireTeam() directly, not through this
+    // function) — that flow wipes the WHOLE log afterward instead.
+    if (typeof deleteActivityLogTeamTab === 'function') {
+      deleteActivityLogTeamTab(currentUser.uid, leftTeamId);
+    }
+
     hideLoading();
     navigateAwayFromRemovedTeam(leftTeamId);
   } catch (err) {
@@ -1296,14 +1307,24 @@ function handleRemovedFromTeam(teamId) {
     queueRemovedTeamNotice(teamName);
   }
 
+  // This account just lost access to this team's Account Activity tab —
+  // delete it (every entry with this teamId) before writing the notice
+  // below, so any stale team-specific notices from while still a member
+  // don't linger unreadably.
+  if (typeof deleteActivityLogTeamTab === 'function' && currentUser) {
+    deleteActivityLogTeamTab(currentUser.uid, teamId);
+  }
+
   // Self-write activity log entry — the live-detection counterpart to
   // auth.js's next-login reconciliation self-write (same event, different
   // detection point: this one fires the instant a listener sees it, while
-  // the app is already open).
+  // the app is already open). Written to the GENERAL tab (teamId: null), not
+  // this team's own tab — that tab was just deleted above, and writing this
+  // notice into it would create it there only to have it erased.
   if (typeof logActivitySelf === 'function') {
     logActivitySelf({
       type: 'kicked',
-      teamId,
+      teamId: null,
       teamName,
       message: `You were removed from "${teamName}".`
     });

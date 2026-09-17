@@ -391,7 +391,17 @@ function disableRenderedFormFields(container) {
   // (renderButtonGroup) are both plain <div> wrappers with <button> children,
   // not native form controls — disable those buttons directly since the
   // querySelectorAll above doesn't reach them.
-  container.querySelectorAll('.counter-field button, .button-group-field button').forEach((btn) => { btn.disabled = true; });
+  container.querySelectorAll('.counter-field button, .button-group-field button, .stopwatch-controls button').forEach((btn) => { btn.disabled = true; });
+  // Counter fields' displayed number is ALSO a click/tap-to-type-directly
+  // target (renderCounter's beginEdit()), not just the +/- buttons above —
+  // a plain <span>, so .disabled has no effect on it. Strip its
+  // interactivity directly: pointer-events:none blocks the click, tabIndex
+  // -1 removes it from tab order (the same two properties a real disabled
+  // control loses), so a read-only view can't open an edit input at all.
+  container.querySelectorAll('.counter-display').forEach((el) => {
+    el.style.pointerEvents = 'none';
+    el.tabIndex = -1;
+  });
 }
 
 function openViewEntryModal(title, fields, data) {
@@ -613,8 +623,8 @@ async function gatherComparisonExportData(teamNumber, eventCode, teamId) {
   const season = typeof resolveExportSeason === 'function'
     ? resolveExportSeason([...pitDocs, ...allMatchEntries])
     : undefined;
-  const pitFields = await loadFormConfigReadOnly(teamId, season, 'pitScouting', DEFAULT_PIT_FIELDS);
-  const matchFields = await loadFormConfigReadOnly(teamId, season, 'matchScouting', DEFAULT_MATCH_FIELDS);
+  const pitFields = await loadFormConfigReadOnly(teamId, season, 'pitScouting', getDefaultPitFields);
+  const matchFields = await loadFormConfigReadOnly(teamId, season, 'matchScouting', getDefaultMatchFields);
 
   const nameMap = typeof getEventTeamNameMap === 'function' ? await getEventTeamNameMap(eventCode) : {};
   if (typeof attachTeamNames === 'function') {

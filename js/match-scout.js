@@ -905,6 +905,27 @@ async function commitMatchScoutForm() {
       await currentMatchLiveSession.commitAndLeave(currentMatchFields);
     } catch (err) {
       console.error('Failed to save match scouting entry:', err);
+      // Bug fix: mirrors pit-scout.js's commitPitScoutForm() — someone else
+      // deleted this entry between this session opening it and this Done
+      // click. commit() (live-entry-sync.js) now detects that itself instead
+      // of silently recreating an empty stub; show the same "Entry Deleted"
+      // popup onEntryDeleted shows for the other ordering of this same race
+      // (listener catches the delete before this commit's own read does).
+      // Guard against double-showing it: if that listener race fired first,
+      // match-modal is already hidden by the time this catch runs.
+      if (err && err.code === 'entry-deleted') {
+        const modalEl = document.getElementById('match-modal');
+        if (modalEl && !modalEl.classList.contains('hidden')) {
+          closeMatchScoutFormUI();
+          if (typeof showNoticeModal === 'function') {
+            showNoticeModal({
+              title: 'Entry Deleted',
+              message: `This entry was deleted by ${err.deletedByName || 'another editor'} while you had it open. Your changes were not saved.`
+            });
+          }
+        }
+        return;
+      }
       errorEl.textContent = err && err.code === 'permission-denied'
         ? 'Permission denied: you no longer have permission to save this entry (you may have been removed from the team, or your permissions changed). Please refresh and try again.'
         : 'Failed to save. Please check your connection and try again.';

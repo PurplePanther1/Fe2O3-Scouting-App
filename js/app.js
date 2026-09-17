@@ -109,7 +109,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     Object.entries(subtabs).forEach(([name, { tab, view }]) => {
       const isActive = name === subtab;
-      if (tab) tab.classList.toggle('active', isActive);
+      if (tab) {
+        tab.classList.toggle('active', isActive);
+        // The bar scrolls horizontally on mobile now (style.css) — a
+        // programmatic jump (e.g. selecting an event routes to Compare)
+        // must still bring the now-active tab into view, not just style it.
+        if (isActive && typeof tab.scrollIntoView === 'function') {
+          tab.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
+      }
       if (view) {
         view.classList.toggle('hidden', !isActive);
         view.classList.toggle('active', isActive);
