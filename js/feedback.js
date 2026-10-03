@@ -13,6 +13,12 @@ const FEEDBACK_SCREENSHOT_MAX_DIMENSION = 1600; // longest side, aspect-ratio pr
 const FEEDBACK_SCREENSHOT_MAX_DATA_URL_LENGTH = 700000; // ~700KB — leaves headroom under firestore.rules' hard cap and Firestore's 1MiB doc limit alongside category/message/etc
 const FEEDBACK_MESSAGE_MAX_LENGTH = 5000;
 
+// Same deployed-Worker convention as first-api.js's FTC_PROXY_BASE — a
+// separate, dedicated Worker (workers/feedback-notify/), not a new endpoint
+// bolted onto fe2o3-ftc-proxy, so its Resend secret stays isolated from that
+// Worker's own FIRST API credentials.
+const FEEDBACK_NOTIFY_WORKER_URL = 'https://fe2o3-feedback-notify.fe2o3-scouting.workers.dev';
+
 // The currently-processed screenshot's data URL, or null — cleared on open,
 // on Remove Screenshot, and after a successful submit.
 let pendingFeedbackScreenshot = null;
@@ -124,6 +130,25 @@ function closeFeedbackModal() {
   document.getElementById('feedback-modal').classList.add('hidden');
 }
 
+// Fire-and-forget email notification to the maintainers (via the dedicated
+// fe2o3-feedback-notify Worker → Resend) — deliberately NOT awaited by its
+// caller. The Firestore write is what already gates the user's success/
+// failure state; this is purely a best-effort notification on top of that,
+// so a slow or failed request here must never delay the "Thanks for the
+// feedback!" modal or surface as an error to the person submitting feedback
+// (see the single call site in submitFeedback() below, which only
+// console.warns on rejection).
+async function notifyFeedbackEmail(payload) {
+  const response = await fetch(FEEDBACK_NOTIFY_WORKER_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error(`Feedback notify worker returned ${response.status}`);
+  }
+}
+
 async function submitFeedback() {
   if (typeof clearStatusMessage === 'function') clearStatusMessage('feedback');
 
@@ -167,6 +192,19 @@ async function submitFeedback() {
     if (pendingFeedbackScreenshot) payload.screenshot = pendingFeedbackScreenshot;
 
     await db.collection('feedback').add(payload);
+
+    // Not awaited — see notifyFeedbackEmail()'s own docblock for why this
+    // must never delay or fail the success UI below.
+    notifyFeedbackEmail({
+      category,
+      message,
+      displayName: payload.displayName,
+      teamName: payload.teamName,
+      email: email || null,
+      hasScreenshot: !!pendingFeedbackScreenshot
+    }).catch((err) => {
+      console.warn('Feedback email notification failed (feedback was still saved to Firestore):', err);
+    });
 
     hideLoading();
     closeFeedbackModal();

@@ -1,0 +1,8 @@
+name = "fe2o3-feedback-notify"
+main = "feedback-notify.js"
+compatibility_date = "2024-12-01"
+
+# The Resend API key is set as a secret (not in this file), isolated from
+# fe2o3-ftc-proxy's own FTC_API_USERNAME/FTC_API_TOKEN secrets (a separate
+# Worker has its own independent secret store, even in the same account):
+#   wrangler secret put RESEND_API_KEY
