@@ -4,7 +4,116 @@
 //    wrangler deploy → it will print your worker URL
 const FTC_PROXY_BASE = 'https://fe2o3-ftc-proxy.fe2o3-scouting.workers.dev';
 
-// Currently selected event data
+// ====== Unofficial scrimmages (js/scrimmages.js) ======
+// A scrimmage stands in for an event using a synthetic event code,
+// 'SCRIM-<scrimmageId>' (scrimmageId = the doc id under
+// teams/{teamId}/scrimmages), so every per-event cache/key/query in the app
+// keeps working unchanged. These two helpers live here (loaded first) so every
+// guard below and in the other files can use them without load-order worries.
+// Anything that would send an event code to the FIRST worker, the global
+// events/ collection, FTCScout, or the schedule logic checks
+// isScrimmageCode() first and skips.
+const SCRIMMAGE_CODE_PREFIX = 'SCRIM-';
+function isScrimmageCode(code) {
+  return typeof code === 'string' && code.startsWith(SCRIMMAGE_CODE_PREFIX) && code.length > SCRIMMAGE_CODE_PREFIX.length;
+}
+function scrimmageIdFromCode(code) {
+  return isScrimmageCode(code) ? code.slice(SCRIMMAGE_CODE_PREFIX.length) : null;
+}
+
+// ====== Season helpers shared by scrimmages (scrimmages.js) and Pinned Events
+// (pinned-events.js) so the two can never diverge ======
+
+// Set the app's season dropdown (#select-season) WITHOUT firing its own
+// 'change' event — that handler wipes the selected event and the search box,
+// which is right when a user picks a season but wrong when we are switching
+// season *in order to* select something in it (a pinned event, a scrimmage).
+// Same approach restorePerTeamEventState() (session-state.js) takes. Also kicks
+// off (not awaits) that season's event-cache load so a later search is ready.
+// Returns true if the season actually changed. Callers decide what else to
+// clear: a season CHANGE leaves any previous search results stale (they belong
+// to the old season), so they clear the selection/search box first.
+function setAppSeasonQuietly(season) {
+  const sel = document.getElementById('select-season');
+  if (!sel || season === undefined || season === null || season === '') return false;
+  const s = String(season);
+  if (!Array.from(sel.options).some(o => o.value === s)) {
+    // Outside the dropdown's rolling window — add it rather than silently
+    // failing (setting .value to a missing option is a no-op in every browser).
+    const opt = document.createElement('option');
+    opt.value = s;
+    opt.textContent = formatFtcSeasonLabel(s);
+    sel.appendChild(opt);
+  }
+  if (sel.value === s) return false;
+  sel.value = s;
+  if (!eventCache[s] && typeof ensureEventsLoaded === 'function') {
+    ensureEventsLoaded(s).catch(() => {});
+  }
+  // The Pinned tab's season filter follows the app's season (pinned-events.js).
+  if (typeof syncPinnedSeasonToApp === 'function') syncPinnedSeasonToApp();
+  return true;
+}
+
+// ====== Fill a <select> with the app's season choices — the same rolling
+// window (current season down 8, floor 2020) and the same "2026-2027 — Game"
+// labels as the main #select-season (populateSeasonDropdown()), so the
+// scrimmage Manage modal and the Pinned tab's filter offer exactly what the
+// main dropdown does. `selected` defaults to the REAL current season
+// (getCurrentFtcSeason() — the same kickoff-gated helper the main dropdown uses
+// to pick its default); a season outside the window is added rather than lost. ======
+function populateSeasonSelectOptions(select, selected) {
+  if (!select) return;
+  const current = getCurrentFtcSeason();
+  const startYear = Math.max(current - 8, 2020);
+  select.innerHTML = '';
+  for (let y = current; y >= startYear; y--) {
+    const option = document.createElement('option');
+    option.value = String(y);
+    option.textContent = y === current ? `${formatFtcSeasonLabel(y)} (current)` : formatFtcSeasonLabel(y);
+    select.appendChild(option);
+    ensureSeasonGameNameLoaded(y);
+  }
+  const want = String(selected === undefined || selected === null || selected === '' ? current : selected);
+  if (!Array.from(select.options).some(o => o.value === want)) {
+    const option = document.createElement('option');
+    option.value = want;
+    option.textContent = formatFtcSeasonLabel(want);
+    select.appendChild(option);
+  }
+  select.value = want;
+}
+
+// ====== The season an entry's data should be READ under. A scrimmage's season
+// can be edited after entries exist (Manage modal), and rewriting every entry
+// would need write access to other people's entries — so instead every reader
+// of an entry's season (form-config lookup, exports, comparison) goes through
+// this: scrimmage entries resolve to the scrimmage doc's CURRENT season
+// (scrimmageSeasonById, kept live by scrimmages.js), everything else to the
+// season stored on the entry, exactly as before. ======
+const scrimmageSeasonById = {};
+function entrySeason(entry) {
+  if (!entry) return undefined;
+  const sid = entry.scrimmageId || scrimmageIdFromCode(entry.eventCode);
+  if (sid && scrimmageSeasonById[sid]) return scrimmageSeasonById[sid];
+  return entry.season;
+}
+// First resolvable season across a set of same-event entries.
+function entriesSeason(entries) {
+  return (entries || []).map(entrySeason).find(Boolean);
+}
+
+// The empty-state line for the team lists — a scrimmage starts with no roster
+// (teams are added as you go), which isn't an error the way a FIRST event with
+// no teams is.
+function emptyRosterMessage() {
+  return (selectedEvent && selectedEvent.isScrimmage)
+    ? 'No teams on this scrimmage yet — use "+ Add & scout a team" (Pit and Match tabs) or "+ Add Team to Roster" (Team Information tab).'
+    : 'No teams found for this event.';
+}
+
+// Currently selected event data. For a scrimmage this is
+// { code: 'SCRIM-<id>', name, isScrimmage: true, scrimmageId, season }.
 let selectedEvent = null;
 let isSearching = false;
 let debounceTimer = null;
@@ -225,6 +334,7 @@ function filterEvents(events, query) {
 
 // ====== Get teams for a specific event via Worker ======
 async function getEventTeams(eventCode, season) {
+  if (isScrimmageCode(eventCode)) return []; // no FIRST roster for a scrimmage — see scrimmages.js
   console.time('[Timing] Worker /teams call');
   try {
     const result = await callWorker(`/teams?eventCode=${encodeURIComponent(eventCode)}&season=${encodeURIComponent(season || getSelectedSeason())}`);
@@ -260,6 +370,9 @@ async function getEventTeams(eventCode, season) {
 // in-memory result uncached, instead of attempting a write that's certain
 // to be denied.
 async function getEventSchedule(eventCode, season) {
+  // A scrimmage has no schedule, and its synthetic code must never reach the
+  // worker or the global events/ collection.
+  if (isScrimmageCode(eventCode)) return [];
   console.time('[Timing] getEventSchedule');
   try {
     const eventRef = db.collection('events').doc(eventCode);
@@ -325,6 +438,7 @@ async function getEventSchedule(eventCode, season) {
 // season's roster for the same event code instead of "not yet confirmed."
 async function cacheEventToFirestore(eventData, ftcTeams, season) {
   if (!eventData || !eventData.code) return;
+  if (isScrimmageCode(eventData.code)) return; // never write a scrimmage into the global events/ collection
 
   console.time('[Timing] Firestore cache write (cacheEventToFirestore)');
   try {
@@ -363,6 +477,7 @@ async function cacheEventToFirestore(eventData, ftcTeams, season) {
 // sheets-export.js building a name map for a past export's own historical
 // event) simply omit the argument, preserving the old behavior.
 async function getCachedEvent(eventCode, season) {
+  if (isScrimmageCode(eventCode)) return null; // scrimmage rosters live under teams/{teamId}/scrimmages, never events/
   console.time('[Timing] Firestore cache read (getCachedEvent)');
   try {
     const doc = await db.collection('events').doc(eventCode).get();
@@ -518,6 +633,11 @@ function hideSuggestions() {
 
 // ====== Clear any previously selected event's info, team list, search results, and team detail ======
 function clearSelectedEvent() {
+  // If a scrimmage was open, stop its live roster listener and restore the
+  // controls it hid (Pin, Match View toggle, Refresh Scores) — see
+  // detachScrimmageSelection(), scrimmages.js. Before the selectedEvent reset
+  // below since it reads the scrimmage state.
+  if (typeof detachScrimmageSelection === 'function') detachScrimmageSelection();
   selectedEvent = null;
   // Reset detail selection too — otherwise a team number that also exists in the
   // next event's roster would still read as "selected" and show "Close Detail"
@@ -591,6 +711,12 @@ function clearSelectedEvent() {
   }
   if (typeof renderPinnedEventsList === 'function') {
     renderPinnedEventsList();
+  }
+  // Same for the Scrimmages list: the blanket .selected strip above only fixes
+  // the DOM class — re-render so the rows' highlight AND click handling follow
+  // the live selection (see the row click handler in scrimmages.js).
+  if (typeof renderScrimmageList === 'function') {
+    renderScrimmageList();
   }
 
   // Reset the Scouting tabs' own UI state — search filter, sort mode, and
@@ -682,8 +808,17 @@ let selectEventLoadingCode = null;
 
 // ====== Select an event ======
 async function selectEvent(eventData) {
+  // Scrimmages (restored from session state, or opened from the Scrimmages
+  // subtab) take their own path — no worker, no events/ cache, roster from
+  // Firestore (selectScrimmage(), scrimmages.js).
+  if (eventData && eventData.isScrimmage) return selectScrimmage(eventData);
+
   if (selectEventLoadingCode === eventData.code) return; // already loading this same event — ignore the extra click
   selectEventLoadingCode = eventData.code;
+
+  // A real event replaces whatever scrimmage was open: stop its roster
+  // listener and drop its banner/strips/hidden-control state first.
+  if (typeof detachScrimmageSelection === 'function') detachScrimmageSelection();
 
   console.time('[Timing] selectEvent total');
   selectedEvent = eventData;
@@ -708,6 +843,9 @@ async function selectEvent(eventData) {
   }
   if (typeof renderPinnedEventsList === 'function') {
     renderPinnedEventsList();
+  }
+  if (typeof renderScrimmageList === 'function') {
+    renderScrimmageList();
   }
 
   showLoading(`Fetching teams for ${eventData.code}...`);
@@ -1571,7 +1709,7 @@ function renderMatchTeamList(teams) {
   container.innerHTML = '';
 
   if (!teams || teams.length === 0) {
-    status.textContent = 'No teams found for this event.';
+    status.textContent = emptyRosterMessage();
     console.timeEnd('[Timing] renderMatchTeamList');
     return;
   }
@@ -1749,7 +1887,7 @@ function renderPitTeamList(teams) {
   container.innerHTML = '';
 
   if (!teams || teams.length === 0) {
-    status.textContent = 'No teams found for this event.';
+    status.textContent = emptyRosterMessage();
     console.timeEnd('[Timing] renderPitTeamList');
     return;
   }
@@ -2025,6 +2163,9 @@ document.getElementById('select-season').addEventListener('change', async () => 
   // Clear all previous state immediately
   clearSelectedEvent();
   document.getElementById('input-event-search').value = '';
+
+  // The Pinned tab's season filter follows the app's season (pinned-events.js).
+  if (typeof syncPinnedSeasonToApp === 'function') syncPinnedSeasonToApp();
 
   // Persist this team's own season choice (session-state.js's perTeam
   // entry) so it survives a refresh instead of resetting back to the

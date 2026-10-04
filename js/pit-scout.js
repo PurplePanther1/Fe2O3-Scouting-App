@@ -160,7 +160,7 @@ async function openPitScoutForm(teamNumber, eventCode) {
     // Access confirmed — safe to show the modal now.
     document.getElementById('pit-modal').classList.remove('hidden');
 
-    const fields = await loadFormConfig(teamId, existingData?.season);
+    const fields = await loadFormConfig(teamId, entrySeason(existingData));
     currentPitFields = fields;
     const container = document.getElementById('pit-dynamic-fields');
     currentFormController = renderDynamicForm(container, fields, existingData);
@@ -259,7 +259,9 @@ async function openPitScoutForm(teamNumber, eventCode) {
       eventCode,
       teamNumber: Number(teamNumber),
       teamId: teamId2,
-      season: existingData?.season || resolveFormConfigSeason()
+      season: entrySeason(existingData) || resolveFormConfigSeason(),
+      // Only set for a scrimmage's entries (see isScrimmageCode(), first-api.js)
+      ...(isScrimmageCode(eventCode) ? { scrimmageId: scrimmageIdFromCode(eventCode) } : {})
     });
     wireLiveFormFields(currentFormController, fields, currentPitLiveSession);
   } catch (err) {

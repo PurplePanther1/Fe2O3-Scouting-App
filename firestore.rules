@@ -54,6 +54,48 @@ service cloud.firestore {
         );
     }
 
+    // ====== Unofficial scrimmages (teams/{teamId}/scrimmages/{scrimId}) ======
+    // canManageScrimmages gates scrimmage create / rename-or-change-date /
+    // delete (and removing a roster team, see the scrimmage block below) —
+    // captain always, anyone else only with permissions[uid].canManageScrimmages
+    // == true. Deliberately NO creator field anywhere: whoever holds the
+    // permission NOW can delete any scrimmage, and losing it means losing that
+    // ability even over a scrimmage you created yourself. .get(uid, null)/
+    // .get('canManageScrimmages', false) rather than bracket access for the
+    // same throws-on-missing-key reason as isCaptain() above.
+    function canManageScrimmages(teamId) {
+      return isAuth()
+        && exists(/databases/$(database)/documents/teams/$(teamId))
+        && (
+          isCaptain(get(/databases/$(database)/documents/teams/$(teamId)).data) ||
+          (
+            get(/databases/$(database)/documents/teams/$(teamId)).data.permissions != null &&
+            get(/databases/$(database)/documents/teams/$(teamId)).data.permissions.get(request.auth.uid, null) != null &&
+            get(/databases/$(database)/documents/teams/$(teamId)).data.permissions.get(request.auth.uid, null).get('canManageScrimmages', false) == true
+          )
+        );
+    }
+
+    // Lets a canManageScrimmages holder delete OTHER people's pit/match entries
+    // — but ONLY entries that belong to a scrimmage that currently exists
+    // (scrimmageId set, eventCode == 'SCRIM-' + scrimmageId, and that
+    // scrimmage's doc is there). This is the cascade-delete path: the client
+    // deletes every entry first and the scrimmage doc LAST precisely so this
+    // exists() check keeps passing throughout (and a partial failure is just
+    // retried). Entries without a scrimmageId — every real-event entry — never
+    // match this and keep going through canEditOrDeleteEntry() alone.
+    function canDeleteScrimmageEntry(teamId, entry) {
+      return entry.get('scrimmageId', null) is string
+        && entry.get('eventCode', null) == 'SCRIM-' + entry.scrimmageId
+        && exists(/databases/$(database)/documents/teams/$(teamId)/scrimmages/$(entry.scrimmageId))
+        && canManageScrimmages(teamId);
+    }
+
+    function isValidScrimmageDate(data) {
+      return !('date' in data)
+        || (data.date is string && data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'));
+    }
+
     function canEditOrDeleteEntry(teamId, entry) {
       return isAuth() && (
         (
@@ -465,7 +507,10 @@ service cloud.firestore {
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
           || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
         );
-        allow delete: if isAuth() && canEditOrDeleteEntry(teamId, resource.data);
+        allow delete: if isAuth() && (
+          canEditOrDeleteEntry(teamId, resource.data)
+          || canDeleteScrimmageEntry(teamId, resource.data)
+        );
       }
 
       // Nested match-scouting subcollection — mirrors the pit-scouting block
@@ -493,7 +538,101 @@ service cloud.firestore {
           || canAnonymizeDepartedField(teamId, resource.data, request.resource.data, 'lastEditedBy', 'lastEditedByName')
           || canAnonymizeOwnLastEdit(resource.data, request.resource.data)
         );
-        allow delete: if isAuth() && canEditOrDeleteEntry(teamId, resource.data);
+        allow delete: if isAuth() && (
+          canEditOrDeleteEntry(teamId, resource.data)
+          || canDeleteScrimmageEntry(teamId, resource.data)
+        );
+      }
+
+      // Unofficial scrimmages — a team-PRIVATE stand-in for a FIRST event
+      // (the global events/{code} collection can't hold one: any signed-in
+      // user can read/write it). Pit/match entries for a scrimmage use the
+      // normal teams/{teamId}/pitScouting|matchScouting subcollections with
+      // eventCode 'SCRIM-<scrimId>' plus a scrimmageId field, so nothing about
+      // creating/editing them changes — see canDeleteScrimmageEntry() above for
+      // the one entry rule this adds.
+      //
+      // Doc shape: { name, season, eventCode, date?, createdAt, matchCount,
+      //   teams: { "<number>": { number, name, manualName, linked, location,
+      //   opr, linkedAt } } }.
+      //
+      // Who may do what:
+      //   - read: any team member.
+      //   - create / delete: canManageScrimmages only.
+      //   - rename / change date / change season: canManageScrimmages only
+      //     (name, date, season — season must stay a 20xx string — and
+      //     matchCount, which a season change resets to 0). Changing the
+      //     season deletes the scrimmage's entries first (client-side, with a
+      //     confirm); entrySeason() (first-api.js) is a safety net that makes
+      //     any entry read under the scrimmage doc's season.
+      //   - eventCode: immutable after create (no branch touches it).
+      //   - roster (`teams`): ANY team member may add a team or edit a team's
+      //     fields (a scout has to be able to add a team on the fly), but may
+      //     not remove one — the new map must still contain every old key.
+      //     canManageScrimmages may also remove. Rules cannot verify that a
+      //     removed team has zero entries (no collection queries, and match
+      //     entry IDs aren't derivable), so that guard is client-side only
+      //     (removeScrimmageTeam(), scrimmages.js).
+      //   - matchCount: ANY member, strictly increasing only, so two scouts
+      //     saving matches at once can never lower it.
+      match /scrimmages/{scrimId} {
+        allow read: if isTeamMember(teamId);
+
+        allow create: if canManageScrimmages(teamId)
+          && request.resource.data.keys().hasOnly(['name', 'season', 'eventCode', 'date', 'createdAt', 'teams', 'matchCount'])
+          && request.resource.data.keys().hasAll(['name', 'season', 'eventCode', 'createdAt', 'teams', 'matchCount'])
+          && request.resource.data.name is string
+          && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 60
+          && request.resource.data.season is string
+          && request.resource.data.season.matches('^20[0-9]{2}$')
+          && request.resource.data.eventCode == 'SCRIM-' + scrimId
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.teams is map && request.resource.data.teams.size() == 0
+          && request.resource.data.matchCount == 0
+          && isValidScrimmageDate(request.resource.data);
+
+        allow delete: if canManageScrimmages(teamId);
+
+        allow update: if (
+            // Roster edit by any member: only `teams` changes, nothing removed.
+            isTeamMember(teamId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['teams'])
+            && request.resource.data.teams is map
+            && request.resource.data.teams.keys().hasAll(resource.data.teams.keys())
+            && request.resource.data.teams.size() <= 100
+          ) || (
+            // Roster edit by a manager: same, but removal is allowed.
+            canManageScrimmages(teamId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['teams'])
+            && request.resource.data.teams is map
+            && request.resource.data.teams.size() <= 100
+          ) || (
+            // matchCount: any member, increase only.
+            isTeamMember(teamId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['matchCount'])
+            && request.resource.data.matchCount is int
+            && request.resource.data.matchCount > resource.data.get('matchCount', 0)
+            && request.resource.data.matchCount <= 9999
+          ) || (
+            // Manage (rename / change date / change season): managers only.
+            // eventCode stays immutable — it is deliberately NOT in this set.
+            // matchCount is in the set so changing the season (which deletes
+            // every entry, see saveScrimmageForm(), scrimmages.js) can reset it to
+            // 0 in the same write; when it is part of the change it must be an
+            // int 0..9999. (The member increase-only branch above is separate
+            // and unchanged.)
+            canManageScrimmages(teamId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'date', 'season', 'matchCount'])
+            && request.resource.data.name is string
+            && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 60
+            && request.resource.data.season is string
+            && request.resource.data.season.matches('^20[0-9]{2}$')
+            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['matchCount'])
+                || (request.resource.data.matchCount is int
+                    && request.resource.data.matchCount >= 0
+                    && request.resource.data.matchCount <= 9999))
+            && isValidScrimmageDate(request.resource.data)
+          );
       }
 
       // Per-team copy of a member's email — lets THIS team's captain (or a

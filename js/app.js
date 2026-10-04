@@ -23,8 +23,41 @@ if ('serviceWorker' in navigator) {
   });
 }
 
+// ====== Leaving a view: reset transient entry state ======
+// Anything tagged data-clear-on-leave in index.html is a transient entry box or
+// status/error line (not state the app deliberately keeps — search/filter/sort
+// boxes, the season dropdown, form-builder and account fields are NOT tagged;
+// those are listed for review instead of being guessed at). It is cleared when
+// the user stops viewing the page that contains it: switching Scouting
+// subtabs clears the subtab being left, switching dashboard tabs clears the
+// dashboard tab being left (which covers everything inside it, including the
+// event area above the subtabs). Modal fields are reset by their own
+// open/close handlers.
+function clearTransientIn(container) {
+  if (!container) return;
+  container.querySelectorAll('[data-clear-on-leave]').forEach(el => {
+    if (el.matches('input, textarea')) {
+      if (el.type === 'checkbox' || el.type === 'radio') el.checked = false;
+      else el.value = '';
+    } else if (!el.matches('select')) {
+      el.textContent = '';
+    }
+  });
+}
+
+function onScoutingSubtabLeft(name) {
+  clearTransientIn(document.getElementById('subtab-' + name));
+  // The Pinned tab's season filter goes back to the real current season.
+  if (name === 'pinned' && typeof resetPinnedSeasonFilter === 'function') resetPinnedSeasonFilter();
+}
+
+function onDashboardTabLeft(name) {
+  clearTransientIn(document.getElementById('dtab-' + name));
+  if (name === 'scouting' && typeof resetPinnedSeasonFilter === 'function') resetPinnedSeasonFilter();
+}
+
 // ====== Global Tab Navigation Handler ======
-let lastActiveScoutingSubTab = 'info'; // Remembers 'info', 'match', 'pit', 'pinned', or 'compare'
+let lastActiveScoutingSubTab = 'info'; // Remembers 'info', 'match', 'pit', 'pinned', 'scrimmages', or 'compare'
 
 // ====== Modals always reopen scrolled to top ======
 // Every modal's scrollable region(s) — the outer .modal-card itself
@@ -91,6 +124,10 @@ document.addEventListener('DOMContentLoaded', () => {
       tab: document.querySelector('[data-subtab="pinned"]'),
       view: document.getElementById('subtab-pinned')
     },
+    scrimmages: {
+      tab: document.querySelector('[data-subtab="scrimmages"]'),
+      view: document.getElementById('subtab-scrimmages')
+    },
     compare: {
       tab: document.querySelector('[data-subtab="compare"]'),
       view: document.getElementById('subtab-compare')
@@ -99,7 +136,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const activateSubTab = (subtab) => {
     if (!subtabs[subtab]) return;
+    const leftSubTab = lastActiveScoutingSubTab;
     lastActiveScoutingSubTab = subtab;
+    if (leftSubTab !== subtab) onScoutingSubtabLeft(leftSubTab);
 
     // An in-progress bulk-select (Team Info/Pit/Match) shouldn't survive ANY
     // tab change, not just a live permission revocation — see
@@ -155,6 +194,11 @@ document.addEventListener('DOMContentLoaded', () => {
       console.log('Switched to Pinned Events View');
       if (typeof renderPinnedEventsList === 'function') {
         renderPinnedEventsList();
+      }
+    } else if (subtab === 'scrimmages') {
+      console.log('Switched to Scrimmages View');
+      if (typeof renderScrimmageList === 'function') {
+        renderScrimmageList();
       }
     } else if (subtab === 'compare') {
       console.log('Switched to Pit vs Match View');

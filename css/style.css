@@ -480,8 +480,17 @@ input[type="password"]::placeholder {
    browsers/OS without meaningfully changing where the switchover lands. At
    or above it, restore the original edge-to-edge flex:1 fill (this bar
    never needed to shrink OR scroll at these widths before the mobile fix);
-   below it, keep the scroll-at-natural-width behavior from that fix. */
-@media (min-width: 700px) {
+   below it, keep the scroll-at-natural-width behavior from that fix.
+
+   UPDATE (Scrimmages subtab added — now 6 tabs): the natural (nowrap) widths
+   now sum to 700px (measured in the browser, not estimated), so the bar first
+   fits all six with no scrolling at a 782px viewport (same 82px of stacked
+   .screen + .page-shell padding/border as before). The old 700px breakpoint
+   left 700-781px in the fill layout while the tabs overflowed, so the bar
+   scrolled there instead of filling edge to edge. Moved to 800px, keeping a
+   ~18px margin above the real threshold. Re-measure and move this again if a
+   tab is ever added or renamed. (tests/07-scrimmage-layout.js checks this.) */
+@media (min-width: 800px) {
   #scouting-subtabs {
     overflow-x: visible;
   }
@@ -2205,4 +2214,135 @@ input[type="password"]::placeholder {
 .feedback-dropzone.drag-over {
   border-color: var(--primary);
   background: var(--surface);
+}
+/* ====== Unofficial scrimmages (js/scrimmages.js) ====== */
+/* The scrimmage color is the existing amber --presence pair (set apart from
+   --primary, which means "selected/active" everywhere else) so an open
+   scrimmage can never be mistaken for a FIRST event. */
+.scrimmage-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--presence);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--presence-bg);
+  font-size: 0.85rem;
+  font-weight: 600;
+  min-width: 0;
+}
+
+.scrimmage-banner-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+
+.scrimmage-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border: 1px solid var(--presence);
+  border-radius: 999px;
+  background: var(--presence-bg);
+  color: var(--presence);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+}
+
+.event-item.scrimmage-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  cursor: pointer;
+}
+
+.scrimmage-item-text {
+  flex: 1 1 180px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.scrimmage-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.scrimmage-item-actions .btn {
+  width: auto;
+  padding: 4px 10px;
+  font-size: 0.8rem;
+}
+
+/* "+ Add & scout a team" (Pit/Match) and "+ Add Team to Roster" (Info): a clear
+   primary button with one line of help text under it, shown only while a
+   scrimmage is open (data-scrimmage-only). */
+.scrimmage-add-block {
+  margin-bottom: 12px;
+}
+
+.scrimmage-add-block.hidden {
+  display: none !important;
+}
+
+.scrimmage-add-block .btn {
+  width: 100%;
+}
+
+.scrimmage-add-block .help-text {
+  margin: 6px 0 0;
+}
+
+.pinned-season-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-bottom: 8px;
+}
+
+.pinned-season-row label {
+  margin: 0;
+}
+
+.pinned-season-row select {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+.pit-field input[type="date"] {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.95rem;
+  outline: none;
+  font-family: inherit;
+}
+
+.pit-field input[type="date"]:focus {
+  border-color: var(--primary);
+}
+
+/* Add/Edit Team (opened from the Scout team # strips and the Info tab) sits
+   one level above the base modals, same as #pit-modal/#match-modal, so the
+   generic confirm modal (1002) always stacks above it. */
+#scrimmage-team-modal {
+  z-index: 1001;
+}
+/* Generic confirm modal: a message that keeps its line breaks (showConfirmModal's
+   `multiline` option — the scrimmage season-change confirm lists per-team lines). */
+#generic-confirm-message.confirm-multiline {
+  white-space: pre-line;
 }

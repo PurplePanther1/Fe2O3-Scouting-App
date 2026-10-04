@@ -115,6 +115,8 @@ function resetDashboardOnEnterTeam() {
     console.log(`[team] resetDashboardOnEnterTeam: resetting season selector from ${seasonSelect.value} to current (${currentSeason})`);
     if (seasonSelect.value !== currentSeason) {
       seasonSelect.value = currentSeason;
+      // The Pinned tab's season filter follows the app's season (pinned-events.js).
+      if (typeof syncPinnedSeasonToApp === 'function') syncPinnedSeasonToApp();
       if (typeof eventCache !== 'undefined' && !eventCache[currentSeason] && typeof ensureEventsLoaded === 'function') {
         ensureEventsLoaded(currentSeason).catch(() => {});
       }

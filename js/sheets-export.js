@@ -250,7 +250,8 @@ function formatTimestamp(ts) {
 const RESERVED_DOC_KEYS = new Set([
   'id', 'eventCode', 'teamNumber', 'teamId', 'matchNumber', 'teamName', 'season',
   'scoutedBy', 'scoutedByEmail', 'scoutedByName', 'scoutedAt', 'updatedAt',
-  'lastEditedBy', 'lastEditedByEmail', 'lastEditedByName', 'lastEditedByTimestamp'
+  'lastEditedBy', 'lastEditedByEmail', 'lastEditedByName', 'lastEditedByTimestamp',
+  'scrimmageId' // marks a scrimmage's entries (scrimmages.js) — metadata, not a form field
 ]);
 
 // ====== Turn formConfig fields + Firestore docs into a 2D array of sheet rows ======
@@ -351,6 +352,8 @@ async function splitMismatchedMatchEntries(matchDocs) {
   const eventCodes = Array.from(new Set(matchDocs.map(d => d.eventCode).filter(Boolean)));
   const schedules = {};
   await Promise.all(eventCodes.map(async (code) => {
+    // A scrimmage has no schedule — none of its entries can be "mismatched".
+    if (isScrimmageCode(code)) { schedules[code] = null; return; }
     try {
       schedules[code] = await getEventSchedule(code);
     } catch (err) {
@@ -384,6 +387,16 @@ async function splitMismatchedMatchEntries(matchDocs) {
 // for its rows rather than failing the export. ======
 async function getEventTeamNameMap(eventCode) {
   const map = {};
+  // A scrimmage's roster is its own team-private doc, never the global
+  // events/ cache — getScrimmageTeamNameMap() (scrimmages.js) reads it.
+  if (isScrimmageCode(eventCode)) {
+    try {
+      if (typeof getScrimmageTeamNameMap === 'function') return await getScrimmageTeamNameMap(scrimmageIdFromCode(eventCode));
+    } catch (err) {
+      console.warn(`Failed to load scrimmage roster names for ${eventCode}:`, err);
+    }
+    return map;
+  }
   try {
     if (typeof getCachedEvent !== 'function') return map;
     const cached = await getCachedEvent(eventCode);
@@ -457,8 +470,9 @@ async function loadFormConfigReadOnly(teamId, season, configType, defaultsFn) {
 // `season` field) authoritatively pins it; falls back to the app's
 // currently-selected season only if every doc predates season-tagging. ======
 function resolveExportSeason(docs) {
-  const tagged = (docs || []).find(d => d.season);
-  return tagged ? tagged.season : undefined;
+  // entriesSeason(): a scrimmage's entries read under the scrimmage's CURRENT
+  // season (first-api.js), not the season stamped on them when scouted.
+  return entriesSeason(docs);
 }
 
 // ====== Load the UNION of form-config fields across every season
@@ -471,7 +485,7 @@ function resolveExportSeason(docs) {
 // actually deleted — they just belong to a different season's form. ======
 async function loadUnionFormConfig(teamId, docs, configType, defaultsFn) {
   const seasons = docs.length > 0
-    ? Array.from(new Set(docs.map(d => d.season || resolveFormConfigSeason())))
+    ? Array.from(new Set(docs.map(d => entrySeason(d) || resolveFormConfigSeason())))
     : [resolveFormConfigSeason()];
 
   const perSeasonFields = await Promise.all(
@@ -803,14 +817,22 @@ async function gatherFullTeamExportData(teamId) {
 
   const allPitDocs = [];
   const allMatchDocs = [];
+  // Unofficial-scrimmage entries (scrimmageId / 'SCRIM-' event code) are left
+  // OUT of the whole-team history export so scrimmage data can never silently
+  // blend into a real export. An "Include scrimmages" toggle (default off) is a
+  // later phase; until then this is unconditional. Per-event exports of a
+  // selected scrimmage don't go through here and work as normal.
+  const isScrimmageDoc = (d) => !!d.scrimmageId || isScrimmageCode(d.eventCode);
   pitSnap.forEach(doc => {
     const data = { id: doc.id, ...doc.data() };
+    if (isScrimmageDoc(data)) return;
     allPitDocs.push(data);
     if (!data.eventCode) return;
     getBucket(data.eventCode).pitDocs.push(data);
   });
   matchSnap.forEach(doc => {
     const data = { id: doc.id, ...doc.data() };
+    if (isScrimmageDoc(data)) return;
     allMatchDocs.push(data);
     if (!data.eventCode) return;
     getBucket(data.eventCode).matchDocs.push(data);
@@ -1763,10 +1785,16 @@ function openExportChoiceModal(context) {
   if (printBtn) printBtn.classList.toggle('hidden', typeof context?.printHandler !== 'function');
 }
 
-function closeExportChoiceModal() {
+// `opts.chose` is set by the Excel/Sheets/Print buttons (the user picked an
+// export). Closing any other way — the X or a click on the overlay — is a
+// dismissal, and runs the caller's optional context.onDismiss (the scrimmage
+// season-change "Export First" uses it to return to its confirm).
+function closeExportChoiceModal(opts) {
+  const ctx = exportChoiceContext;
   exportChoiceContext = null;
   const modal = document.getElementById('export-choice-modal');
   if (modal) modal.classList.add('hidden');
+  if (ctx && !(opts && opts.chose) && typeof ctx.onDismiss === 'function') ctx.onDismiss();
 }
 
 // ====== Wire up buttons ======
@@ -1825,7 +1853,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (excelBtn) {
     excelBtn.addEventListener('click', () => {
       const ctx = exportChoiceContext;
-      closeExportChoiceModal();
+      closeExportChoiceModal({ chose: true });
       if (ctx) ctx.excelHandler(ctx.statusPrefix);
     });
   }
@@ -1834,7 +1862,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (sheetsBtn) {
     sheetsBtn.addEventListener('click', () => {
       const ctx = exportChoiceContext;
-      closeExportChoiceModal();
+      closeExportChoiceModal({ chose: true });
       if (ctx) ctx.sheetsHandler(ctx.statusPrefix);
     });
   }
@@ -1843,7 +1871,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (printBtn) {
     printBtn.addEventListener('click', () => {
       const ctx = exportChoiceContext;
-      closeExportChoiceModal();
+      closeExportChoiceModal({ chose: true });
       if (ctx && typeof ctx.printHandler === 'function') ctx.printHandler();
     });
   }

@@ -334,7 +334,7 @@ function renderTeamInfoList(teams) {
   container.innerHTML = '';
 
   if (!teams || teams.length === 0) {
-    status.textContent = 'No teams found for this event.';
+    status.textContent = emptyRosterMessage();
     return;
   }
 
@@ -382,6 +382,12 @@ function renderTeamInfoList(teams) {
       ? createTeamScoutingDeleteButton(team, selectedEvent?.code || '', 'combined')
       : null;
     if (deleteBtn) btnGroup.appendChild(deleteBtn);
+
+    // An open scrimmage's roster rows also get [Edit] (name only, any member)
+    // and — for canManageScrimmages holders — [Remove] (scrimmages.js).
+    if (selectedEvent?.isScrimmage && typeof appendScrimmageTeamRowActions === 'function') {
+      appendScrimmageTeamRowActions(btnGroup, team);
+    }
 
     const viewDetailBtn = document.createElement('button');
     viewDetailBtn.className = 'btn btn-small btn-secondary';
@@ -525,7 +531,7 @@ async function renderPitDataForTeam(teamNumber, eventCode) {
     // currently-selected season for a legacy entry saved before
     // season-tagging existed) — this preview should reflect the field set
     // that was active when the team was scouted, not today's form.
-    fields = teamId && typeof loadFormConfig === 'function' ? await loadFormConfig(teamId, entry.season) : [];
+    fields = teamId && typeof loadFormConfig === 'function' ? await loadFormConfig(teamId, entrySeason(entry)) : [];
   } catch (err) {
     console.warn('Failed to load pit form config for team detail:', err);
     fields = [];

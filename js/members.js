@@ -54,6 +54,13 @@ function resetNestedScrollContainers(container) {
 // Exposed globally so a fresh login can reset to the default tab (My Team)
 // the same way a page refresh does, instead of duplicating this logic.
 function activateDashboardTab(name) {
+  // Whatever dashboard tab is being LEFT drops its transient entry state
+  // (see clearTransientIn(), app.js) before anything below changes.
+  const leftDashTab = (document.querySelector('.dtab-content.active') || {}).id;
+  if (leftDashTab && leftDashTab.replace('dtab-', '') !== name && typeof onDashboardTabLeft === 'function') {
+    onDashboardTabLeft(leftDashTab.replace('dtab-', ''));
+  }
+
   // An in-progress bulk-select (Team Info/Pit/Match) shouldn't survive ANY
   // tab change, including this one (main dashboard tab) — see
   // exitAllBulkSelectModes() (first-api.js). Unconditional (not gated on
@@ -513,7 +520,7 @@ async function fetchMemberInfo(teamId, uid) {
 // of others' entries — see auth.js's canUserEditOtherEntries(). Old team docs
 // may still carry a stale permissions[uid].canBulkDelete field; it's simply
 // never read.
-const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canPinEvents', 'canViewMemberEmails', 'canKickMembers', 'canRegenerateJoinCode'];
+const MEMBER_PERMISSION_KEYS = ['canEditTemplates', 'canEditOtherEntries', 'canPinEvents', 'canViewMemberEmails', 'canKickMembers', 'canRegenerateJoinCode', 'canManageScrimmages'];
 
 // Human-readable labels, matching the Edit Permissions modal's checkbox
 // labels exactly — reused by the read-only "My Permissions" modal (below)
@@ -524,7 +531,8 @@ const MEMBER_PERMISSION_LABELS = {
   canPinEvents: 'Pin/unpin events',
   canViewMemberEmails: 'View member emails',
   canKickMembers: 'Kick members',
-  canRegenerateJoinCode: "Regenerate the team's join code"
+  canRegenerateJoinCode: "Regenerate the team's join code",
+  canManageScrimmages: 'Create, rename & delete unofficial scrimmages'
 };
 let memberPermissionsEditingUid = null;
 
@@ -1405,15 +1413,36 @@ document.addEventListener('DOMContentLoaded', () => {
 // blocking, one-at-a-time nature); the pending action is captured directly
 // in the closure passed as onConfirm, so no extra pendingXId/pendingXData
 // module state is needed the way the sole-member leave-team modal above has. ======
+//
+// Optional extras (every existing caller omits them and behaves exactly as
+// before): `secondaryLabel`/`onSecondary` add a THIRD action button between
+// Confirm and Cancel (it closes the modal, then runs onSecondary — used by the
+// scrimmage season-change confirm's "Export First"); `onCancel` runs when the
+// user backs out via Cancel, the X, or a click on the overlay (NOT after
+// Confirm or the secondary action, and not for a programmatic close);
+// `multiline` keeps line breaks in the message (CSS .confirm-multiline).
 let pendingGenericConfirmCallback = null;
+let pendingGenericSecondaryCallback = null;
+let pendingGenericCancelCallback = null;
 
-function showConfirmModal({ title, message, confirmLabel, danger, hideCancel, onConfirm }) {
+function showConfirmModal({ title, message, confirmLabel, danger, hideCancel, onConfirm, secondaryLabel, onSecondary, onCancel, multiline }) {
   const titleEl = document.getElementById('generic-confirm-title');
   const messageEl = document.getElementById('generic-confirm-message');
   const proceedBtn = document.getElementById('btn-generic-confirm-proceed');
   const cancelBtn = document.getElementById('btn-generic-confirm-cancel');
+  const secondaryBtn = document.getElementById('btn-generic-confirm-secondary');
   if (titleEl) titleEl.textContent = title || 'Confirm';
-  if (messageEl) messageEl.textContent = message || '';
+  if (messageEl) {
+    messageEl.textContent = message || '';
+    // Reset every call — the modal's markup is shared, not rebuilt.
+    messageEl.classList.toggle('confirm-multiline', !!multiline);
+  }
+  if (secondaryBtn) {
+    secondaryBtn.textContent = secondaryLabel || '';
+    secondaryBtn.classList.toggle('hidden', !secondaryLabel);
+  }
+  pendingGenericSecondaryCallback = (secondaryLabel && typeof onSecondary === 'function') ? onSecondary : null;
+  pendingGenericCancelCallback = typeof onCancel === 'function' ? onCancel : null;
   if (proceedBtn) {
     proceedBtn.textContent = confirmLabel || 'Confirm';
     proceedBtn.style.cssText = danger ? 'background:var(--error); color:#fff; border-color:var(--error);' : '';
@@ -1438,8 +1467,18 @@ function showNoticeModal({ title, message }) {
   showConfirmModal({ title, message, confirmLabel: 'OK', hideCancel: true, onConfirm: null });
 }
 
+// The user backed out (Cancel button, the X, or a click on the overlay):
+// run onCancel, if the caller gave one, after closing.
+function cancelGenericConfirmModal() {
+  const callback = pendingGenericCancelCallback;
+  closeGenericConfirmModal();
+  if (callback) callback();
+}
+
 function closeGenericConfirmModal() {
   pendingGenericConfirmCallback = null;
+  pendingGenericSecondaryCallback = null;
+  pendingGenericCancelCallback = null;
   // Whatever was showing (including a removed-teams notice — see
   // queueRemovedTeamNotice() below) is done with once this shared modal
   // closes, regardless of what closed it — this is the single teardown
@@ -1498,13 +1537,22 @@ function queueRemovedTeamNotice(teamName) {
 
 document.addEventListener('DOMContentLoaded', () => {
   const closeBtn = document.getElementById('btn-generic-confirm-close');
-  if (closeBtn) closeBtn.addEventListener('click', closeGenericConfirmModal);
+  if (closeBtn) closeBtn.addEventListener('click', cancelGenericConfirmModal);
 
   const cancelBtn = document.getElementById('btn-generic-confirm-cancel');
-  if (cancelBtn) cancelBtn.addEventListener('click', closeGenericConfirmModal);
+  if (cancelBtn) cancelBtn.addEventListener('click', cancelGenericConfirmModal);
 
   const overlay = document.getElementById('generic-confirm-modal-overlay');
-  if (overlay) overlay.addEventListener('click', closeGenericConfirmModal);
+  if (overlay) overlay.addEventListener('click', cancelGenericConfirmModal);
+
+  const secondaryBtn = document.getElementById('btn-generic-confirm-secondary');
+  if (secondaryBtn) {
+    secondaryBtn.addEventListener('click', async () => {
+      const callback = pendingGenericSecondaryCallback;
+      closeGenericConfirmModal();
+      if (callback) await callback();
+    });
+  }
 
   const proceedBtn = document.getElementById('btn-generic-confirm-proceed');
   if (proceedBtn) {

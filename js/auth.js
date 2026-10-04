@@ -281,6 +281,11 @@ function refreshActiveTeamData(teamId, teamData) {
   if (typeof renderPinnedEventsList === 'function') {
     renderPinnedEventsList();
   }
+  // canManageScrimmages grants/revokes land live here too — re-renders the
+  // Scrimmages list/roster controls only if the effective permission flipped.
+  if (typeof onScrimmagePermissionsMaybeChanged === 'function') {
+    onScrimmagePermissionsMaybeChanged();
+  }
 }
 
 function watchTeamDoc(teamId) {
@@ -307,6 +312,9 @@ function watchTeamDoc(teamId) {
   }
   teamMemberProfilesWatchedTeamId = null;
   teamMemberProfilesWatchedMembersKey = null;
+  // Same single entry/exit point for the scrimmages list (scrimmages.js) —
+  // stopped here on every team switch/sign-out/removal, restarted below.
+  if (typeof stopWatchingScrimmages === 'function') stopWatchingScrimmages();
   if (!teamId) return;
 
   teamDocUnsubscribe = db.collection('teams').doc(teamId).onSnapshot((doc) => {
@@ -360,6 +368,9 @@ function watchTeamDoc(teamId) {
   // "cheap given how small/infrequent this is" reasoning as
   // memberDisplayNames above, rather than resolving which specific
   // season/type doc changed.
+  // teams/{teamId}/scrimmages (scrimmages.js) — the Scrimmages subtab's live list.
+  if (typeof watchScrimmages === 'function') watchScrimmages(teamId);
+
   formConfigUnsubscribe = db.collection('teams').doc(teamId).collection('formConfig')
     .onSnapshot(() => {
       if (typeof invalidateFormConfigCache === 'function') invalidateFormConfigCache(teamId);
@@ -2397,6 +2408,20 @@ function canUserRegenerateJoinCode() {
   if (currentTeamData.permissions &&
       currentTeamData.permissions[currentUser.uid] &&
       currentTeamData.permissions[currentUser.uid].canRegenerateJoinCode === true) {
+    return true;
+  }
+  return false;
+}
+
+// Gate for the Scrimmages subtab's "+ New Scrimmage"/Rename-Date/Delete controls
+// (and removing a scrimmage's roster team) — firestore.rules' canManageScrimmages()
+// enforces this same captain-or-canManageScrimmages condition server-side.
+function canUserManageScrimmages() {
+  if (!currentUser || !currentTeamData) return false;
+  if (getCurrentUserRole() === 'captain') return true;
+  if (currentTeamData.permissions &&
+      currentTeamData.permissions[currentUser.uid] &&
+      currentTeamData.permissions[currentUser.uid].canManageScrimmages === true) {
     return true;
   }
   return false;

@@ -344,6 +344,23 @@ async function deleteEntireTeam(teamId, uid, teamData) {
     console.warn(`Failed to query formConfig for team deletion:`, err);
   }
 
+  // Scrimmage docs (their entries were already removed by
+  // deleteAllScoutingEntriesForTeam() above, which is unfiltered by event).
+  // Like formConfig, they must go BEFORE the team doc: the captain's
+  // canManageScrimmages() rule check reads it.
+  try {
+    const scrimmagesSnap = await db.collection('teams').doc(teamId).collection('scrimmages').get();
+    for (const doc of scrimmagesSnap.docs) {
+      try {
+        await doc.ref.delete();
+      } catch (err) {
+        console.warn(`Failed to delete scrimmages/${doc.id} for team ${teamId}:`, err);
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to query scrimmages for team deletion:', err);
+  }
+
   if (teamData && teamData.joinCode) {
     try {
       await db.collection('joinCodes').doc(teamData.joinCode).delete();

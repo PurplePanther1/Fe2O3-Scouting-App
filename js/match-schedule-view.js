@@ -82,6 +82,10 @@ function hideMatchViewToggle() {
 // view is currently active (same eager-load-both-views convention the
 // team-based pit/match lists already follow). ======
 function onMatchScheduleEventSelected(eventCode) {
+  // A scrimmage has no schedule: Match Scouting is Team View only, so the
+  // toggle stays hidden and nothing is fetched (selectScrimmage() already
+  // forces Team View).
+  if (isScrimmageCode(eventCode)) return;
   showMatchViewToggle();
   loadMatchScheduleView(eventCode);
   // Auto-loads scores for this event (session/Firestore cache first, live
@@ -119,6 +123,7 @@ function resetMatchScheduleView() {
 // ====== Fetch this event's schedule and render it ======
 async function loadMatchScheduleView(eventCode) {
   currentEventSchedule = [];
+  if (isScrimmageCode(eventCode)) return; // no schedule for a scrimmage (see onMatchScheduleEventSelected)
 
   const status = document.getElementById('match-schedule-status');
   const list = document.getElementById('match-schedule-list');

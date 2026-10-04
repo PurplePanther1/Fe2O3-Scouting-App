@@ -291,6 +291,19 @@ async function loadTeamDetail(teamNumber, eventCode, prefix = 'td-') {
     renderMatchListForTeam(eventCode, teamNumber);
   }
 
+  // A scrimmage team that isn't linked to FTCScout must NEVER be looked up by
+  // number: its number is whatever a scout typed (#99999 is a real FTCScout
+  // team, for one), so a lookup would show some other team's name, location,
+  // OPR and awards as if they were this one's. Show the roster's own info
+  // instead. (A linked team — phase 2 — falls through to the normal lookup.)
+  if (isScrimmageCode(eventCode)) {
+    const rosterTeam = (typeof currentEventTeams !== 'undefined' ? currentEventTeams : []).find(t => Number(t.teamNumber) === Number(teamNumber));
+    if (!rosterTeam || rosterTeam.linked !== true) {
+      renderUnlinkedScrimmageTeamDetail(rosterTeam, teamNumber, prefix);
+      return;
+    }
+  }
+
   try {
     // Check cache first
     const cached = await getCachedTeamDetail(teamNumber);
@@ -356,6 +369,35 @@ async function loadTeamDetail(teamNumber, eventCode, prefix = 'td-') {
     if (nameEl) nameEl.textContent = `Team #${teamNumber}`;
     if (awardsList) awardsList.innerHTML = '<p class="help-text" style="font-size:0.8rem">No awards available.</p>';
   }
+}
+
+// ====== Team Details for a scrimmage team that isn't linked to FTCScout —
+// roster info only, no network. Same DOM the normal path fills, so the rest of
+// the modal (pit data, match entries, export) is unaffected. ======
+function renderUnlinkedScrimmageTeamDetail(rosterTeam, teamNumber, prefix = 'td-') {
+  const numEl = document.getElementById(`${prefix}team-number`);
+  const nameEl = document.getElementById(`${prefix}team-name`);
+  const locEl = document.getElementById(`${prefix}team-location`);
+  const oprBadge = document.getElementById(`${prefix}opr-badge`);
+  const awardsList = document.getElementById(`${prefix}awards-list`);
+  const awardsSelect = document.getElementById(`${prefix}awards-season-select`);
+
+  if (numEl) numEl.textContent = `#${teamNumber}`;
+  if (nameEl) nameEl.textContent = (rosterTeam && rosterTeam.name) || `Team #${teamNumber}`;
+  if (locEl) locEl.textContent = 'Unofficial scrimmage team';
+  if (oprBadge) {
+    oprBadge.textContent = 'OPR: N/A';
+    oprBadge.style.background = 'transparent';
+    oprBadge.style.border = '1px solid var(--border)';
+  }
+  if (awardsSelect) {
+    awardsSelect.innerHTML = '';
+    awardsSelect.disabled = true;
+  }
+  if (awardsList) {
+    awardsList.innerHTML = '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">This team isn\'t linked to FTCScout.</p>';
+  }
+  delete lastLoadedTeamDetail[prefix];
 }
 
 // ====== Render team detail into the DOM ======

@@ -394,7 +394,9 @@ async function openMatchScoutForm(teamNumber, eventCode, lockedMatchNumber = nul
         teamNumber: Number(teamNumber),
         matchNumber: Number(lockedMatchNumber),
         teamId,
-        season: resolveFormConfigSeason()
+        season: resolveFormConfigSeason(),
+        // Only set for a scrimmage's entries (see isScrimmageCode(), first-api.js)
+        ...(isScrimmageCode(eventCode) ? { scrimmageId: scrimmageIdFromCode(eventCode) } : {})
       });
     } else {
       // BATCH mode — today's model, plus the early duplicate-number check.
@@ -463,7 +465,7 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
     // currently-selected season for a legacy entry saved before
     // season-tagging existed) — editing an old entry should show the field
     // set that was active when it was scouted, not today's form.
-    const fields = await loadMatchFormConfig(teamId, existingData?.season);
+    const fields = await loadMatchFormConfig(teamId, entrySeason(existingData));
     const container = document.getElementById('match-dynamic-fields');
     const renderedFields = lockMatchNumber ? fields.filter(f => f.id !== 'matchNumber') : fields;
 
@@ -479,7 +481,7 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
         teamNumber: Number(existingData.teamNumber),
         matchNumber: Number(existingData.matchNumber),
         teamId,
-        season: existingData.season || resolveFormConfigSeason()
+        season: entrySeason(existingData) || resolveFormConfigSeason()
       });
     } else {
       // BATCH mode — today's model, plus the early duplicate-number check
@@ -552,6 +554,9 @@ function matchFormValuesChanged(fieldValues, existingData) {
 // published schedule yet — since there's nothing to validate against, not
 // evidence of a mismatch. ======
 async function isMatchNumberMismatched(eventCode, teamNumber, matchNumber) {
+  // A scrimmage has no schedule to validate against (and its synthetic code
+  // must never reach the worker) — nothing to warn about.
+  if (isScrimmageCode(eventCode)) return false;
   let schedule;
   try {
     schedule = await getEventSchedule(eventCode);
@@ -707,7 +712,11 @@ async function performMatchScoutSave(fieldValues, matchNumber, teamId) {
         // current season's form looks like now. Immutable once set on an
         // existing entry (like scoutedAt below); a legacy entry saved before
         // this field existed picks one up here on its next save.
-        season: (isExisting && existingData.season) ? existingData.season : resolveFormConfigSeason(),
+        season: (isExisting && entrySeason(existingData)) ? entrySeason(existingData) : resolveFormConfigSeason(),
+        // Marks a scrimmage's entries (eventCode 'SCRIM-<id>') so firestore.rules
+        // can let a canManageScrimmages holder cascade-delete them, and so exports
+        // can tell them apart from real-event data. Absent on every real-event entry.
+        ...(isScrimmageCode(currentMatchEventCode) ? { scrimmageId: scrimmageIdFromCode(currentMatchEventCode) } : {}),
         ...fieldValues,
         scoutedBy: scoutedByUid,
         // Raw email is never stored on entries — attribution is uid + display name only.
@@ -740,6 +749,14 @@ async function performMatchScoutSave(fieldValues, matchNumber, teamId) {
       }
 
     await db.collection('teams').doc(teamId).collection('matchScouting').doc(docId).set(payload, { merge: true });
+
+    // A scrimmage has no schedule, so its "N matches" figure is just the
+    // highest match number scouted so far — see bumpScrimmageMatchCount()
+    // (scrimmages.js). Fire-and-forget: a failure here must never fail a save
+    // that already succeeded.
+    if (isScrimmageCode(currentMatchEventCode) && typeof bumpScrimmageMatchCount === 'function') {
+      bumpScrimmageMatchCount(currentMatchEventCode, matchNumber);
+    }
 
     hideLoading();
     if (successEl) successEl.textContent = 'Match scouting data saved!';
@@ -1255,7 +1272,7 @@ async function renderMatchListForTeam(eventCode, teamNumber, prefix = 'td-') {
       // here predates season-tagging. Resolving once for the whole list
       // (rather than per-entry) keeps this consistent with the fact that an
       // event can never actually span two seasons.
-      const listSeason = entries.find(e => e.season)?.season;
+      const listSeason = entriesSeason(entries);
       const matchFields = await loadMatchFormConfig(teamId, listSeason);
       if (matchListRenderGeneration[prefix] !== myGeneration) return; // superseded by a newer call
       previewFields = matchFields.filter(f => f.showInPreview !== false);

@@ -72,6 +72,9 @@ function resetMatchScores() {
 // required. A session-cache hit applies synchronously; otherwise this falls
 // through to the Firestore cache and, failing that, a live FTCScout fetch. ======
 function onMatchScoresEventSelected(eventCode) {
+  // A scrimmage has no FIRST/FTCScout scores, and its code must never reach
+  // FTCScout or the global events/ collection.
+  if (isScrimmageCode(eventCode)) return;
   currentMatchScoresEventCode = eventCode;
   const myToken = ++matchScoresFetchToken;
 
@@ -89,6 +92,7 @@ function onMatchScoresEventSelected(eventCode) {
 // shape as getEventSchedule() (first-api.js): check events/{eventCode} for a
 // cached field first, and only hit the external API if that's missing/stale. ======
 async function loadMatchScoresForEvent(eventCode, myToken) {
+  if (isScrimmageCode(eventCode)) return;
   const season = Number(typeof getSelectedSeason === 'function' ? getSelectedSeason() : null);
   try {
     const eventRef = db.collection('events').doc(eventCode);
@@ -124,6 +128,7 @@ async function loadMatchScoresForEvent(eventCode, myToken) {
 // layers before applying it to the display (if this is still the event
 // being viewed). ======
 async function fetchAndCacheMatchScores(eventCode, myToken) {
+  if (isScrimmageCode(eventCode)) return; // never query FTCScout / events/ with a scrimmage code
   const season = Number(typeof getSelectedSeason === 'function' ? getSelectedSeason() : null);
   if (!season) return;
 
@@ -222,6 +227,7 @@ const RANKING_POINT_CRITERIA = [
 // rules). In practice the doc always exists by the time this runs (selectEvent()
 // caches name+ftcTeams before schedule/scores are ever fetched). ======
 async function writeMatchScoresToFirestore(eventCode, scoresByNumber, finished, season) {
+  if (isScrimmageCode(eventCode)) return;
   try {
     const eventRef = db.collection('events').doc(eventCode);
     const doc = await eventRef.get();
@@ -262,7 +268,7 @@ function applyScoresToDisplay(eventCode, scoresByNumber, finished, myToken) {
 // handles that automatically); this is for explicitly re-checking an
 // in-progress event. ======
 async function refreshMatchScores() {
-  if (!selectedEvent?.code || matchScoresFetchInFlight || currentEventScoresFinished) return;
+  if (!selectedEvent?.code || selectedEvent.isScrimmage || matchScoresFetchInFlight || currentEventScoresFinished) return;
   await fetchAndCacheMatchScores(selectedEvent.code, matchScoresFetchToken);
 }
 

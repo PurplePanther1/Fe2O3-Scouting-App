@@ -234,7 +234,7 @@ function renderComparisonTeamList(teams) {
   container.innerHTML = '';
 
   if (!teams || teams.length === 0) {
-    status.textContent = 'No teams found for this event.';
+    status.textContent = emptyRosterMessage();
     return;
   }
 
@@ -317,7 +317,7 @@ async function renderComparisonPitSide(teamNumber, eventCode) {
   let pitFields = [];
   if (teamId && typeof loadFormConfig === 'function') {
     try {
-      pitFields = await loadFormConfig(teamId, pitEntry?.season);
+      pitFields = await loadFormConfig(teamId, entrySeason(pitEntry));
     } catch (err) {
       console.warn('Failed to load pit form config for comparison:', err);
     }
@@ -353,7 +353,7 @@ async function renderComparisonMatchSide(teamNumber, eventCode) {
   const teamId = currentTeamData?.id;
   let matchFields = [];
   if (teamId && typeof loadMatchFormConfig === 'function') {
-    const listSeason = allMatchEntries.find((e) => e.season)?.season;
+    const listSeason = entriesSeason(allMatchEntries);
     try {
       matchFields = await loadMatchFormConfig(teamId, listSeason);
     } catch (err) {
@@ -553,7 +553,7 @@ function renderMatchesUsedBody(body, teamNumber, eventCode, normal, mismatched, 
     viewBtn.addEventListener('click', async () => {
       const teamId = currentTeamData?.id;
       const fields = teamId && typeof loadMatchFormConfig === 'function'
-        ? await loadMatchFormConfig(teamId, entry.season)
+        ? await loadMatchFormConfig(teamId, entrySeason(entry))
         : [];
       openViewEntryModal(`Match #${entry.matchNumber} — Team #${teamNumber}`, fields, entry);
     });
@@ -848,7 +848,7 @@ async function handleComparisonPrintClick(teamNumber, eventCode) {
   if (!teamId) return;
 
   const pitEntry = typeof getPitScoutedEntry === 'function' ? getPitScoutedEntry(teamNumber, eventCode) : null;
-  const pitFields = typeof loadFormConfig === 'function' ? await loadFormConfig(teamId, pitEntry?.season) : [];
+  const pitFields = typeof loadFormConfig === 'function' ? await loadFormConfig(teamId, entrySeason(pitEntry)) : [];
 
   const allMatchEntries = typeof getMatchEntriesForTeam === 'function' ? getMatchEntriesForTeam(teamNumber, eventCode) : [];
   let normal = allMatchEntries;
@@ -865,7 +865,7 @@ async function handleComparisonPrintClick(teamNumber, eventCode) {
   const inclusionMap = getInclusionMap(eventCode, teamNumber, normal, mismatched);
   const includedEntries = allMatchEntries.filter((e) => inclusionMap.get(e.id) !== false);
 
-  const listSeason = allMatchEntries.find((e) => e.season)?.season;
+  const listSeason = entriesSeason(allMatchEntries);
   const matchFields = typeof loadMatchFormConfig === 'function' ? await loadMatchFormConfig(teamId, listSeason) : [];
 
   const teamName = pitEntry?.teamName || includedEntries[0]?.teamName || '';
@@ -924,7 +924,7 @@ document.addEventListener('DOMContentLoaded', () => {
         return;
       }
       const teamId = currentTeamData?.id;
-      const fields = teamId && typeof loadFormConfig === 'function' ? await loadFormConfig(teamId, entry.season) : [];
+      const fields = teamId && typeof loadFormConfig === 'function' ? await loadFormConfig(teamId, entrySeason(entry)) : [];
       openViewEntryModal(`Pit Entry — Team #${teamNumber}`, fields, entry);
     });
   }

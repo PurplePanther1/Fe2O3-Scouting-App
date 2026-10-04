@@ -172,6 +172,8 @@ async function restorePerTeamEventState() {
     console.log(`[session-state] restorePerTeamEventState: season restore - savedSeason=${savedSeason}, hasOption=${hasOption}, currentSelectValue=${seasonSelect.value}, targetSeason=${targetSeason}`);
     if (seasonSelect.value !== targetSeason) {
       seasonSelect.value = targetSeason;
+      // The Pinned tab's season filter follows the app's season (pinned-events.js).
+      if (typeof syncPinnedSeasonToApp === 'function') syncPinnedSeasonToApp();
       if (typeof eventCache !== 'undefined' && !eventCache[targetSeason] && typeof ensureEventsLoaded === 'function') {
         try {
           await ensureEventsLoaded(targetSeason);
