@@ -1058,6 +1058,13 @@ input[type="password"]::placeholder {
   border-radius: 3px;
 }
 
+/* A row's button group (Delete / Edit / Remove / View Detail ...) is a flex-shrink:0
+   item, so with 3-4 buttons it was wider than the row at ~320px and pushed the page
+   sideways. Capping it at the row's width lets its own flex-wrap actually wrap. */
+.team-item .team-item-actions {
+  max-width: 100%;
+}
+
 .team-item .team-number {
   font-weight: 700;
   font-size: 1rem;
@@ -1449,11 +1456,13 @@ input[type="password"]::placeholder {
    app, including several nested inside pit-modal/match-modal (1001) —
    delete confirms — and inside base-level (1000) modals like Delete
    Account, Team Detail, the form builder, and "View Matches Scouted".
-   Set one level above the highest existing nested level (1001) so it
-   reliably stacks above whichever of those it's opened from, rather than
-   needing a different value per call site. */
+   Set one level above the highest existing nested level so it reliably
+   stacks above whichever of those it's opened from, rather than needing a
+   different value per call site. (1003: the scrimmage merge Compare screen
+   sits at 1002, above the Edit Team modal, and its "Discard changes?" confirm
+   must layer above THAT.) */
 #generic-confirm-modal {
-  z-index: 1002;
+  z-index: 1003;
 }
 
 .modal-overlay-bg {
@@ -2337,12 +2346,540 @@ input[type="password"]::placeholder {
 
 /* Add/Edit Team (opened from the Scout team # strips and the Info tab) sits
    one level above the base modals, same as #pit-modal/#match-modal, so the
-   generic confirm modal (1002) always stacks above it. */
+   generic confirm modal (1003) always stacks above it. */
 #scrimmage-team-modal {
   z-index: 1001;
 }
 /* Generic confirm modal: a message that keeps its line breaks (showConfirmModal's
-   `multiline` option — the scrimmage season-change confirm lists per-team lines). */
+   `multiline` option — the scrimmage season-change confirm lists per-team lines).
+   Capped + scrollable: the bulk "Link unlinked teams" overwrite confirm lists one
+   line per team and a roster can hold up to 100. */
 #generic-confirm-message.confirm-multiline {
   white-space: pre-line;
+  max-height: 50vh;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+/* ====== FTCScout lookup / link (js/ftc-team-lookup.js, js/scrimmages.js) ====== */
+/* Opened from the Add/Edit Team modal and the Team Detail modal (both 1000/1001),
+   so it sits above them; the generic confirm modal (1003) layers above it. */
+#ftc-lookup-modal {
+  z-index: 1001;
+}
+
+/* Cancel / Add manually / Add Linked Team don't fit one row at 320px — let them wrap. */
+#ftc-lookup-modal .pit-modal-actions {
+  flex-wrap: wrap;
+}
+
+#ftc-lookup-modal .pit-modal-actions .btn {
+  flex: 1 1 auto;
+}
+
+.ftc-lookup-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ftc-lookup-row input {
+  width: 100%;
+  min-width: 0;
+}
+
+.ftc-lookup-row .btn {
+  width: 100%;
+}
+
+/* The lookup popup is a flex column (like the bulk-link and merge popups): the header and the
+   Cancel / Use buttons keep their height and ONLY the middle part (number box, status, the up to 5
+   result rows or the single card, errors) scrolls — so the buttons never leave a short screen. */
+.modal-card.ftc-lookup-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ftc-lookup-card .modal-header {
+  flex-shrink: 0;
+}
+
+.ftc-lookup-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 16px 24px 24px;
+}
+
+.ftc-lookup-scroll {
+  flex: 1 1 auto;
+  min-height: 72px;
+  overflow-y: auto;
+}
+
+.ftc-lookup-body > .pit-modal-actions {
+  flex-shrink: 0;
+}
+
+/* The result rows (2+ matches, or a roster team among them): one tappable row per team. Up to 5. */
+.ftc-lookup-results {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.ftc-lookup-results.hidden {
+  display: none;
+}
+
+.ftc-result-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.ftc-result-row:hover:not(:disabled) {
+  border-color: var(--primary);
+}
+
+.ftc-result-row.is-selected {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+  background: var(--presence-bg);
+}
+
+.ftc-result-row.is-roster {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ftc-result-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+}
+
+.ftc-result-number {
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.ftc-result-name {
+  font-weight: 600;
+  min-width: 0;
+}
+
+.ftc-result-loc,
+.ftc-result-extra {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.ftc-result-extra:empty {
+  display: none;
+}
+
+.ftc-lookup-result {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.ftc-lookup-result.hidden {
+  display: none;
+}
+
+.ftc-lookup-result p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.ftc-lookup-result-name {
+  font-weight: 700;
+}
+
+/* Unlink sits next to Look up / Link (only one of them shows at a time). */
+#scrimmage-team-ftc-block .btn {
+  width: 100%;
+}
+
+/* The "can't be edited while linked" line under the locked name box (states B and C). */
+.lock-note {
+  overflow-wrap: anywhere;
+}
+
+/* "Team #B is already on this scrimmage. [Merge] [Change the number]" in the Edit modal. */
+.merge-choice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--presence);
+  border-radius: 8px;
+  background: var(--presence-bg);
+}
+
+.merge-choice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.merge-choice-actions .btn {
+  flex: 1 1 140px;
+  width: auto;
+}
+
+/* A locked box (a linked team's name, a fixed number) reads as locked. */
+.pit-field input[readonly],
+.pit-field input:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+/* ...and never shows the focus highlight, even if something focuses it (a click on a
+   read-only box focuses it in most browsers). Outranks input[type="text"]:focus and
+   .pit-field input[type="number"]:focus. */
+.pit-field input[readonly]:focus,
+.pit-field input:disabled:focus {
+  border-color: var(--border);
+}
+
+/* Bulk link review popup (scrimmages.js). Only the list scrolls; the header and
+   the Cancel / Link buttons stay on screen. Above the base modals like the other
+   scrimmage popups. */
+#bulk-link-modal {
+  z-index: 1001;
+}
+
+/* The card is a column: header and the Cancel / Link buttons keep their height, the list
+   in between takes the rest (capped at half the screen) and is the ONLY thing that
+   scrolls — .modal-card's own 90vh + overflow-y:auto would otherwise scroll the
+   buttons off the bottom of a short (landscape-phone) screen. */
+.modal-card.bulk-link-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.bulk-link-card .modal-header {
+  flex-shrink: 0;
+}
+
+.bulk-link-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 12px 12px;
+}
+
+.bulk-link-body > .help-text,
+.bulk-link-body > .pit-modal-actions {
+  flex-shrink: 0;
+}
+
+.bulk-link-scroll {
+  flex: 1 1 auto;
+  min-height: 96px;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-bottom: 8px;
+  padding-right: 4px;
+}
+
+.bulk-link-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.bulk-link-group-head h4,
+#bulk-link-notfound-group h4 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.bulk-link-toggles {
+  display: flex;
+  gap: 6px;
+}
+
+.bulk-link-toggles .btn {
+  width: auto;
+  padding: 2px 10px;
+  font-size: 0.75rem;
+}
+
+#bulk-link-notfound-group {
+  margin-top: 12px;
+}
+
+.bulk-link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bulk-link-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.bulk-link-row input {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  cursor: pointer;
+}
+
+.bulk-link-row.is-plain {
+  cursor: default;
+  color: var(--text-muted);
+}
+
+.bulk-link-row .bulk-link-number {
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* Merge Compare screen (scrimmage-merge.js). Same column card as the bulk-link popup:
+   the header and the Cancel / Merge buttons keep their height and ONLY the list scrolls. */
+#scrimmage-merge-modal {
+  z-index: 1002;
+}
+
+.modal-card.merge-compare-card {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.merge-compare-card .modal-header {
+  flex-shrink: 0;
+}
+
+.merge-compare-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 12px 12px;
+}
+
+.merge-compare-body > .help-text,
+.merge-compare-body > .error-message,
+.merge-compare-body > .pit-modal-actions {
+  flex-shrink: 0;
+}
+
+.merge-compare-body .help-text {
+  overflow-wrap: anywhere;
+}
+
+.merge-compare-list {
+  flex: 1 1 auto;
+  min-height: 96px;
+  max-height: 55vh;
+  overflow-y: auto;
+  margin-bottom: 8px;
+  padding-right: 4px;
+}
+
+#scrimmage-merge-modal .pit-modal-actions {
+  flex-wrap: wrap;
+}
+
+#scrimmage-merge-modal .pit-modal-actions .btn {
+  flex: 1 1 auto;
+}
+
+.merge-conflict {
+  margin-bottom: 14px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.merge-conflict-title {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+
+.merge-sides {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.merge-side {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+
+.merge-side-who {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.merge-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.merge-shortcuts .btn {
+  width: auto;
+  flex: 1 1 auto;
+}
+
+.merge-field {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.merge-field-label {
+  margin-bottom: 4px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.merge-field-opts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.merge-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.merge-opt input {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  cursor: pointer;
+}
+
+.merge-opt-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.merge-opt-who {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.merge-same {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.merge-same-title {
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.merge-same-line {
+  overflow-wrap: anywhere;
+}
+
+/* Narrow screens: A's and B's sides stack. */
+@media (max-width: 520px) {
+  .merge-sides,
+  .merge-field-opts {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Roster-row badges (appendScrimmageLinkBadge(), scrimmages.js): "unlinked" in
+   every team list, "linked" only on the Info tab. */
+.team-link-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border: 1px solid var(--presence);
+  border-radius: 999px;
+  background: var(--presence-bg);
+  color: var(--presence);
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.team-link-badge.is-linked {
+  border-color: var(--success);
+  background: transparent;
+  color: var(--success);
+}
+
+/* "Include scrimmages" on the whole-team export choice. */
+.export-choice-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.export-choice-check input {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.scrimmage-excluded-note:empty {
+  display: none;
 }

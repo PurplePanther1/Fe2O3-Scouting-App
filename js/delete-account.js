@@ -174,10 +174,19 @@ function openDeleteAccountModal() {
         successEl.className = 'success-message';
         successEl.id = `${statusPrefix}-success`;
 
+        // How many scrimmage entries the export leaves out by default.
+        const noteEl = document.createElement('p');
+        noteEl.className = 'help-text scrimmage-excluded-note';
+        noteEl.id = `${statusPrefix}-scrimmage-note`;
+        noteEl.style.cssText = 'margin:6px 0 0;';
+
         wrapper.appendChild(btn);
+        wrapper.appendChild(noteEl);
         wrapper.appendChild(errorEl);
         wrapper.appendChild(successEl);
         exportActionsEl.appendChild(wrapper);
+        // After it is in the DOM: the note is looked up by id.
+        if (typeof refreshScrimmageExcludedNote === 'function') refreshScrimmageExcludedNote(noteEl.id, t.id);
       });
     }
 

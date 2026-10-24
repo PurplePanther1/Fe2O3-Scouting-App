@@ -247,7 +247,7 @@ function renderComparisonTeamList(teams) {
     item.dataset.teamNumber = team.teamNumber;
 
     const leftGroup = document.createElement('div');
-    leftGroup.style.cssText = 'display:flex; align-items:center; gap:8px; flex:1; min-width:0;';
+    leftGroup.style.cssText = 'display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; flex:1; min-width:0;';
 
     const numSpan = document.createElement('span');
     numSpan.className = 'team-number';
@@ -259,6 +259,8 @@ function renderComparisonTeamList(teams) {
 
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
+    // Scrimmage rosters only: an "unlinked" badge (scrimmages.js).
+    if (typeof appendScrimmageLinkBadge === 'function') appendScrimmageLinkBadge(leftGroup, team);
 
     const btnGroup = document.createElement('div');
     btnGroup.className = 'team-item-actions';

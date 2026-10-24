@@ -801,9 +801,19 @@ async function gatherEventMatchOnlyExportData(eventCode, teamId) {
 // query deleteAllScoutingEntriesForTeam() (delete-account.js) already uses
 // when a team is deleted — an unfiltered read of the teams/{teamId}/pitScouting
 // and teams/{teamId}/matchScouting subcollections. Grouped client-side by
-// eventCode. Used only by the "Export Whole Team Data" flow, right before a
-// team's data is permanently deleted (leaving/deleting as its last member). ======
-async function gatherFullTeamExportData(teamId) {
+// eventCode. Used by the My Team "Export Team Data" button and by the "Export
+// Whole Team Data" flow right before a team's data is permanently deleted
+// (leaving/deleting as its last member).
+//
+// Unofficial-scrimmage entries (scrimmageId / 'SCRIM-' event code) are left OUT
+// unless `includeScrimmages` (the export-choice modal's checkbox, default off) —
+// so scrimmage data never silently blends into a real export, and the caller can
+// tell the user how many were left out (`scrimmageEntryCount`, counted either
+// way). When included they are bucketed under their scrimmage code like any
+// event, labelled by scrimmage NAME (`eventLabels`), named from the scrimmage's
+// own roster (not the global events/ cache), and read under the scrimmage's
+// season. Per-event exports of a selected scrimmage don't go through here. ======
+async function gatherFullTeamExportData(teamId, { includeScrimmages = false } = {}) {
   const pitSnap = await withStep('Reading all pit scouting data',
     () => db.collection('teams').doc(teamId).collection('pitScouting').get());
   const matchSnap = await withStep('Reading all match scouting data',
@@ -817,26 +827,40 @@ async function gatherFullTeamExportData(teamId) {
 
   const allPitDocs = [];
   const allMatchDocs = [];
-  // Unofficial-scrimmage entries (scrimmageId / 'SCRIM-' event code) are left
-  // OUT of the whole-team history export so scrimmage data can never silently
-  // blend into a real export. An "Include scrimmages" toggle (default off) is a
-  // later phase; until then this is unconditional. Per-event exports of a
-  // selected scrimmage don't go through here and work as normal.
   const isScrimmageDoc = (d) => !!d.scrimmageId || isScrimmageCode(d.eventCode);
-  pitSnap.forEach(doc => {
+
+  // The team's scrimmage docs (name, season, roster) — only needed when they are
+  // included. Read by team id, not through scrimmages.js's live state, because
+  // this also runs for a team that isn't the open one (Delete Account).
+  const scrimmageDocs = {};
+  if (includeScrimmages) {
+    const scrimSnap = await withStep('Reading scrimmages',
+      () => db.collection('teams').doc(teamId).collection('scrimmages').get());
+    scrimSnap.forEach(doc => { scrimmageDocs[doc.id] = doc.data(); });
+  }
+
+  let scrimmageEntryCount = 0;
+  const collect = (snap, allDocs, key) => snap.forEach(doc => {
     const data = { id: doc.id, ...doc.data() };
-    if (isScrimmageDoc(data)) return;
-    allPitDocs.push(data);
+    if (isScrimmageDoc(data)) {
+      // An empty never-committed shell (left by a cancelled pit/match form) is not
+      // an entry: not counted, and not exported even when scrimmages are included.
+      if (!isEntryCommitted(data)) return;
+      scrimmageEntryCount += 1;
+      if (!includeScrimmages) return;
+      // entrySeason() (first-api.js) resolves a scrimmage's season from live
+      // state that only covers the OPEN team; pin this copy to the scrimmage
+      // doc's own season so any entrySeason()/entriesSeason() read below is
+      // right for every team.
+      const scrim = scrimmageDocs[data.scrimmageId || scrimmageIdFromCode(data.eventCode)];
+      if (scrim && scrim.season) data.season = String(scrim.season);
+    }
+    allDocs.push(data);
     if (!data.eventCode) return;
-    getBucket(data.eventCode).pitDocs.push(data);
+    getBucket(data.eventCode)[key].push(data);
   });
-  matchSnap.forEach(doc => {
-    const data = { id: doc.id, ...doc.data() };
-    if (isScrimmageDoc(data)) return;
-    allMatchDocs.push(data);
-    if (!data.eventCode) return;
-    getBucket(data.eventCode).matchDocs.push(data);
-  });
+  collect(pitSnap, allPitDocs, 'pitDocs');
+  collect(matchSnap, allMatchDocs, 'matchDocs');
 
   // This export spans the team's ENTIRE history — potentially many seasons
   // at once, each with its own field configuration — so, unlike every other
@@ -857,12 +881,77 @@ async function gatherFullTeamExportData(teamId) {
     bucket.pitDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0));
     bucket.matchDocs.sort((a, b) => (a.teamNumber || 0) - (b.teamNumber || 0) || (a.matchNumber || 0) - (b.matchNumber || 0));
 
-    const nameMap = await getEventTeamNameMap(eventCode);
+    let nameMap;
+    if (isScrimmageCode(eventCode)) {
+      const scrim = scrimmageDocs[scrimmageIdFromCode(eventCode)];
+      nameMap = {};
+      Object.entries((scrim && scrim.teams) || {}).forEach(([key, t]) => {
+        const number = Number(t && t.number != null ? t.number : key);
+        if (Number.isFinite(number)) nameMap[number] = (t && t.name) || '';
+      });
+    } else {
+      nameMap = await getEventTeamNameMap(eventCode);
+    }
     attachTeamNames(bucket.pitDocs, nameMap);
     attachTeamNames(bucket.matchDocs, nameMap);
   }
 
-  return { pitFields, matchFields, eventCodes, byEvent };
+  // What each bucket is called in file/folder/sheet names: the event code, or
+  // "Scrimmage - <name>" for a scrimmage. Unique per bucket, so two scrimmages
+  // with the same name can't overwrite each other's zip entry.
+  const eventLabels = {};
+  const usedLabels = new Set();
+  eventCodes.forEach(eventCode => {
+    let label = eventCode;
+    if (isScrimmageCode(eventCode)) {
+      const scrim = scrimmageDocs[scrimmageIdFromCode(eventCode)];
+      label = `Scrimmage - ${(scrim && scrim.name) || scrimmageIdFromCode(eventCode)}`;
+    }
+    let unique = label;
+    for (let i = 2; usedLabels.has(unique.toLowerCase()); i++) unique = `${label} (${i})`;
+    usedLabels.add(unique.toLowerCase());
+    eventLabels[eventCode] = unique;
+  });
+
+  return { pitFields, matchFields, eventCodes, byEvent, eventLabels, scrimmageEntryCount };
+}
+
+// ====== How many scrimmage entries (pit + match) this team has —
+// a direct range query on the 'SCRIM-' event-code prefix, so the "N scrimmage
+// entries not included" line can show before any export is opened. COMMITTED
+// entries only (empty drafts left by a cancelled form aren't entries). Resolves to 0
+// when it can't be read (the line just doesn't show). ======
+async function countScrimmageEntries(teamId) {
+  if (!teamId) return 0;
+  try {
+    const base = db.collection('teams').doc(teamId);
+    const prefix = SCRIMMAGE_CODE_PREFIX;
+    const [pitSnap, matchSnap] = await Promise.all(['pitScouting', 'matchScouting'].map(col =>
+      base.collection(col).where('eventCode', '>=', prefix).where('eventCode', '<', prefix + '\uf8ff').get()));
+    return [...pitSnap.docs, ...matchSnap.docs].filter(d => isEntryCommitted(d.data())).length;
+  } catch (err) {
+    console.warn('Failed to count scrimmage entries:', err);
+    return 0;
+  }
+}
+
+function scrimmageEntriesNotIncludedText(n) {
+  return `${n} scrimmage ${n === 1 ? 'entry' : 'entries'} not included`;
+}
+
+// Fills a "N scrimmage entries not included" line (empty — and so hidden — when
+// N is 0). Always overwrites, so a stale count from another team is replaced; a
+// slow count that lands after the element was re-targeted is dropped.
+const scrimmageNoteTargets = {};
+async function refreshScrimmageExcludedNote(elementId, teamId) {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  el.textContent = '';
+  scrimmageNoteTargets[elementId] = teamId || null;
+  if (!teamId) return;
+  const n = await countScrimmageEntries(teamId);
+  if (scrimmageNoteTargets[elementId] !== teamId) return;
+  el.textContent = n > 0 ? scrimmageEntriesNotIncludedText(n) : '';
 }
 
 // ====== Status message helper (mirrors the app's error/success paragraph convention) ======
@@ -1446,7 +1535,7 @@ async function handleExportEventMatchOnlyExcelClick(statusPrefix) {
 // when leaving/deleting a team as its LAST remaining member, right before
 // that data is permanently deleted — see openWholeTeamExportChoice() below
 // for how teamId/teamName get bound in from the leave/delete-account flows. ======
-async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix) {
+async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix, { includeScrimmages = false } = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1461,11 +1550,11 @@ async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix) {
 
   showLoading('Gathering all scouting data...');
   try {
-    const { pitFields, matchFields, eventCodes, byEvent } = await gatherFullTeamExportData(teamId);
+    const { pitFields, matchFields, eventCodes, byEvent, eventLabels } = await gatherFullTeamExportData(teamId, { includeScrimmages });
 
     if (eventCodes.length === 0) {
       hideLoading();
-      setStatusMessage(statusPrefix, 'success', 'No scouting data found for this team — nothing to export.');
+      setStatusMessage(statusPrefix, 'success', wholeTeamEmptyMessage(includeScrimmages));
       return;
     }
 
@@ -1474,7 +1563,7 @@ async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix) {
     for (const eventCode of eventCodes) {
       const { pitDocs, matchDocs } = byEvent[eventCode];
       const bytes = await buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs);
-      zip.file(`${sanitizeFilename(eventCode)}.xlsx`, bytes);
+      zip.file(`${sanitizeFilename(eventLabels[eventCode])}.xlsx`, bytes);
     }
 
     showLoading('Creating ZIP file...');
@@ -1505,7 +1594,7 @@ async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix) {
 // + drive.file) since folder creation/moving needs Drive API access none of
 // this file's other exports request. Used only by the leave/delete-as-last-
 // member flow, right before the team's data is gone for good. ======
-async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix) {
+async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix, { includeScrimmages = false } = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1519,11 +1608,11 @@ async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix) 
     await getGoogleWholeTeamAccessToken();
 
     showLoading('Gathering all scouting data...');
-    const { pitFields, matchFields, eventCodes, byEvent } = await gatherFullTeamExportData(teamId);
+    const { pitFields, matchFields, eventCodes, byEvent, eventLabels } = await gatherFullTeamExportData(teamId, { includeScrimmages });
 
     if (eventCodes.length === 0) {
       hideLoading();
-      setStatusMessage(statusPrefix, 'success', 'No scouting data found for this team — nothing to export.');
+      setStatusMessage(statusPrefix, 'success', wholeTeamEmptyMessage(includeScrimmages));
       return;
     }
 
@@ -1534,16 +1623,17 @@ async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix) 
       createDriveFolder(`${folderLabel} — Full Scouting Export`));
 
     for (const eventCode of eventCodes) {
-      showLoading(`Exporting event ${eventCode}...`);
+      const label = eventLabels[eventCode];
+      showLoading(`Exporting ${label}...`);
       const { pitDocs, matchDocs } = byEvent[eventCode];
 
-      const eventFolder = await withStep(`Creating folder for event ${eventCode}`, () =>
-        createDriveFolder(eventCode, rootFolder.id));
+      const eventFolder = await withStep(`Creating folder for ${label}`, () =>
+        createDriveFolder(label, rootFolder.id));
 
-      const created = await withStep(`Creating spreadsheet for event ${eventCode}`, () =>
-        exportToNewSpreadsheet(`${folderLabel} — ${eventCode}`, pitFields, pitDocs, matchFields, matchDocs, getGoogleWholeTeamAccessToken));
+      const created = await withStep(`Creating spreadsheet for ${label}`, () =>
+        exportToNewSpreadsheet(`${folderLabel} — ${label}`, pitFields, pitDocs, matchFields, matchDocs, getGoogleWholeTeamAccessToken));
 
-      await withStep(`Moving spreadsheet for event ${eventCode} into its folder`, () =>
+      await withStep(`Moving spreadsheet for ${label} into its folder`, () =>
         moveFileToFolder(created.spreadsheetId, eventFolder.id));
     }
 
@@ -1572,20 +1662,44 @@ async function openWholeTeamExportChoice(teamId, teamName, statusPrefix) {
     return;
   }
 
+  // The precheck is the FILTERED result (scrimmages off, the modal's default),
+  // so scrimmage-only data doesn't count as "data" by itself. If the only data is
+  // scrimmage entries the modal still opens — its "Include scrimmages" box is the
+  // way to export them — and an export with the box off says so.
+  let scrimmageEntryCount = 0;
+  let counted = false;
   const hasData = await precheckExportData(
     statusPrefix,
-    () => gatherFullTeamExportData(teamId),
-    (r) => r.eventCodes.length === 0,
+    async () => {
+      const r = await gatherFullTeamExportData(teamId, { includeScrimmages: false });
+      scrimmageEntryCount = r.scrimmageEntryCount;
+      counted = true;
+      return r;
+    },
+    (r) => r.eventCodes.length === 0 && r.scrimmageEntryCount === 0,
     'No scouting data found for this team — nothing to export.'
   );
+  // The offer's own "N scrimmage entries not included" line (`${statusPrefix}-scrimmage-note`, next to the
+  // button that opened this) always matches what the export just read.
+  const offerNote = document.getElementById(`${statusPrefix}-scrimmage-note`);
+  if (offerNote && counted) offerNote.textContent = scrimmageEntryCount > 0 ? scrimmageEntriesNotIncludedText(scrimmageEntryCount) : '';
   if (!hasData) return;
 
   openExportChoiceModal({
     title: 'Export Whole Team Data',
     statusPrefix,
-    excelHandler: (prefix) => handleExportWholeTeamExcelClick(teamId, teamName, prefix),
-    sheetsHandler: (prefix) => handleExportWholeTeamSheetsClick(teamId, teamName, prefix)
+    includeScrimmagesOption: { count: scrimmageEntryCount },
+    excelHandler: (prefix, opts) => handleExportWholeTeamExcelClick(teamId, teamName, prefix, opts),
+    sheetsHandler: (prefix, opts) => handleExportWholeTeamSheetsClick(teamId, teamName, prefix, opts)
   });
+}
+
+// Whole-team export with nothing to write: with scrimmages off, scrimmage-only data
+// is "nothing" too — and the message says where it went.
+function wholeTeamEmptyMessage(includeScrimmages) {
+  return includeScrimmages
+    ? 'No scouting data found for this team — nothing to export.'
+    : 'No scouting data found outside scrimmages — tick "Include scrimmages" to export those.';
 }
 
 // ====== Open the shared export-choice modal for a single team's pit + match
@@ -1783,6 +1897,33 @@ function openExportChoiceModal(context) {
   // doesn't pass a printHandler, so this stays hidden for them, unchanged.
   const printBtn = document.getElementById('btn-export-choice-print');
   if (printBtn) printBtn.classList.toggle('hidden', typeof context?.printHandler !== 'function');
+
+  // "Include scrimmages" is whole-team only (context.includeScrimmagesOption) and
+  // starts UNCHECKED every time; the line under it says how many entries are
+  // out while it is off.
+  const optionEl = document.getElementById('export-choice-scrimmage-option');
+  const checkbox = document.getElementById('chk-export-include-scrimmages');
+  if (checkbox) checkbox.checked = false;
+  if (optionEl) optionEl.classList.toggle('hidden', !context?.includeScrimmagesOption);
+  updateExportChoiceScrimmageNote();
+}
+
+function updateExportChoiceScrimmageNote() {
+  const note = document.getElementById('export-choice-scrimmage-note');
+  const checkbox = document.getElementById('chk-export-include-scrimmages');
+  if (!note) return;
+  const opt = exportChoiceContext && exportChoiceContext.includeScrimmagesOption;
+  if (!opt) { note.textContent = ''; return; }
+  const n = opt.count || 0;
+  if (n === 0) note.textContent = 'This team has no scrimmage entries.';
+  else if (checkbox && checkbox.checked) note.textContent = `Including ${n} scrimmage ${n === 1 ? 'entry' : 'entries'}, one file per scrimmage.`;
+  else note.textContent = scrimmageEntriesNotIncludedText(n);
+}
+
+// What the whole-team handlers receive as their second argument.
+function readExportChoiceOptions() {
+  const checkbox = document.getElementById('chk-export-include-scrimmages');
+  return { includeScrimmages: !!(exportChoiceContext && exportChoiceContext.includeScrimmagesOption && checkbox && checkbox.checked) };
 }
 
 // `opts.chose` is set by the Excel/Sheets/Print buttons (the user picked an
@@ -1849,12 +1990,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const overlay = document.getElementById('export-choice-modal-overlay');
   if (overlay) overlay.addEventListener('click', closeExportChoiceModal);
 
+  const includeScrimmagesBox = document.getElementById('chk-export-include-scrimmages');
+  if (includeScrimmagesBox) includeScrimmagesBox.addEventListener('change', updateExportChoiceScrimmageNote);
+
   const excelBtn = document.getElementById('btn-export-choice-excel');
   if (excelBtn) {
     excelBtn.addEventListener('click', () => {
       const ctx = exportChoiceContext;
+      const opts = readExportChoiceOptions();
       closeExportChoiceModal({ chose: true });
-      if (ctx) ctx.excelHandler(ctx.statusPrefix);
+      if (ctx) ctx.excelHandler(ctx.statusPrefix, opts);
     });
   }
 
@@ -1862,8 +2007,9 @@ document.addEventListener('DOMContentLoaded', () => {
   if (sheetsBtn) {
     sheetsBtn.addEventListener('click', () => {
       const ctx = exportChoiceContext;
+      const opts = readExportChoiceOptions();
       closeExportChoiceModal({ chose: true });
-      if (ctx) ctx.sheetsHandler(ctx.statusPrefix);
+      if (ctx) ctx.sheetsHandler(ctx.statusPrefix, opts);
     });
   }
 

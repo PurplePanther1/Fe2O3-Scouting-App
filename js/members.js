@@ -131,6 +131,12 @@ function activateDashboardTab(name) {
   // is showing anyway. Centralized here rather than at each individual
   // trigger (sign-out, switchActiveTeam, leaveTeam, ...), same reasoning as
   // showScreen()'s screen-team field clearing.
+  // The My Team tab offers a whole-team export: show how many scrimmage entries
+  // it leaves out by default (sheets-export.js).
+  if (name === 'myteam' && typeof refreshScrimmageExcludedNote === 'function') {
+    refreshScrimmageExcludedNote('myteam-export-scrimmage-note', typeof currentTeamId !== 'undefined' ? currentTeamId : null);
+  }
+
   const joinAnotherTeamInput = document.getElementById('input-join-another-team-code');
   if (joinAnotherTeamInput) joinAnotherTeamInput.value = '';
   if (typeof clearStatusMessage === 'function') clearStatusMessage('join-another-team');
@@ -1358,6 +1364,9 @@ function openLeaveTeamConfirmModal(teamId, teamData) {
     messageEl.textContent = `Leave "${teamData?.name || 'this team'}"? Since you're the last member, the ENTIRE team and all its data will be permanently deleted. Export it first if you want to keep a copy.`;
   }
   if (typeof clearStatusMessage === 'function') clearStatusMessage('leave-team-confirm-export');
+  // A whole-team export is offered here, so say how many scrimmage entries it
+  // leaves out by default (sheets-export.js).
+  if (typeof refreshScrimmageExcludedNote === 'function') refreshScrimmageExcludedNote('leave-team-confirm-export-scrimmage-note', teamId);
 
   const modal = document.getElementById('leave-team-confirm-modal');
   if (modal) modal.classList.remove('hidden');
@@ -1367,6 +1376,7 @@ function closeLeaveTeamConfirmModal() {
   pendingLeaveTeamId = null;
   pendingLeaveTeamData = null;
   if (typeof clearStatusMessage === 'function') clearStatusMessage('leave-team-confirm-export');
+  if (typeof refreshScrimmageExcludedNote === 'function') refreshScrimmageExcludedNote('leave-team-confirm-export-scrimmage-note', null);
   const modal = document.getElementById('leave-team-confirm-modal');
   if (modal) modal.classList.add('hidden');
 }

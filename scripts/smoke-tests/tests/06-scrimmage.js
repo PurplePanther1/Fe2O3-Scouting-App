@@ -11,7 +11,7 @@
 const assert = require('node:assert/strict');
 const {
   signInUI, createTeamUI, joinTeamUI, openScoutingSubtab, openScrimmagesTab,
-  createScrimmageUI, scrimmageRow, openScrimmageUI, addAndScoutUI, submitScrimmageTeamModal, teamRow, fillRequiredFields
+  createScrimmageUI, scrimmageRow, openScrimmageUI, addAndScoutUI, submitScrimmageTeamModal, teamRow, fillRequiredFields, pitScoutTeam
 } = require('../lib/app');
 
 const countEntries = (page, teamId, code) => page.evaluate(async ([tid, c]) => {
@@ -122,10 +122,28 @@ module.exports = {
     await page.locator('#team-list-info .team-item[data-team-number="4242"]').waitFor();
     assert.match(await page.textContent('#team-list-info'), /Robo Cats/);
     assert.match(await page.textContent('#scrimmage-roster-success'), /Added Team #4242/);
+    // A number already on the roster is now an INLINE ERROR in the still-open modal
+    // (it used to close and quietly reuse the existing team).
     await page.click('#btn-scrimmage-add-team');
-    await submitScrimmageTeamModal(page, { number: 4242, name: 'Different Name' });
-    assert.match(await page.textContent('#scrimmage-roster-success'), /already on this scrimmage's roster/);
+    await page.fill('#input-scrimmage-team-number', '4242');
+    await page.fill('#input-scrimmage-team-name', 'Different Name');
+    await page.click('#btn-scrimmage-team-save');
+    assert.equal((await page.textContent('#scrimmage-team-error')).trim(), "Team #4242 is already on this scrimmage's roster. Change the number or cancel.");
+    assert.ok(await page.isVisible('#scrimmage-team-modal'), 'the Add modal stays open');
+    assert.equal(await page.inputValue('#input-scrimmage-team-number'), '4242', 'what was typed is kept so it can be edited');
+    assert.doesNotMatch(await page.textContent('#scrimmage-roster-success'), /already on/, 'no page-level message');
     assert.match(await page.textContent('#team-list-info .team-item[data-team-number="4242"]'), /Robo Cats/, 'existing team untouched');
+    // ...changing the number to a free one then works from the same modal.
+    await page.fill('#input-scrimmage-team-number', '4243');
+    await page.click('#btn-scrimmage-team-save');
+    await page.waitForSelector('#scrimmage-team-modal', { state: 'hidden' });
+    await page.locator('#team-list-info .team-item[data-team-number="4243"]').waitFor();
+    // (remove it again so the rest of this test's team counts are unchanged)
+    await page.evaluate(async () => {
+      await db.collection('teams').doc(currentTeamData.id).collection('scrimmages').doc(currentScrimmage.id)
+        .update(new firebase.firestore.FieldPath('teams', '4243'), firebase.firestore.FieldValue.delete());
+    });
+    await page.waitForFunction(() => !currentScrimmage.teams['4243']);
 
     // ---------- leaving a view clears its status lines ----------
     await openScoutingSubtab(page, 'pit');
@@ -175,7 +193,8 @@ module.exports = {
     await page.waitForSelector('#pit-modal', { state: 'hidden' });
     await (await teamRow(page, '#team-list-pit', 777)).locator('.pit-row-meta').waitFor();
 
-    // ...an EXISTING team skips the add and opens the form directly; modal was reset
+    // ...an EXISTING number is an inline error and NO form opens (it used to open
+    // the existing team's form); the modal was reset after the previous use.
     const rosterBefore = await page.evaluate(() => Object.keys(currentScrimmage.teams).length);
     await page.click('#btn-scrimmage-add-scout-pit');
     await page.waitForSelector('#scrimmage-team-modal:not(.hidden)');
@@ -183,12 +202,14 @@ module.exports = {
     assert.equal(await page.inputValue('#input-scrimmage-team-name'), '', 'name reset after the previous use');
     await page.fill('#input-scrimmage-team-number', '4242');
     await page.click('#btn-scrimmage-team-save');
-    await page.waitForSelector('#pit-modal:not(.hidden) #pit-dynamic-fields .pit-field');
-    assert.equal(await page.evaluate(() => Object.keys(currentScrimmage.teams).length), rosterBefore, 'nothing added for an existing team');
-    await page.waitForFunction(() => typeof currentPitLiveSession !== 'undefined' && currentPitLiveSession && currentPitLiveSession.isJoined());
-    await fillRequiredFields(page, '#pit-modal', 'scrim pit note');
-    await page.click('#btn-pit-save');
-    await page.waitForSelector('#pit-modal', { state: 'hidden' });
+    assert.match(await page.textContent('#scrimmage-team-error'), /Team #4242 is already on this scrimmage's roster. Change the number or cancel./);
+    assert.ok(await page.isVisible('#scrimmage-team-modal'), 'Add & scout on an existing number keeps the modal open');
+    assert.ok(!(await page.isVisible('#pit-modal')), 'and opens no pit form');
+    await page.click('#btn-scrimmage-team-cancel');
+    await page.waitForSelector('#scrimmage-team-modal', { state: 'hidden' });
+    assert.equal(await page.evaluate(() => Object.keys(currentScrimmage.teams).length), rosterBefore, 'nothing added');
+    // 4242's pit entry comes from its own row, as for any roster team.
+    await pitScoutTeam(page, 4242, 'scrim pit note');
 
     // ---------- "+ Add & scout a team" (Match, Team View), new team with no name ----------
     await openScoutingSubtab(page, 'match');
@@ -337,9 +358,11 @@ module.exports = {
     // the confirm: totals, per-team lines, the roster note, THREE actions
     const msg = await page.textContent('#generic-confirm-message');
     assert.match(msg, /Changing the season to 2025-2026.* deletes all scouting entries in this scrimmage, because the form fields change\./);
-    assert.match(msg, /3 teams have data: 3 pit and 2 match entries\./);
+    // The member's open pit form is an EMPTY DRAFT (no checkpoint): not an entry, so it
+    // isn't counted (#888 has 0 pit) — but it is still swept by the change (checked below).
+    assert.match(msg, /3 teams have data: 2 pit and 2 match entries\./);
     assert.match(msg, /#777 — 1 pit, 0 match/);
-    assert.match(msg, /#888 — 1 pit, 1 match/);
+    assert.match(msg, /#888 — 0 pit, 1 match/);
     assert.match(msg, /#4242 — 1 pit, 1 match/);
     assert.doesNotMatch(msg, /and \d+ more team/, 'only 3 teams, so no "and K more"');
     assert.match(msg, /The teams stay on the roster\. This can't be undone\./);
@@ -347,7 +370,7 @@ module.exports = {
     assert.equal((await page.textContent('#btn-generic-confirm-secondary')).trim(), 'Export First');
     assert.ok(await page.isVisible('#btn-generic-confirm-secondary'));
     assert.ok(await page.isVisible('#btn-generic-confirm-cancel'));
-    assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('generic-confirm-modal')).zIndex), '1002', 'layers above the Manage modal');
+    assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('generic-confirm-modal')).zIndex), '1003', 'layers above the Manage modal');
 
     // Cancel / X / click-out change NOTHING; the Manage modal stays as left.
     const assertUntouched = async (label) => {

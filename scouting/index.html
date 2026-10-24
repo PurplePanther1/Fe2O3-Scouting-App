@@ -269,6 +269,8 @@
             <div class="scrimmage-add-block hidden" data-scrimmage-only>
               <button id="btn-scrimmage-add-team" type="button" class="btn btn-primary">+ Add Team to Roster</button>
               <p class="help-text">Add a team by number &mdash; scouts can also add teams from the Pit and Match tabs.</p>
+              <button id="btn-scrimmage-bulk-link" type="button" class="btn btn-outline hidden" style="margin-top:8px">Bulk link teams</button>
+              <p id="scrimmage-bulk-link-help" class="help-text hidden">Looks the unlinked teams up on FTCScout by number (for this scrimmage's season), then lets you choose which to link.</p>
               <p id="scrimmage-roster-error" class="error-message" style="margin:0" data-clear-on-leave></p>
               <p id="scrimmage-roster-success" class="success-message" style="margin:0" data-clear-on-leave></p>
             </div>
@@ -508,6 +510,7 @@
           <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">EXPORT TEAM DATA</h3>
           <p class="help-text" style="margin-bottom:12px">Export this team's full scouting history — every event, both pit and match data.</p>
           <button id="btn-myteam-export" class="btn btn-outline" style="width:100%">📦 Export Team Data</button>
+          <p id="myteam-export-scrimmage-note" class="help-text scrimmage-excluded-note" style="margin:6px 0 0"></p>
           <p id="myteam-export-error" class="error-message"></p>
           <p id="myteam-export-success" class="success-message"></p>
         </div>
@@ -659,6 +662,17 @@
           <p class="help-text" style="margin-bottom:12px">Each team's display-name field is optional — leave it blank to use your account name above.</p>
           <div id="account-teams-list"></div>
           <p id="account-teams-status" class="help-text"></p>
+        </div>
+
+        <!-- Data: one button that re-caches what can be re-cached and makes event data reload
+             fresh (js/data-refresh.js). Device-level, so it lives here (visible to every
+             signed-in user, team or not), with a per-device cooldown. -->
+        <div class="account-section-card">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">DATA</h3>
+          <p id="refresh-data-help" class="help-text" style="margin-bottom:12px"></p>
+          <button id="btn-refresh-cached-data" class="btn btn-outline" style="width:100%">Refresh cached data</button>
+          <p id="refresh-data-error" class="error-message"></p>
+          <p id="refresh-data-success" class="success-message"></p>
         </div>
 
         <!-- Delete account -->
@@ -1313,7 +1327,7 @@
   </div>
 
   <!-- Scrimmage Add Team / Edit Team modal (js/scrimmages.js) — z-index 1001
-       (style.css) so the generic confirm modal (1002) always layers above it. -->
+       (style.css) so the generic confirm modal (1003) always layers above it. -->
   <div id="scrimmage-team-modal" class="modal-overlay hidden">
     <div id="scrimmage-team-modal-overlay" class="modal-overlay-bg"></div>
     <div class="modal-card modal-card--sm">
@@ -1325,15 +1339,129 @@
         <div class="pit-field">
           <label for="input-scrimmage-team-number">Team number (1&ndash;99999) *</label>
           <input type="number" id="input-scrimmage-team-number" inputmode="numeric" min="1" max="99999" autocomplete="off" />
+          <p id="scrimmage-team-number-hint" class="help-text hidden" style="margin:6px 0 0"></p>
+        </div>
+        <div id="scrimmage-team-merge-choice" class="merge-choice hidden">
+          <p id="scrimmage-team-merge-text" class="help-text" style="margin:0 0 8px"></p>
+          <div class="merge-choice-actions">
+            <button type="button" id="btn-scrimmage-team-merge" class="btn btn-primary">Merge</button>
+            <button type="button" id="btn-scrimmage-team-merge-change" class="btn btn-outline">Change the number</button>
+          </div>
         </div>
         <div class="pit-field">
           <label for="input-scrimmage-team-name">Team name (optional)</label>
           <input type="text" id="input-scrimmage-team-name" maxlength="60" autocomplete="off" />
+          <p id="scrimmage-team-lock-note" class="help-text lock-note hidden" style="margin:6px 0 0"></p>
+        </div>
+        <div id="scrimmage-team-ftc-block" class="hidden">
+          <button type="button" id="btn-scrimmage-team-lookup" class="btn btn-outline">Look up on FTCScout</button>
+          <button type="button" id="btn-scrimmage-team-unlink" class="btn btn-outline hidden">Unlink from FTCScout</button>
+          <p id="scrimmage-team-ftc-help" class="help-text" style="margin:6px 0 0"></p>
         </div>
         <p id="scrimmage-team-error" class="error-message"></p>
         <div class="pit-modal-actions" style="margin-top:12px">
           <button type="button" id="btn-scrimmage-team-cancel" class="btn btn-outline">Cancel</button>
           <button type="button" id="btn-scrimmage-team-save" class="btn btn-primary">Add Team</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FTCScout team lookup (js/ftc-team-lookup.js) — shared: scrimmage add/link
+       today, linking our own team to a real FTC team later. z-index 1001 (above
+       the Add/Edit Team and Team Detail modals it is opened from); the generic
+       confirm modal (1003) layers above it. -->
+  <div id="ftc-lookup-modal" class="modal-overlay hidden">
+    <div id="ftc-lookup-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--sm ftc-lookup-card">
+      <div class="modal-header">
+        <h3 id="ftc-lookup-title">Look Up Team</h3>
+        <button id="btn-ftc-lookup-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div class="ftc-lookup-body">
+       <div class="ftc-lookup-scroll">
+        <div class="pit-field">
+          <label for="input-ftc-lookup-number">Team number (1&ndash;99999)</label>
+          <div class="ftc-lookup-row">
+            <input type="number" id="input-ftc-lookup-number" inputmode="numeric" min="1" max="99999" autocomplete="off" />
+            <button type="button" id="btn-ftc-lookup-go" class="btn btn-outline">Look up</button>
+          </div>
+        </div>
+        <p id="ftc-lookup-status" class="help-text" style="margin:0 0 8px"></p>
+        <p id="ftc-lookup-note" class="help-text hidden" style="margin:0 0 8px"></p>
+        <div id="ftc-lookup-results" class="ftc-lookup-results hidden" role="listbox" aria-label="FTCScout teams"></div>
+        <div id="ftc-lookup-result" class="ftc-lookup-result hidden">
+          <p id="ftc-lookup-result-name" class="ftc-lookup-result-name"></p>
+          <p id="ftc-lookup-result-location" class="help-text"></p>
+          <p id="ftc-lookup-result-opr" class="help-text"></p>
+        </div>
+        <p id="ftc-lookup-error" class="error-message"></p>
+       </div>
+        <div class="pit-modal-actions" style="margin-top:12px">
+          <button type="button" id="btn-ftc-lookup-cancel" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-ftc-lookup-confirm" class="btn btn-primary hidden">Use This Team</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Merge Compare screen (js/scrimmage-merge.js): opened from the Edit Team modal when
+       two teams being merged BOTH have a pit entry and/or the same match number scouted.
+       z-index 1002 (above the Edit modal); the generic confirm (1003) layers above it.
+       Same flex-column card as the bulk-link popup so the Cancel / Merge buttons never
+       leave the screen — only the list scrolls. -->
+  <div id="scrimmage-merge-modal" class="modal-overlay hidden">
+    <div id="scrimmage-merge-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--lg merge-compare-card">
+      <div class="modal-header">
+        <h3 id="merge-compare-title">Merge teams</h3>
+        <button id="btn-merge-compare-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div class="merge-compare-body">
+        <p id="merge-compare-intro" class="help-text"></p>
+        <p id="merge-compare-summary" class="help-text hidden"></p>
+        <div id="merge-compare-list" class="merge-compare-list"></div>
+        <p id="merge-compare-error" class="error-message"></p>
+        <div class="pit-modal-actions">
+          <button type="button" id="btn-merge-compare-cancel" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-merge-compare-confirm" class="btn btn-primary">Merge</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bulk link review (js/scrimmages.js): shown AFTER the one FTCScout lookup and
+       BEFORE anything is written. Found teams are checkboxes (all checked); the
+       list scrolls, the footer buttons never leave the screen. -->
+  <div id="bulk-link-modal" class="modal-overlay hidden">
+    <div id="bulk-link-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--md bulk-link-card">
+      <div class="modal-header">
+        <h3>Bulk link teams</h3>
+        <button id="btn-bulk-link-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div class="bulk-link-body">
+        <p id="bulk-link-intro" class="help-text"></p>
+        <div class="bulk-link-scroll">
+          <div id="bulk-link-found-group">
+            <div class="bulk-link-group-head">
+              <h4 id="bulk-link-found-title">Teams found on FTCScout</h4>
+              <div class="bulk-link-toggles">
+                <button type="button" id="btn-bulk-link-all" class="btn btn-small btn-outline">All</button>
+                <button type="button" id="btn-bulk-link-none" class="btn btn-small btn-outline">None</button>
+              </div>
+            </div>
+            <div id="bulk-link-found" class="bulk-link-list"></div>
+          </div>
+          <div id="bulk-link-notfound-group" class="hidden">
+            <h4>Not found on FTCScout</h4>
+            <p class="help-text" style="margin:0 0 4px">These stay unlinked.</p>
+            <div id="bulk-link-notfound" class="bulk-link-list"></div>
+          </div>
+        </div>
+        <div class="pit-modal-actions">
+          <button type="button" id="btn-bulk-link-cancel" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-bulk-link-confirm" class="btn btn-primary">Link teams</button>
         </div>
       </div>
     </div>
@@ -1348,6 +1476,12 @@
         <button id="btn-export-choice-close" class="btn-modal-close">&times;</button>
       </div>
       <div style="padding:16px 24px 24px; display:flex; flex-direction:column; gap:10px">
+        <!-- Whole-team exports only (context.includeScrimmagesOption, js/sheets-export.js).
+             Default OFF every time the modal opens. -->
+        <div id="export-choice-scrimmage-option" class="hidden">
+          <label class="export-choice-check"><input type="checkbox" id="chk-export-include-scrimmages" /> <span>Include scrimmages</span></label>
+          <p id="export-choice-scrimmage-note" class="help-text" style="margin:4px 0 0"></p>
+        </div>
         <button id="btn-export-choice-excel" class="btn btn-outline">📥 Download as Excel (.xlsx)</button>
         <button id="btn-export-choice-sheets" class="btn btn-primary">📊 Export to Google Sheets</button>
         <!-- Only shown when the calling context passes a printHandler (currently
@@ -1374,6 +1508,7 @@
       <div style="padding:16px 24px 24px; display:flex; flex-direction:column; gap:12px">
         <p class="help-text" id="leave-team-confirm-message"></p>
         <button id="btn-leave-team-confirm-export" class="btn btn-outline">📦 Export Whole Team Data</button>
+        <p id="leave-team-confirm-export-scrimmage-note" class="help-text scrimmage-excluded-note" style="margin:0"></p>
         <p id="leave-team-confirm-export-error" class="error-message"></p>
         <p id="leave-team-confirm-export-success" class="success-message"></p>
         <button id="btn-leave-team-confirm-proceed" class="btn btn-primary">Leave &amp; Delete Team</button>
@@ -1507,6 +1642,8 @@
   <script src="/js/session-state.js"></script>
   <script src="/js/pinned-events.js"></script>
   <script src="/js/ftcscout.js"></script>
+  <script src="/js/ftc-team-list.js"></script>
+  <script src="/js/ftc-team-lookup.js"></script>
   <script src="/js/dynamic-form.js"></script>
   <script src="/js/live-entry-sync.js"></script>
   <script src="/js/pit-scout.js"></script>
@@ -1520,6 +1657,8 @@
   <script src="/js/sheets-export.js"></script>
   <script src="/js/pit-vs-match.js"></script>
   <script src="/js/scrimmages.js"></script>
+  <script src="/js/scrimmage-merge.js"></script>
+  <script src="/js/data-refresh.js"></script>
   <script src="/js/feedback.js"></script>
   <script src="/js/delete-account.js"></script>
 </body>

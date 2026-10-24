@@ -279,6 +279,29 @@ async function callWorker(endpoint) {
 // ====== Cache freshness: re-fetch if older than 1 hour ======
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
+// ====== "Refresh cached data" (data-refresh.js), per DEVICE ======
+// The shared Firestore caches (eventCache/, events/, teamDetails/) are never written or deleted
+// by that button. Instead a successful refresh stamps the time here (localStorage), and every
+// read of one of those caches on this device treats a doc whose cachedAt is not newer than the
+// stamp as expired — so it is re-fetched (and re-cached, fresh for everybody) the next time it is
+// needed. Nothing is touched for other devices. (cachedAt is server time and the stamp is this
+// device's clock: a skew of a few minutes only means a doc is re-fetched once more, or not yet.)
+const DATA_CACHE_EPOCH_KEY = 'fe2o3-data-cache-epoch';
+
+function dataCacheEpochMs() {
+  try {
+    const n = Number(localStorage.getItem(DATA_CACHE_EPOCH_KEY));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch (err) {
+    return 0;
+  }
+}
+
+function cacheIsPredatingRefresh(cachedAtMs) {
+  const epoch = dataCacheEpochMs();
+  return epoch > 0 && !(cachedAtMs > epoch);
+}
+
 // ====== Fetch and cache all events for a season ======
 async function ensureEventsLoaded(season) {
   // Already in memory and fresh
@@ -292,7 +315,7 @@ async function ensureEventsLoaded(season) {
       // Check freshness: if cachedAt is recent enough, use it
       const cachedAt = data.cachedAt ? data.cachedAt.toMillis() : 0;
       const age = Date.now() - cachedAt;
-      if (age < CACHE_TTL_MS) {
+      if (age < CACHE_TTL_MS && !cacheIsPredatingRefresh(cachedAt)) {
         eventCache[season] = data.events;
         return data.events;
       }
@@ -392,7 +415,7 @@ async function getEventSchedule(eventCode, season) {
       if (data.schedule !== undefined && seasonMatches) {
         const cachedAt = data.scheduleCachedAt ? data.scheduleCachedAt.toMillis() : 0;
         const age = Date.now() - cachedAt;
-        if (age < CACHE_TTL_MS) {
+        if (age < CACHE_TTL_MS && !cacheIsPredatingRefresh(cachedAt)) {
           console.log(`[schedule] cache hit for ${eventCode}: ${data.schedule.length} match(es), ${Math.round(age / 1000)}s old`);
           console.timeEnd('[Timing] getEventSchedule');
           return data.schedule;
@@ -486,6 +509,14 @@ async function getCachedEvent(eventCode, season) {
       const data = doc.data();
       if (season && data.season !== season) {
         console.log(`[cache] events/${eventCode} was cached for season ${data.season}, not requested season ${season} — treating as a miss`);
+        return null;
+      }
+      // The roster has no TTL (it is cached for good once it has names) — except that "Refresh
+      // cached data" (data-refresh.js) makes THIS device treat anything cached before the refresh
+      // as expired. Only the roster-LOADING path (which passes a season) honors it; callers that
+      // just want whatever name map is cached (exports) still get it.
+      if (season && cacheIsPredatingRefresh(data.cachedAt ? data.cachedAt.toMillis() : 0)) {
+        console.log(`[cache] events/${eventCode} was cached before this device's last Refresh cached data — treating as a miss`);
         return null;
       }
       // Normalize ftcTeams if stored as numbers or objects
@@ -1698,6 +1729,15 @@ function updateLiveEditingBadge(el, names) {
   el.classList.remove('hidden');
 }
 
+// The OPR text of a team row (Info / Pit / Match). A dash used to mean two things on
+// a scrimmage roster: "linked, but FTCScout has no stats" and "not linked at all".
+// An UNLINKED scrimmage team now says so; a linked team with no stats keeps "--".
+// Official-event teams are unchanged.
+function teamOprText(team) {
+  if (team && team.isScrimmageTeam && team.linked !== true) return 'OPR: unlinked';
+  return team && typeof team.opr === 'number' ? `OPR: ${team.opr.toFixed(1)}` : 'OPR: --';
+}
+
 function renderMatchTeamList(teams) {
   console.time('[Timing] renderMatchTeamList');
   const container = document.getElementById('team-list-match');
@@ -1750,11 +1790,13 @@ function renderMatchTeamList(teams) {
 
     const oprSpan = document.createElement('span');
     oprSpan.className = 'team-opr-inline';
-    oprSpan.textContent = typeof team.opr === 'number' ? `OPR: ${team.opr.toFixed(1)}` : 'OPR: --';
+    oprSpan.textContent = teamOprText(team);
 
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
     leftGroup.appendChild(oprSpan);
+    // Scrimmage rosters only: an "unlinked" badge (scrimmages.js).
+    if (typeof appendScrimmageLinkBadge === 'function') appendScrimmageLinkBadge(leftGroup, team);
     leftGroup.appendChild(createLiveEditingBadge());
 
     const btnGroup = document.createElement('div');
@@ -1925,11 +1967,13 @@ function renderPitTeamList(teams) {
 
     const oprSpan = document.createElement('span');
     oprSpan.className = 'team-opr-inline';
-    oprSpan.textContent = typeof team.opr === 'number' ? `OPR: ${team.opr.toFixed(1)}` : 'OPR: --';
+    oprSpan.textContent = teamOprText(team);
 
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
     leftGroup.appendChild(oprSpan);
+    // Scrimmage rosters only: an "unlinked" badge (scrimmages.js).
+    if (typeof appendScrimmageLinkBadge === 'function') appendScrimmageLinkBadge(leftGroup, team);
     leftGroup.appendChild(createLiveEditingBadge());
 
     const btnGroup = document.createElement('div');

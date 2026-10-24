@@ -108,7 +108,8 @@ async function loadMatchScoresForEvent(eventCode, myToken) {
         // A finished event's scores can never change, so its cache never
         // goes stale regardless of age — only an unfinished event's cache is
         // subject to the normal TTL.
-        const stillFresh = data.matchScoresFinished === true || age < MATCH_SCORES_CACHE_TTL_MS;
+        // ("Refresh cached data" overrides even a finished event's never-stale cache, once, on this device.)
+        const stillFresh = (data.matchScoresFinished === true || age < MATCH_SCORES_CACHE_TTL_MS) && !cacheIsPredatingRefresh(cachedAt);
         if (stillFresh) {
           matchScoresCacheByEvent[`${season}_${eventCode}`] = { scoresByNumber: data.matchScores, finished: !!data.matchScoresFinished };
           applyScoresToDisplay(eventCode, data.matchScores, !!data.matchScoresFinished, myToken);

@@ -232,7 +232,14 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ====== Get or create cached team detail in Firestore ======
-async function getCachedTeamDetail(teamNumber) {
+//
+// `season` is optional. The cached doc is keyed by team number alone, but its
+// OPR/stats belong to the season it was fetched for (stamped as `season` since
+// the FTCScout-linking phase). A caller that needs a SPECIFIC season (the
+// scrimmage lookup/link flow) passes it and only accepts a doc stamped with that
+// exact season — a legacy doc with no stamp can't be trusted for it. Callers that
+// omit it (official events) behave exactly as before.
+async function getCachedTeamDetail(teamNumber, season) {
   try {
     const doc = await db.collection('teamDetails').doc(String(teamNumber)).get();
     if (doc.exists) {
@@ -242,9 +249,10 @@ async function getCachedTeamDetail(teamNumber) {
         await db.collection('teamDetails').doc(String(teamNumber)).delete().catch(() => {});
         return null;
       }
+      if (season != null && String(data.season) !== String(season)) return null;
       const cachedAt = data.cachedAt ? data.cachedAt.toMillis() : 0;
       const age = Date.now() - cachedAt;
-      if (age < CACHE_TTL_MS) {
+      if (age < CACHE_TTL_MS && !cacheIsPredatingRefresh(cachedAt)) {
         return data;
       }
     }
@@ -267,6 +275,29 @@ async function cacheTeamDetail(teamNumber, data) {
   } catch (err) {
     console.warn('Failed to cache team detail:', err);
   }
+}
+
+// ====== FTCScout's teamByNumber result -> the flat detail object this app caches
+// and renders (also what the lookup/link component normalizes). `season` stamps
+// which season the OPR/stats belong to. ======
+function buildTeamDetailObject(teamNumber, detail, season) {
+  const loc = detail.location || {};
+  return {
+    teamNumber,
+    name: detail.name || `Team #${teamNumber}`,
+    city: loc.city || '',
+    state: loc.state || '',
+    country: loc.country || '',
+    rookieYear: detail.rookieYear || null,
+    website: detail.website || null,
+    opr: detail.quickStats?.tot?.value || null,
+    auto: detail.quickStats?.auto?.value || null,
+    dc: detail.quickStats?.dc?.value || null,
+    eg: detail.quickStats?.eg?.value || null,
+    statsCount: detail.quickStats?.count || 0,
+    awards: detail.awards || [],
+    season: String(season)
+  };
 }
 
 // ====== Load team detail into the detail view ======
@@ -295,65 +326,54 @@ async function loadTeamDetail(teamNumber, eventCode, prefix = 'td-') {
   // number: its number is whatever a scout typed (#99999 is a real FTCScout
   // team, for one), so a lookup would show some other team's name, location,
   // OPR and awards as if they were this one's. Show the roster's own info
-  // instead. (A linked team — phase 2 — falls through to the normal lookup.)
-  if (isScrimmageCode(eventCode)) {
-    const rosterTeam = (typeof currentEventTeams !== 'undefined' ? currentEventTeams : []).find(t => Number(t.teamNumber) === Number(teamNumber));
-    if (!rosterTeam || rosterTeam.linked !== true) {
-      renderUnlinkedScrimmageTeamDetail(rosterTeam, teamNumber, prefix);
+  // instead. A LINKED scrimmage team falls through to the normal lookup — for
+  // the scrimmage's own season, not whatever season the app happens to show.
+  let scrimmageRosterTeam = null;
+  let season = getSelectedSeason();
+  const forScrimmage = isScrimmageCode(eventCode);
+  if (forScrimmage) {
+    scrimmageRosterTeam = (typeof currentEventTeams !== 'undefined' ? currentEventTeams : []).find(t => Number(t.teamNumber) === Number(teamNumber));
+    if (!scrimmageRosterTeam || scrimmageRosterTeam.linked !== true) {
+      renderUnlinkedScrimmageTeamDetail(scrimmageRosterTeam, teamNumber, prefix);
       return;
     }
+    season = scrimmageSeasonById[scrimmageIdFromCode(eventCode)] || season;
   }
 
   try {
-    // Check cache first
-    const cached = await getCachedTeamDetail(teamNumber);
+    // Check cache first (a scrimmage team needs the cache entry for ITS season)
+    const cached = await getCachedTeamDetail(teamNumber, forScrimmage ? season : undefined);
     if (cached) {
       renderTeamDetail(cached, teamNumber, prefix);
       return;
     }
 
     // Fetch from FTCScout GraphQL with fallback
-    const season = getSelectedSeason();
     let detail = null;
     try {
       detail = await fetchTeamDetail(teamNumber, season);
     } catch (apiErr) {
       console.warn('FTCScout API fetch failed, attempting cached fallback:', apiErr);
     }
-    
+
     if (detail) {
-      // Extract location
-      const loc = detail.location || {};
-      const detailObj = {
-        teamNumber,
-        name: detail.name || `Team #${teamNumber}`,
-        city: loc.city || '',
-        state: loc.state || '',
-        country: loc.country || '',
-        rookieYear: detail.rookieYear || null,
-        website: detail.website || null,
-        opr: detail.quickStats?.tot?.value || null,
-        auto: detail.quickStats?.auto?.value || null,
-        dc: detail.quickStats?.dc?.value || null,
-        eg: detail.quickStats?.eg?.value || null,
-        statsCount: detail.quickStats?.count || 0,
-        awards: detail.awards || []
-      };
+      const detailObj = buildTeamDetailObject(teamNumber, detail, season);
 
       // Cache and render
       await cacheTeamDetail(teamNumber, detailObj);
       renderTeamDetail(detailObj, teamNumber, prefix);
     } else {
-      // Render basic fallback info so UI never hangs on loading
+      // Render basic fallback info so UI never hangs on loading. A linked
+      // scrimmage team still has its roster copy of name/location/OPR.
       const fallbackObj = {
         teamNumber,
-        name: `Team #${teamNumber}`,
-        city: '',
+        name: (scrimmageRosterTeam && scrimmageRosterTeam.name) || `Team #${teamNumber}`,
+        city: scrimmageRosterTeam ? scrimmageRosterTeam.location || '' : '',
         state: '',
         country: '',
         rookieYear: null,
         website: null,
-        opr: null,
+        opr: scrimmageRosterTeam && typeof scrimmageRosterTeam.opr === 'number' ? scrimmageRosterTeam.opr : null,
         auto: null,
         dc: null,
         eg: null,
@@ -386,7 +406,7 @@ function renderUnlinkedScrimmageTeamDetail(rosterTeam, teamNumber, prefix = 'td-
   if (nameEl) nameEl.textContent = (rosterTeam && rosterTeam.name) || `Team #${teamNumber}`;
   if (locEl) locEl.textContent = 'Unofficial scrimmage team';
   if (oprBadge) {
-    oprBadge.textContent = 'OPR: N/A';
+    oprBadge.textContent = 'OPR: unlinked';
     oprBadge.style.background = 'transparent';
     oprBadge.style.border = '1px solid var(--border)';
   }
@@ -395,7 +415,17 @@ function renderUnlinkedScrimmageTeamDetail(rosterTeam, teamNumber, prefix = 'td-
     awardsSelect.disabled = true;
   }
   if (awardsList) {
-    awardsList.innerHTML = '<p class="help-text" style="font-size:0.8rem; margin-bottom:0">This team isn\'t linked to FTCScout.</p>';
+    awardsList.innerHTML = '<p class="help-text" style="font-size:0.8rem; margin-bottom:6px">This team isn\'t linked to FTCScout.</p>';
+    // Any member can link (roster edits are any-member); scrimmages.js owns the flow.
+    if (rosterTeam && typeof linkScrimmageTeamFromDetail === 'function') {
+      const linkBtn = document.createElement('button');
+      linkBtn.type = 'button';
+      linkBtn.className = 'btn btn-small btn-primary btn-td-link-ftc';
+      linkBtn.style.cssText = 'width:auto; padding:4px 10px; font-size:0.8rem;';
+      linkBtn.textContent = 'Link to FTCScout';
+      linkBtn.addEventListener('click', () => linkScrimmageTeamFromDetail(rosterTeam, teamNumber));
+      awardsList.appendChild(linkBtn);
+    }
   }
   delete lastLoadedTeamDetail[prefix];
 }
@@ -425,7 +455,9 @@ function renderTeamDetail(detail, teamNumber, prefix = 'td-') {
       oprBadge.style.background = 'var(--primary)';
       oprBadge.style.border = 'none';
     } else {
-      oprBadge.textContent = 'OPR: N/A';
+      // A scrimmage team with no stats reads "OPR: --" like the team lists do
+      // (teamOprText(), first-api.js); official events keep "OPR: N/A".
+      oprBadge.textContent = (typeof selectedEvent !== 'undefined' && selectedEvent && selectedEvent.isScrimmage) ? 'OPR: --' : 'OPR: N/A';
       oprBadge.style.background = 'transparent';
       oprBadge.style.border = '1px solid var(--border)';
     }

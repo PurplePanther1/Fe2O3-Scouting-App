@@ -224,6 +224,68 @@ module.exports = {
     await ok('permission holder can delete a scrimmage they did not create (no creator tracking)', () => deleteDoc(scrimRef('mgr', 'S2')));
     await ok('captain can delete a scrimmage', () => deleteDoc(scrimRef('cap', 'S4')));
 
+    // ---------- FTCScout linking (phase 2): NO rules change was needed ----------
+    // Linking is a roster edit (only `teams` changes, no key removed), which the
+    // existing any-member roster branch already allows. These prove it against the
+    // real firestore.rules, with the exact write shapes scrimmages.js uses
+    // (dotted per-field paths in one update; linkedAt = serverTimestamp()).
+    const linkFields = (n, name, extra = {}) => ({
+      [`teams.${n}.name`]: name,
+      [`teams.${n}.linked`]: true,
+      [`teams.${n}.location`]: 'Austin, TX, USA',
+      [`teams.${n}.opr`]: 142.5,
+      [`teams.${n}.linkedAt`]: serverTimestamp(),
+      ...extra
+    });
+    const linkedEntry = (n, name, typed) => ({
+      number: n, name, manualName: typed, linked: true, location: 'Austin, TX, USA', opr: 142.5, linkedAt: serverTimestamp()
+    });
+    await ok('seed: a scrimmage with unlinked teams for the linking checks', () =>
+      setDoc(scrimRef('mgr', 'S5'), validScrim('S5')));
+    await ok('seed: plain member adds two unlinked teams', () =>
+      updateDoc(scrimRef('mem1', 'S5'), { 'teams.1234': rosterEntry(1234, 'Robo Cats'), 'teams.2468': rosterEntry(2468, 'Gears'), 'teams.3579': rosterEntry(3579, '') }));
+    await ok('plain member can ADD a team already linked (official name replaces the typed one, manualName keeps it)', () =>
+      updateDoc(scrimRef('mem1', 'S5'), { 'teams.5555': linkedEntry(5555, 'Five Star Robotics', 'five star') }));
+    await ok('plain member can link an existing unlinked team (name/linked/location/opr/linkedAt, manualName untouched)', () =>
+      updateDoc(scrimRef('mem1', 'S5'), linkFields(1234, 'Official Robo Cats')));
+    await ok('a DIFFERENT plain member can link a team they did not add (the bulk path: several teams in one write)', () =>
+      updateDoc(scrimRef('mem2', 'S5'), { ...linkFields(2468, 'Gear Grinders Robotics'), ...linkFields(3579, 'Circuit Breakers') }));
+    await denied('linking cannot remove a roster team (a link write that drops a key)', () =>
+      updateDoc(scrimRef('mem1', 'S5'), { 'teams.1234': deleteField(), ...linkFields(2468, 'x') }));
+    await denied('a plain member still cannot remove a LINKED team', () => updateDoc(scrimRef('mem1', 'S5'), { 'teams.1234': deleteField() }));
+    await denied('non-member cannot link', () => updateDoc(scrimRef('out', 'S5'), linkFields(1234, 'Nope')));
+    await denied('a link write cannot ride along with a scrimmage rename', () =>
+      updateDoc(scrimRef('mem1', 'S5'), { ...linkFields(1234, 'Official Robo Cats'), name: 'Sneaky' }));
+    await denied('a link write cannot ride along with a season change', () =>
+      updateDoc(scrimRef('mem1', 'S5'), { ...linkFields(1234, 'Official Robo Cats'), season: '2025' }));
+    await ok('a permission holder (no canEditOtherEntries) can link too', () =>
+      updateDoc(scrimRef('mgr', 'S5'), linkFields(5555, 'Five Star Robotics')));
+    // ---- Unlink (roster Edit, staged then saved) and the OPR refresh after a season
+    // change: also plain roster edits, so also NO rules change.
+    const unlinkFields = (n, name, extra = {}) => ({
+      [`teams.${n}.name`]: name, [`teams.${n}.manualName`]: name, [`teams.${n}.linked`]: false,
+      [`teams.${n}.location`]: '', [`teams.${n}.opr`]: null, [`teams.${n}.linkedAt`]: null, ...extra
+    });
+    await ok('plain member can UNLINK a linked team (linked false, location/opr/linkedAt cleared, name = manualName = the box)', () =>
+      updateDoc(scrimRef('mem1', 'S5'), unlinkFields(1234, 'Robo Cats Again')));
+    await ok('re-link (seed) so the next checks have a linked team', () => updateDoc(scrimRef('mem2', 'S5'), linkFields(1234, 'Official Robo Cats')));
+    await ok('permission holder (no canEditOtherEntries) can unlink too', () => updateDoc(scrimRef('mgr', 'S5'), unlinkFields(1234, 'Cats')));
+    await denied('non-member cannot unlink', () => updateDoc(scrimRef('out', 'S5'), unlinkFields(2468, 'x')));
+    await denied('an unlink write cannot ride along with a scrimmage rename', () =>
+      updateDoc(scrimRef('mem1', 'S5'), { ...unlinkFields(2468, 'x'), name: 'Sneaky' }));
+    await ok('the OPR refresh after a season change: opr + location of linked teams, by the manager who changed the season', () =>
+      updateDoc(scrimRef('mgr', 'S5'), { 'teams.2468.opr': null, 'teams.3579.opr': 12.5, 'teams.3579.location': 'Denver, CO, USA' }));
+    await ok('...and by a plain member (it is just a roster edit)', () => updateDoc(scrimRef('mem1', 'S5'), { 'teams.2468.opr': 99.1 }));
+    // Renumber = re-key: remove the old key + add the new one in ONE write. Removing a key is manager-only.
+    const rekey = (from, to, name) => ({ [`teams.${from}`]: deleteField(), [`teams.${to}`]: rosterEntry(to, name) });
+    await denied('plain member CANNOT renumber (re-key removes a roster key)', () => updateDoc(scrimRef('mem1', 'S5'), rekey(1234, 1235, 'Cats')));
+    await denied('non-member cannot renumber', () => updateDoc(scrimRef('out', 'S5'), rekey(1234, 1235, 'Cats')));
+    await ok('permission holder CAN renumber (remove old key + add new key in one write)', () => updateDoc(scrimRef('mgr', 'S5'), rekey(1234, 1235, 'Cats')));
+    await ok('captain can renumber too', () => updateDoc(scrimRef('cap', 'S5'), rekey(1235, 1236, 'Cats')));
+    await denied('a plain member cannot undo it either (the old number would have to be re-added AND the new removed)', () =>
+      updateDoc(scrimRef('mem1', 'S5'), rekey(1236, 1234, 'Cats')));
+    await ok('(seed) cleanup the linking scrimmage', () => deleteDoc(scrimRef('mgr', 'S5')));
+
     // ---------- losing the permission ----------
     await ok('revoke: permission removed from the team doc', async () => {
       await env.withSecurityRulesDisabled(async (c) => {

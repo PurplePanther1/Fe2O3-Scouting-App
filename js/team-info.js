@@ -364,11 +364,13 @@ function renderTeamInfoList(teams) {
 
     const oprSpan = document.createElement('span');
     oprSpan.className = 'team-opr-inline';
-    oprSpan.textContent = typeof team.opr === 'number' ? `OPR: ${team.opr.toFixed(1)}` : 'OPR: --';
+    oprSpan.textContent = teamOprText(team);
 
     leftGroup.appendChild(numSpan);
     leftGroup.appendChild(nameSpan);
     leftGroup.appendChild(oprSpan);
+    // Scrimmage rosters only: an "unlinked" badge (scrimmages.js).
+    if (typeof appendScrimmageLinkBadge === 'function') appendScrimmageLinkBadge(leftGroup, team, { showLinked: true });
 
     const btnGroup = document.createElement('div');
     btnGroup.className = 'team-item-actions';

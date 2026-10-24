@@ -41,7 +41,7 @@ const testFiles = [...ruleTests, ...browserTests];
 async function main() {
   const results = [];
   let staticServer, emulators, browser, rulesEnv;
-  const state = { blockedRequests: [], pageErrors: [], consoleErrors: [], workerRequests: [], ftcScoutRequests: [] };
+  const state = { blockedRequests: [], pageErrors: [], consoleErrors: [], workerRequests: [], ftcScoutRequests: [], ftcScoutMode: 'ok', ftcScoutDelays: {}, ftcScoutListMode: 'ok', ftcScoutListDelay: 0, ftcScoutListRequests: 0 };
 
   try {
     if (testFiles.length > 0) {

@@ -180,16 +180,69 @@ const FIXTURE_TEAMS = [
   { teamNumber: 303, nameShort: 'Gamma Gears', nameFull: 'Gamma Gears', schoolName: 'Gamma Tech', city: 'Toledo', stateProv: 'OH', country: 'USA' }
 ];
 
-function ftcScoutTeam(number) {
-  const t = FIXTURE_TEAMS.find(x => x.teamNumber === Number(number));
+// What the mocked FTCScout knows. The fixture event's teams (101/202/303) are
+// known; so are a few extra teams the scrimmage link tests use, and #99999 — a
+// REAL FTCScout team ("Off-Season Demo Team") that a scout can also type as an
+// unofficial scrimmage team, which is the trap an UNLINKED scrimmage team must
+// never fall into. ANY OTHER number (e.g. FTCSCOUT_UNKNOWN_NUMBER) is unknown:
+// teamByNumber answers null, which is "not found", not an error.
+const FTCSCOUT_UNKNOWN_NUMBER = 88888;
+const FTCSCOUT_EXTRA_TEAMS = [
+  { teamNumber: 1234, name: 'Official Robo Cats', city: 'Austin', state: 'TX', country: 'USA' },
+  { teamNumber: 2468, name: 'Gear Grinders Robotics', city: 'Portland', state: 'OR', country: 'USA' },
+  // No FTCScout stats from the CURRENT season on (like most teams right after a new
+  // season starts): quickStats is null for that season and later, so a scrimmage moved
+  // to the current season has no OPR to show for it.
+  { teamNumber: 3579, name: 'Circuit Breakers', city: 'Denver', state: 'CO', country: 'USA', noStatsFrom: Number(FIXTURE_SEASON) },
+  { teamNumber: 5555, name: 'Five Star Robotics', city: 'Boise', state: 'ID', country: 'USA' },
+  { teamNumber: 99999, name: 'Off-Season Demo Team', city: 'Demo City', state: 'DC', country: 'USA' },
+  // The team-list / partial-search teams. Typing "36" ranks 36 first, then the numbers that START
+  // with 36 (365, 3650, 36012, 36533, 36999 — more than the 5-result limit), then the ones that
+  // merely CONTAIN it (1365, 7360); "365" -> 365, 3650, 36533 (starts), 1365 (contains); "865" ->
+  // 865, 8651 (starts), 21865 (contains). #4040 is the roster-duplicate case. None of these
+  // numbers contains (or is contained in) 101/202/303/1234/2468/3579/5555/99999, so the
+  // single-team flows still get exactly one match.
+  { teamNumber: 36, name: 'Thirty Six Robotics', city: 'Austin', state: 'TX', country: 'USA' },
+  { teamNumber: 365, name: 'Three Sixty Five', city: 'Reno', state: 'NV', country: 'USA' },
+  { teamNumber: 3650, name: 'Thirty Six Fifty', city: 'Tulsa', state: 'OK', country: 'USA' },
+  { teamNumber: 36012, name: 'An Extremely Long Official Team Name That Has To Wrap In The Results List 36012', city: 'A Very Long City Name Indeed', state: 'A Long State Or Province', country: 'A Long Country Name' },
+  { teamNumber: 36533, name: 'Refuge Robotics', city: 'Salem', state: 'OR', country: 'USA' },
+  { teamNumber: 36999, name: 'Last Of The Thirty Sixes', city: 'Fargo', state: 'ND', country: 'USA' },
+  { teamNumber: 1365, name: 'Thirteen Sixty Five', city: 'Macon', state: 'GA', country: 'USA' },
+  { teamNumber: 7360, name: 'Seventy Three Sixty', city: 'Omaha', state: 'NE', country: 'USA' },
+  { teamNumber: 865, name: 'Eight Sixty Five', city: 'Provo', state: 'UT', country: 'USA' },
+  { teamNumber: 8651, name: 'Eighty Six Fifty One', city: 'Cody', state: 'WY', country: 'USA' },
+  { teamNumber: 21865, name: 'Fe2O3 Mock', city: 'Madison', state: 'WI', country: 'USA' },
+  { teamNumber: 4040, name: 'Quad Forty', city: 'Helena', state: 'MT', country: 'USA' }
+];
+const FTCSCOUT_KNOWN = [
+  ...FIXTURE_TEAMS.map(t => ({ teamNumber: t.teamNumber, name: t.nameShort, city: t.city, state: t.stateProv, country: t.country })),
+  ...FTCSCOUT_EXTRA_TEAMS
+];
+
+// `season` shifts the OPR (base + season/100) so a test can tell WHICH season a
+// lookup was made for.
+function ftcScoutTeam(number, season = FIXTURE_SEASON) {
+  const t = FTCSCOUT_KNOWN.find(x => x.teamNumber === Number(number));
   if (!t) return null;
+  const opr = Number((100 + t.teamNumber / 10 + (Number(season) - 2000) / 100).toFixed(2));
   return {
-    number: t.teamNumber, name: t.nameShort, location: { city: t.city, state: t.stateProv, country: t.country },
+    number: t.teamNumber, name: t.name, location: { city: t.city, state: t.state, country: t.country },
     rookieYear: 2020, website: null,
-    quickStats: { season: 2025, tot: { value: 100 + t.teamNumber / 10, rank: 1 }, auto: { value: 30, rank: 1 }, dc: { value: 50, rank: 1 }, eg: { value: 20, rank: 1 }, count: 5 },
+    quickStats: t.noStatsFrom != null && Number(season) >= t.noStatsFrom
+      ? null
+      : { season: Number(season), tot: { value: opr, rank: 1 }, auto: { value: 30, rank: 1 }, dc: { value: 50, rank: 1 }, eg: { value: 20, rank: 1 }, count: 5 },
     awards: []
   };
 }
+
+// The OPR the mock reports for a team in a season (tests assert against this).
+function ftcScoutOpr(number, season = FIXTURE_SEASON) {
+  const q = ftcScoutTeam(number, season).quickStats;
+  return q ? q.tot.value : null;
+}
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function fulfillJson(route, body, status = 200) {
   await route.fulfill({ status, contentType: 'application/json', headers: { 'Access-Control-Allow-Origin': '*' }, body: JSON.stringify(body) });
@@ -255,17 +308,39 @@ async function installRoutes(context, state) {
     return fulfillJson(route, { error: 'smoke-test: unmocked worker path ' + u.pathname }, 404);
   });
 
+  // FTCScout. state.ftcScoutMode: 'ok' (default) | 'error' (HTTP 500) | 'abort'
+  // (a real network failure — the fetch itself rejects). state.ftcScoutDelays
+  // maps a team number -> ms to hold that team's response (stale-response
+  // tests). Tests that change either MUST restore them (see setFtcScout()).
   await context.route('https://api.ftcscout.org/graphql', async route => {
     const query = (JSON.parse(route.request().postData() || '{}').query) || '';
     state.ftcScoutRequests.push(query);
+    // The FULL team list (teamsSearch with an empty search text): every known team, ascending,
+    // like the real API. state.ftcScoutListMode forces a failure ('error' = HTTP 500, 'abort' =
+    // the fetch itself fails); state.ftcScoutListDelay holds the response; every request is counted.
+    if (/teamsSearch\(searchText:\s*""/.test(query)) {
+      state.ftcScoutListRequests = (state.ftcScoutListRequests || 0) + 1;
+      if (state.ftcScoutListDelay) await sleep(state.ftcScoutListDelay);
+      if (state.ftcScoutListMode === 'abort' || state.ftcScoutMode === 'abort') return route.abort('failed');
+      if (state.ftcScoutListMode === 'error' || state.ftcScoutMode === 'error') return fulfillJson(route, { errors: [{ message: 'smoke-test: forced team list error' }] }, 500);
+      const teamsSearch = FTCSCOUT_KNOWN.slice().sort((a, b) => a.teamNumber - b.teamNumber)
+        .map(t => ({ number: t.teamNumber, name: t.name, location: { city: t.city, state: t.state, country: t.country } }));
+      return fulfillJson(route, { data: { teamsSearch } });
+    }
+    const season = (query.match(/quickStats\(season:\s*(\d+)\)/) || [])[1] || FIXTURE_SEASON;
+    const numbers = [...query.matchAll(/teamByNumber\(number:\s*(\d+)\)/g)].map(m => Number(m[1]));
+    const delay = Math.max(0, ...numbers.map(n => (state.ftcScoutDelays || {})[n] || 0));
+    if (delay > 0) await sleep(delay);
+    if (state.ftcScoutMode === 'abort') return route.abort('failed');
+    if (state.ftcScoutMode === 'error') return fulfillJson(route, { errors: [{ message: 'smoke-test: forced FTCScout error' }] }, 500);
     const aliased = [...query.matchAll(/t_(\d+)\s*:\s*teamByNumber/g)].map(m => m[1]);
     if (aliased.length > 0) {
       const data = {};
-      aliased.forEach(n => { data[`t_${n}`] = ftcScoutTeam(n); });
+      aliased.forEach(n => { data[`t_${n}`] = ftcScoutTeam(n, season); });
       return fulfillJson(route, { data });
     }
     const single = query.match(/teamByNumber\(number:\s*(\d+)\)/);
-    if (single) return fulfillJson(route, { data: { teamByNumber: ftcScoutTeam(single[1]) } });
+    if (single) return fulfillJson(route, { data: { teamByNumber: ftcScoutTeam(single[1], season) } });
     return fulfillJson(route, { data: {} }); // anything else (e.g. match scores) -> empty
   });
 
@@ -319,6 +394,7 @@ async function createRulesTestEnv() {
 
 module.exports = {
   REPO_ROOT, PROJECT_ID, PORTS, FIXTURE_EVENT, FIXTURE_OLD_EVENT, FIXTURE_SEASON, FIXTURE_OLD_SEASON, FIXTURE_TEAMS,
+  FTCSCOUT_KNOWN, FTCSCOUT_UNKNOWN_NUMBER, ftcScoutTeam, ftcScoutOpr,
   startStaticServer, startEmulators, launchBrowser, newPage, screenshotOnFailure,
   createVerifiedUser, verifyEmailViaEmulator, createRulesTestEnv
 };
