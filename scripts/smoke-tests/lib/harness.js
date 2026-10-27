@@ -297,6 +297,15 @@ async function installRoutes(context, state) {
     const eventCode = u.searchParams.get('eventCode');
     const event = FIXTURE_EVENTS.find(e => e.code === eventCode);
     const eventInSeason = !!event && event.season === season;
+    if (u.pathname === '/events') {
+      // state.eventsMode forces the event-list request to fail ('error' = HTTP 500, 'abort' = the fetch itself fails, 'empty' = no events);
+      // state.eventsDelay holds the response; every request is counted in state.eventsRequests.
+      state.eventsRequests = (state.eventsRequests || 0) + 1;
+      if (state.eventsDelay) await sleep(state.eventsDelay);
+      if (state.eventsMode === 'abort') return route.abort('failed');
+      if (state.eventsMode === 'error') return fulfillJson(route, { error: 'smoke-test: forced events error' }, 500);
+      if (state.eventsMode === 'empty') return fulfillJson(route, { events: [] });
+    }
     if (u.pathname === '/events') return fulfillJson(route, { events: FIXTURE_EVENTS.filter(e => e.season === season).map(({ season: _s, ...e }) => e) });
     if (u.pathname === '/teams') {
       return eventInSeason ? fulfillJson(route, { teams: FIXTURE_TEAMS }) : fulfillJson(route, { error: `FIRST API error 404: event ${eventCode} not found in season ${season}` }, 500);

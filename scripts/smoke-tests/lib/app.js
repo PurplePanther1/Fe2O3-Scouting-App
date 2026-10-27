@@ -179,7 +179,112 @@ async function submitScrimmageTeamModal(page, { number, name }) {
   await page.waitForSelector('#scrimmage-team-modal', { state: 'hidden' });
 }
 
+
+// ====== Official forms helpers (js/official-forms.js, official-form-admin.js) ======
+// The admin account is the emulator user with the REAL admin address (ctx.adminUser()): the
+// rules hard-code that address, so publishing end-to-end needs it. Tests that publish use a
+// throwaway SEASON (2021-2024) so no template ever reaches the current season's teams.
+const ADMIN_EMAIL = 'leviticus.sietman@gmail.com';
+
+// A field definition in the shape the form builder saves.
+function formField(id, label, type, extra = {}) {
+  return { id, label, type, required: false, sortOrder: 0, showInPreview: true, ...extra };
+}
+
+// Publishes through the page's OWN admin code (adminDoPublish(), the Publish button's
+// transaction) on the real rules; the draft basis is read fresh so repeated publishes work.
+async function publishOfficialForm(adminPage, { season, formType, fields }) {
+  return adminPage.evaluate(async ({ season, formType, fields }) => {
+    const id = officialFormId(season, formType);
+    const current = await fetchOfficialForm(season, formType);
+    adminDrafts.set(id, { fields: adminCleanFields(fields), basisVersion: current ? current.version : 0, basisJson: '', fromDefault: false });
+    await adminDoPublish(season, formType, adminDrafts.get(id));
+    return (await fetchOfficialForm(season, formType)).version;
+  }, { season: String(season), formType, fields });
+}
+
+// The team's own saved config for a season + form type (null if none), straight from Firestore.
+function readFormConfig(page, teamId, season, formType) {
+  return page.evaluate(async ([tid, id]) => {
+    const snap = await db.collection('teams').doc(tid).collection('formConfig').doc(id).get();
+    return snap.exists ? snap.data() : null;
+  }, [teamId, season + '_' + formType]);
+}
+
+// Snapshots saved before an Accept / Merge / Restore, oldest first.
+function readSnapshots(page, teamId, season, formType) {
+  return page.evaluate(async ([tid, key]) => {
+    const snap = await db.collection('teams').doc(tid).collection('formSnapshots').where('formKey', '==', key).get();
+    return snap.docs.map(d => d.data()).sort((a, b) => a.createdAt.toMillis() - b.createdAt.toMillis());
+  }, [teamId, season + '_' + formType]);
+}
+
+// The app's season selector (what the My Team notice follows). The <select> lives on the Scouting tab,
+// so this sets it the way a pick does - value + 'change' - without needing it on screen.
+const selectAppSeason = (page, season) => page.evaluate((s) => {
+  const sel = document.getElementById('select-season');
+  sel.value = s;
+  sel.dispatchEvent(new Event('change'));
+}, String(season));
+
+const openMyTeamTab = (page) => page.click('#dashboard-tabs .tab[data-dtab="myteam"]');
+
+// Opens the team's form builder on a season + form type (creating that config if the team has none).
+async function openBuilderFor(page, season, formType) {
+  if (await page.isHidden('#builder-modal:not(.hidden)')) {
+    await openMyTeamTab(page);
+    await page.click('#btn-open-form-builder');
+  }
+  await page.waitForSelector('#builder-modal:not(.hidden)');
+  await page.selectOption('#builder-season-select', String(season));
+  await page.click(`.builder-type-tab[data-builder-type="${formType}"]`);
+  await page.waitForFunction(([s, t]) => currentBuilderSeason === s && currentFormBuilderType === t && !document.getElementById('builder-field-list').textContent.includes('Loading'), [String(season), formType]);
+}
+
+const closeBuilder = async (page) => {
+  await page.click('#btn-builder-close');
+  await page.waitForSelector('#builder-modal', { state: 'hidden' });
+};
+
+const builderLabels = (page) => page.$$eval('#builder-field-list .builder-field-label', els => els.map(e => e.textContent.trim()));
+
+// Edit Permissions -> tick "Edit templates" for a member (the forms-editing permission, canEditTemplates).
+async function setFormsPermission(capPage, memberName, on) {
+  await openMyTeamTab(capPage);
+  const row = capPage.locator('#member-list .member-item', { hasText: memberName });
+  await row.getByRole('button', { name: 'Edit Permissions' }).click();
+  await capPage.waitForSelector('#member-permissions-modal:not(.hidden)');
+  await capPage.setChecked('#perm-canEditTemplates', on);
+  await capPage.click('#btn-member-perms-save');
+  await capPage.waitForSelector('#member-permissions-modal', { state: 'hidden' });
+}
+
+// The notice items currently shown in a container ('myteam' | 'account'): [{ formType, title, detail }].
+function noticeItems(page, where = 'myteam') {
+  return page.$$eval(`#official-forms-notice-${where} .official-notice-item`, els => els.map(e => ({
+    formType: e.dataset.formType,
+    title: e.querySelector('.official-notice-title').textContent.trim(),
+    detail: e.querySelector('.official-notice-detail').textContent.trim(),
+    actions: [...e.querySelectorAll('button')].map(b => b.textContent.trim())
+  })));
+}
+
+const noticeButton = (page, formType, action, where = 'myteam') =>
+  page.locator(`#official-forms-notice-${where} .official-notice-item[data-form-type="${formType}"] [data-official-action="${action}"]`);
+
+const confirmGeneric = async (page) => {
+  await page.waitForSelector('#generic-confirm-modal:not(.hidden)');
+  await page.click('#btn-generic-confirm-proceed');
+  await page.waitForSelector('#generic-confirm-modal', { state: 'hidden' });
+};
+
+// Ends a team the test created (the shared admin account must not keep a team between tests).
+async function deleteTeamAsLastMember(page) {
+  await page.evaluate(async () => { await deleteEntireTeam(currentTeamData.id, currentUser.uid, currentTeamData); });
+}
+
 module.exports = {
+  ADMIN_EMAIL, formField, publishOfficialForm, readFormConfig, readSnapshots, openMyTeamTab, selectAppSeason, openBuilderFor, closeBuilder, builderLabels, setFormsPermission, noticeItems, noticeButton, confirmGeneric, deleteTeamAsLastMember,
   openScrimmagesTab, createScrimmageUI, scrimmageRow, openScrimmageUI, addAndScoutUI, submitScrimmageTeamModal,
   uniqueEmail, gotoApp, signInUI, signOutUI, createTeamUI, joinTeamUI, selectFixtureEvent,
   openScoutingSubtab, fillRequiredFields, teamRow, confirmTeamDisplayName,

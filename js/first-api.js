@@ -52,6 +52,8 @@ function setAppSeasonQuietly(season) {
   }
   // The Pinned tab's season filter follows the app's season (pinned-events.js).
   if (typeof syncPinnedSeasonToApp === 'function') syncPinnedSeasonToApp();
+  // The My Team official-form banner follows the app's season (official-forms.js).
+  if (typeof onAppSeasonChangedForOfficialForms === 'function') onAppSeasonChangedForOfficialForms();
   return true;
 }
 
@@ -303,30 +305,50 @@ function cacheIsPredatingRefresh(cachedAtMs) {
 }
 
 // ====== Fetch and cache all events for a season ======
-async function ensureEventsLoaded(season) {
-  // Already in memory and fresh
-  if (eventCache[season]) return eventCache[season];
+// One load per season at a time: every caller (the sign-in preload, the live search while typing,
+// the Search button, a season change) shares the same in-flight promise, and a FAILED load is
+// never remembered, so the next caller simply tries again.
+const eventsLoadInFlight = {};
 
-  // Try Firestore cache first
-  const cacheDoc = await db.collection('eventCache').doc('season_' + season).get();
-  if (cacheDoc.exists) {
-    const data = cacheDoc.data();
-    if (data.events && data.events.length > 0) {
-      // Check freshness: if cachedAt is recent enough, use it
-      const cachedAt = data.cachedAt ? data.cachedAt.toMillis() : 0;
-      const age = Date.now() - cachedAt;
-      if (age < CACHE_TTL_MS && !cacheIsPredatingRefresh(cachedAt)) {
-        eventCache[season] = data.events;
-        return data.events;
+function ensureEventsLoaded(season) {
+  // Already in memory and fresh
+  if (eventCache[season]) return Promise.resolve(eventCache[season]);
+  if (!eventsLoadInFlight[season]) {
+    eventsLoadInFlight[season] = loadEventsForSeason(season).finally(() => { delete eventsLoadInFlight[season]; });
+  }
+  return eventsLoadInFlight[season];
+}
+
+async function loadEventsForSeason(season) {
+  // Try Firestore cache first. The read is only an optimisation: if it is refused or fails (for
+  // instance a load that starts before sign-in has finished) fall through to the worker.
+  try {
+    const cacheDoc = await db.collection('eventCache').doc('season_' + season).get();
+    if (cacheDoc.exists) {
+      const data = cacheDoc.data();
+      if (data.events && data.events.length > 0) {
+        // Check freshness: if cachedAt is recent enough, use it
+        const cachedAt = data.cachedAt ? data.cachedAt.toMillis() : 0;
+        const age = Date.now() - cachedAt;
+        if (age < CACHE_TTL_MS && !cacheIsPredatingRefresh(cachedAt)) {
+          eventCache[season] = data.events;
+          return data.events;
+        }
+        // Stale cache — fall through to re-fetch
+        console.log(`[cache] season ${season} cache is ${Math.round(age/1000/60)}m old, re-fetching`);
       }
-      // Stale cache — fall through to re-fetch
-      console.log(`[cache] season ${season} cache is ${Math.round(age/1000/60)}m old, re-fetching`);
     }
+  } catch (err) {
+    console.warn('Event cache read failed, asking the worker instead:', err);
   }
 
   // Fetch from Worker
   const result = await callWorker(`/events?season=${encodeURIComponent(season)}`);
   const events = result.events || [];
+
+  // An empty list is returned but not remembered (and not written to the shared cache): the next
+  // caller asks again instead of treating "no events" as the answer for the rest of the session.
+  if (events.length === 0) return events;
 
   // Store in memory
   eventCache[season] = events;
@@ -2146,13 +2168,71 @@ function updateSuggestionsForCurrentQuery() {
   const season = getSelectedSeason();
   const allEvents = eventCache[season];
   if (!allEvents) {
-    // Cache not loaded yet — don't show suggestions, just wait for search
-    hideSuggestions();
+    // The list is not here yet: say so, and wait for (or retry) the load — never stay silently empty.
+    waitForEventsForSuggestions(season);
     return;
   }
 
+  suggestionsRetryCount = 0;
+  if (suggestionsRetryTimer) { clearTimeout(suggestionsRetryTimer); suggestionsRetryTimer = null; }
   const matches = filterEvents(allEvents, query).slice(0, 8);
   renderSuggestions(matches);
+}
+
+// ====== Typing while the season's event list is loading, failed or empty ======
+// Shows a small status line in the suggestions dropdown, then fills in the suggestions as soon as the list
+// arrives. A failed or empty answer is retried on the next keystroke (the debounced listener calls back in
+// here) and again after a short delay, up to SUGGESTIONS_MAX_AUTO_RETRIES times per burst of typing.
+const SUGGESTIONS_RETRY_MS = 3000;
+const SUGGESTIONS_MAX_AUTO_RETRIES = 5;
+let suggestionsRetryTimer = null;
+let suggestionsRetryCount = 0;
+let suggestionsWaitingSeason = null;
+
+function showSuggestionStatus(text) {
+  const dropdown = document.getElementById('search-suggestions');
+  dropdown.innerHTML = '';
+  const item = document.createElement('div');
+  item.className = 'suggestion-status';
+  item.textContent = text;
+  dropdown.appendChild(item);
+  dropdown.classList.remove('hidden');
+}
+
+// True while the typed text still needs this season's suggestions (box focused, same season, text present).
+function suggestionsStillWanted(season) {
+  const input = document.getElementById('input-event-search');
+  return document.activeElement === input && input.value.trim() !== '' && getSelectedSeason() === season;
+}
+
+function waitForEventsForSuggestions(season) {
+  if (suggestionsRetryTimer) { clearTimeout(suggestionsRetryTimer); suggestionsRetryTimer = null; }
+  showSuggestionStatus('Loading events...');
+  if (suggestionsWaitingSeason === season && eventsLoadInFlight[season]) return; // already waiting on this very load
+  suggestionsWaitingSeason = season;
+  const scheduleRetry = (text) => {
+    if (!suggestionsStillWanted(season)) return;
+    if (suggestionsRetryCount >= SUGGESTIONS_MAX_AUTO_RETRIES) {
+      showSuggestionStatus(`${text} Keep typing to try again, or press Search.`);
+      return;
+    }
+    suggestionsRetryCount += 1;
+    showSuggestionStatus(`${text} Retrying...`);
+    suggestionsRetryTimer = setTimeout(() => {
+      suggestionsRetryTimer = null;
+      if (suggestionsStillWanted(season)) updateSuggestionsForCurrentQuery();
+    }, SUGGESTIONS_RETRY_MS);
+  };
+  ensureEventsLoaded(season).then((events) => {
+    if (suggestionsWaitingSeason === season) suggestionsWaitingSeason = null;
+    if (!suggestionsStillWanted(season)) return;
+    if (!events || events.length === 0) { scheduleRetry('No events found for this season yet.'); return; }
+    updateSuggestionsForCurrentQuery();
+  }).catch((err) => {
+    if (suggestionsWaitingSeason === season) suggestionsWaitingSeason = null;
+    console.warn('Event list load failed:', err);
+    scheduleRetry("Couldn't load events.");
+  });
 }
 
 // ====== Live Autocomplete (client-side, no API calls) ======
@@ -2174,6 +2254,7 @@ document.getElementById('input-event-search').addEventListener('input', () => {
     return;
   }
 
+  suggestionsRetryCount = 0; // typing again gives the automatic retries a fresh start
   debounceTimer = setTimeout(updateSuggestionsForCurrentQuery, 150); // 150ms debounce — fast since it's local
 });
 
@@ -2207,6 +2288,8 @@ document.getElementById('select-season').addEventListener('change', async () => 
   // Clear all previous state immediately
   clearSelectedEvent();
   document.getElementById('input-event-search').value = '';
+  hideSuggestions();
+  if (suggestionsRetryTimer) { clearTimeout(suggestionsRetryTimer); suggestionsRetryTimer = null; }
 
   // The Pinned tab's season filter follows the app's season (pinned-events.js).
   if (typeof syncPinnedSeasonToApp === 'function') syncPinnedSeasonToApp();
@@ -2231,9 +2314,15 @@ document.getElementById('select-season').addEventListener('change', async () => 
   }
 });
 
-// ====== Pre-load current season on page load ======
+// ====== Season dropdown ======
+// The current season's event list is loaded in the background as soon as someone is SIGNED IN (the
+// auth observer in auth.js calls preloadEventsForSelectedSeason()). It used to be started here, at script
+// load, while still signed out: the Firestore cache read was refused, the error swallowed, and nothing ever
+// tried again after sign-in, so typing in the search box never produced suggestions (only the Search button,
+// which loads on demand, worked).
 populateSeasonDropdown();
 
-// Kick off background load of the current season's events
-const initialSeason = getSelectedSeason();
-ensureEventsLoaded(initialSeason).catch(() => {});
+function preloadEventsForSelectedSeason() {
+  const season = getSelectedSeason();
+  if (season && !eventCache[season]) ensureEventsLoaded(season).catch(() => {});
+}

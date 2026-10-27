@@ -197,6 +197,11 @@ async function bulkDeleteMatchScoutData(entryIds) {
   return results;
 }
 
+// The form's "Delete this match entry" button: shown only while the open entry is a committed one.
+function setMatchDeleteButtonVisible(visible) {
+  document.getElementById('match-delete-btn').classList.toggle('hidden', !visible);
+}
+
 // ====== Shared live-mode wiring for the match-based (schedule) view — see
 // the file header for why only this entry point gets live-entry-sync.js.
 // Creates the live session, attaches its snapshot handler to the already-
@@ -267,6 +272,7 @@ async function attachMatchLiveSession(docId, fields, baseFieldsIfNew) {
     onSnapshotData: (data) => {
       if (!currentMatchFormController || !currentMatchFields) return;
       applyRemoteFieldValues(currentMatchFormController, currentMatchFields, data, currentMatchLiveSession);
+      setMatchDeleteButtonVisible(isEntryCommitted(data)); // follows the live document
       applyPresenceIndicators(currentMatchFormController, currentMatchFields, data?.activeEditors, currentUser.uid);
       renderPresenceBanner(document.getElementById('match-presence-banner'), data?.activeEditors, currentUser.uid, !!data?.checkpoint);
     }
@@ -438,12 +444,19 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
   }
   currentMatchFields = null;
 
-  document.getElementById('match-modal-title').textContent = lockMatchNumber && teamName
-    ? `Edit Match #${existingData.matchNumber || '?'} — Team #${currentMatchTeamNumber} (${teamName})`
-    : `Edit Match #${existingData.matchNumber || '?'} — Team #${currentMatchTeamNumber}`;
+  // An entry that is not committed is the empty shell a live session leaves behind: it is a NEW entry, titled
+  // like one (same titles as openMatchScoutForm()); only a committed entry is an "Edit".
+  const committedEntry = isEntryCommitted(existingData);
+  const teamSuffix = lockMatchNumber && teamName ? ` (${teamName})` : '';
+  document.getElementById('match-modal-title').textContent = committedEntry
+    ? `Edit Match #${existingData.matchNumber || '?'} — Team #${currentMatchTeamNumber}${teamSuffix}`
+    : (lockMatchNumber
+      ? `Match #${existingData.matchNumber || '?'} — Team #${currentMatchTeamNumber}${teamSuffix}`
+      : `Match Scout Team #${currentMatchTeamNumber}`);
   document.getElementById('match-modal-error').textContent = '';
   document.getElementById('match-modal-success').textContent = '';
-  document.getElementById('match-delete-btn').classList.remove('hidden');
+  // Delete only for a COMMITTED entry (not the empty shell a live session leaves behind before its first Done).
+  setMatchDeleteButtonVisible(isEntryCommitted(existingData));
   document.getElementById('btn-match-save').textContent = lockMatchNumber ? 'Done' : 'Save Match Data';
   const presenceBanner = document.getElementById('match-presence-banner');
   presenceBanner.classList.add('hidden');
@@ -465,13 +478,15 @@ async function openMatchScoutEdit(docId, existingData, lockMatchNumber = false, 
     // currently-selected season for a legacy entry saved before
     // season-tagging existed) — editing an old entry should show the field
     // set that was active when it was scouted, not today's form.
-    const fields = await loadMatchFormConfig(teamId, entrySeason(existingData));
+    // Includes any retired (deleted-by-an-Accept) field this entry still has
+    // a value in — see dynamic-form.js's withRetiredFieldsHavingValues().
+    const fields = await loadMatchFormConfigForEntry(teamId, entrySeason(existingData), existingData);
     const container = document.getElementById('match-dynamic-fields');
     const renderedFields = lockMatchNumber ? fields.filter(f => f.id !== 'matchNumber') : fields;
 
     currentMatchFormController = renderDynamicForm(container, renderedFields, existingData);
 
-    document.getElementById('match-modal-success').textContent = lockMatchNumber ? '' : 'Editing existing match entry.';
+    document.getElementById('match-modal-success').textContent = (lockMatchNumber || !committedEntry) ? '' : 'Editing existing match entry.';
 
     if (lockMatchNumber) {
       // LIVE mode. openMatchScoutFormFromSchedule already ruled out the
@@ -591,6 +606,11 @@ async function saveMatchScoutForm() {
   const validationError = currentMatchFormController.validate();
   if (validationError) {
     errorEl.textContent = validationError;
+    return;
+  }
+  // An entry with no data is never saved (the Match Number alone doesn't count).
+  if (currentMatchFormController.isEmpty()) {
+    errorEl.textContent = EMPTY_ENTRY_ERROR;
     return;
   }
 
@@ -718,6 +738,10 @@ async function performMatchScoutSave(fieldValues, matchNumber, teamId) {
         // can tell them apart from real-event data. Absent on every real-event entry.
         ...(isScrimmageCode(currentMatchEventCode) ? { scrimmageId: scrimmageIdFromCode(currentMatchEventCode) } : {}),
         ...fieldValues,
+        // A retired field the editor cleared leaves the stored entry
+        // altogether (dynamic-form.js withRetiredFieldsHavingValues()).
+        ...Object.fromEntries((currentMatchFormController?.getClearedRetiredFieldIds?.() || [])
+          .map(id => [id, firebase.firestore.FieldValue.delete()])),
         scoutedBy: scoutedByUid,
         // Raw email is never stored on entries — attribution is uid + display name only.
         scoutedByEmail: firebase.firestore.FieldValue.delete(),
@@ -908,6 +932,12 @@ async function commitMatchScoutForm() {
     const validationError = currentMatchFormController.validate();
     if (validationError) {
       errorEl.textContent = validationError;
+      return;
+    }
+    // Nothing is committed on the live doc for an entry with no data; Cancel still
+    // works as before and cleans up the empty shell.
+    if (currentMatchFormController.isEmpty()) {
+      errorEl.textContent = EMPTY_ENTRY_ERROR;
       return;
     }
   }

@@ -286,6 +286,11 @@ function refreshActiveTeamData(teamId, teamData) {
   if (typeof onScrimmagePermissionsMaybeChanged === 'function') {
     onScrimmagePermissionsMaybeChanged();
   }
+  // Who may see the "new official form" notice depends on canEditTemplates,
+  // which lands live here like every other permission.
+  if (typeof onOfficialFormsTeamChanged === 'function') {
+    onOfficialFormsTeamChanged();
+  }
 }
 
 function watchTeamDoc(teamId) {
@@ -301,6 +306,8 @@ function watchTeamDoc(teamId) {
     formConfigUnsubscribe();
     formConfigUnsubscribe = null;
   }
+  // The previous team's form configs must not leak into the next team's notice.
+  if (typeof officialFormsOnTeamConfigs === 'function') officialFormsOnTeamConfigs(null);
   // Same teardown as the two above — watchTeamMemberProfiles() only
   // re-subscribes on the NEXT refreshActiveTeamData() call, which never
   // comes for the OLD team once this function moves on (a real team switch)
@@ -372,9 +379,13 @@ function watchTeamDoc(teamId) {
   if (typeof watchScrimmages === 'function') watchScrimmages(teamId);
 
   formConfigUnsubscribe = db.collection('teams').doc(teamId).collection('formConfig')
-    .onSnapshot(() => {
+    .onSnapshot((snap) => {
       if (typeof invalidateFormConfigCache === 'function') invalidateFormConfigCache(teamId);
       if (typeof invalidateMatchFormConfigCache === 'function') invalidateMatchFormConfigCache(teamId);
+      // Same snapshot also feeds the "new official form" notice
+      // (official-forms.js): each doc's handledVersion is what it compares
+      // the published version against.
+      if (typeof officialFormsOnTeamConfigs === 'function') officialFormsOnTeamConfigs(snap);
     }, (err) => {
       console.warn('formConfig listener error:', err);
     });
@@ -2301,10 +2312,20 @@ auth.onAuthStateChanged(async (user) => {
       // Google user — emailVerified should be true, but just in case, fall through
     }
 
-    // User is fully authenticated (Google or verified email) → proceed
+    // User is fully authenticated (Google or verified email) → proceed.
+    // The Admin buttons (official-form-admin.js) and the official-forms
+    // listener (official-forms.js) depend only on who is signed in, so they
+    // work on the Join/Create Team screen too, before any team is joined.
+    if (typeof updateAdminButtons === 'function') updateAdminButtons();
+    if (typeof syncOfficialFormsWatch === 'function') syncOfficialFormsWatch();
+    // Start loading this season's event list now, so live search suggestions are ready when the first
+    // character is typed (first-api.js; typing also waits for / retries it if it is slow or failed).
+    if (typeof preloadEventsForSelectedSeason === 'function') preloadEventsForSelectedSeason();
     await handleAuthenticatedUser(user);
   } else {
     currentUser = null;
+    if (typeof updateAdminButtons === 'function') updateAdminButtons();
+    if (typeof syncOfficialFormsWatch === 'function') syncOfficialFormsWatch();
     showScreen('screen-login');
   }
 });

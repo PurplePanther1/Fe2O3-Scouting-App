@@ -146,7 +146,28 @@ const matchFormConfigCache = new Map();
 // doc — a new season always starts from a clean form, per design. The legacy
 // doc itself is left in place afterward (unused, harmless) rather than
 // deleted. ======
-// Returns { fields, season }.
+//
+// Official forms (official-forms.js): the doc may also carry baseVersion (the
+// official version it was last accepted/merged from, null = never),
+// handledVersion (the highest official version the team has dealt with) and
+// retiredFields (definitions of fields an Accept removed, so old entries can
+// still show them) — all returned alongside fields, and all absent (-> null /
+// 0 / []) on a doc that predates the feature. The ONLY automatic use of an
+// official form is the "no config at all yet" branch below: a team that has
+// nothing for this season + form type gets a COPY of the current official
+// form (stamped with its version) instead of the built-in default. An
+// existing config is never touched here, however old the official form is.
+// Returns { fields, season, baseVersion, handledVersion, retiredFields }.
+function formConfigFromDocData(data, season) {
+  return {
+    fields: (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0)),
+    season,
+    baseVersion: data.baseVersion == null ? null : data.baseVersion,
+    handledVersion: data.handledVersion || 0,
+    retiredFields: Array.isArray(data.retiredFields) ? data.retiredFields : []
+  };
+}
+
 async function loadSeasonScopedFormConfig(teamId, season, configType, defaultsFn, cache) {
   const resolvedSeason = resolveFormConfigSeason(season);
   const cacheKey = `${teamId}_${resolvedSeason}`;
@@ -161,9 +182,7 @@ async function loadSeasonScopedFormConfig(teamId, season, configType, defaultsFn
     const doc = await configRef.get();
 
     if (doc.exists) {
-      const data = doc.data();
-      const sorted = (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-      const result = { fields: sorted, season: resolvedSeason };
+      const result = formConfigFromDocData(doc.data(), resolvedSeason);
       cache.set(cacheKey, result);
       return result;
     }
@@ -176,27 +195,148 @@ async function loadSeasonScopedFormConfig(teamId, season, configType, defaultsFn
       if (legacyDoc.exists) {
         const legacyFields = (legacyDoc.data().fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
         await configRef.set({ fields: legacyFields });
-        const result = { fields: legacyFields, season: resolvedSeason };
+        const result = formConfigFromDocData({ fields: legacyFields }, resolvedSeason);
         cache.set(cacheKey, result);
         return result;
       }
     }
 
-    // No season-scoped doc, no legacy doc to inherit — fresh default config.
+    // No season-scoped doc, no legacy doc to inherit. A NEW team (nothing at
+    // all for this season + form type) starts from a copy of the current
+    // official form when one is published; otherwise a fresh default config.
     // Seasons have entirely different game elements, so there's no copy-from-
-    // another-season option here — this is always just the plain generic
+    // another-season option here — the default is always just the plain generic
     // (or, for the one season keyed in SEASON_DEFAULT_*_FIELDS, DECODE)
     // default, straight from getDefaultPitFields()/getDefaultMatchFields().
-    const defaultConfig = defaultsFn(resolvedSeason).map(f => ({ ...f }));
-    await configRef.set({ fields: defaultConfig });
-    const result = { fields: defaultConfig, season: resolvedSeason };
+    // fetchOfficialForm() (official-forms.js) never throws: no official form,
+    // or one that can't be read, just means the default.
+    const official = typeof fetchOfficialForm === 'function'
+      ? await fetchOfficialForm(resolvedSeason, configType)
+      : null;
+    const seedFields = official
+      ? official.fields.map(f => ({ ...f }))
+      : defaultsFn(resolvedSeason).map(f => ({ ...f }));
+    const docData = official
+      ? { fields: seedFields, baseVersion: official.version, handledVersion: official.version, retiredFields: [] }
+      : { fields: seedFields };
+    const result = formConfigFromDocData(docData, resolvedSeason);
+    // A member without canEditTemplates can't create the doc (firestore.rules):
+    // they still get the copy for this load, it just isn't cached or saved —
+    // the first editor to load it creates it.
+    try {
+      await configRef.set(docData);
+    } catch (writeErr) {
+      console.warn(`Could not save the new ${configType} form config for season ${resolvedSeason}:`, writeErr);
+      return result;
+    }
     cache.set(cacheKey, result);
     return result;
   } catch (err) {
     console.warn(`Failed to load ${configType} form config for season ${resolvedSeason}, using defaults:`, err);
     // Fall back to defaults without saving
-    return { fields: defaultsFn(resolvedSeason).map(f => ({ ...f })), season: resolvedSeason };
+    return formConfigFromDocData({ fields: defaultsFn(resolvedSeason).map(f => ({ ...f })) }, resolvedSeason);
   }
+}
+
+// ====== Fields to render when opening an EXISTING entry: the form's current
+// fields plus any retired field (definition kept when an Accept removed it)
+// that this entry still has a value in — flagged retired:true and forced
+// optional, so the form can show it with a "deleted field" note, never mark it
+// required and never validate it. A retired field the entry has no value in is
+// not shown, and a brand-new entry (existingData null) never shows any. A
+// retired id that is back on the current form is just that field again. ======
+function isBlankFieldValue(v) {
+  return v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0);
+}
+
+// ====== An entry with NO data is never saved. "Empty" = every field on the
+// CURRENT form is blank (the Match Number field aside — and the team number is
+// not a form field at all): no text (whitespace only is blank), no dropdown /
+// button-group choice, no number typed (a typed 0 IS a value), a counter still
+// at its untouched default. A retired field's value never counts. Used by every
+// save path (pit Done, match Done, match batch Save), after the required-field
+// check, with the same error line. ======
+const EMPTY_ENTRY_ERROR = 'All fields are empty. Fill in at least one field before saving.';
+
+// ====== Counters have a "not answered" state: the display shows "-" and the value
+// is null (stored as null, like an empty number box). The field's "Assumed value"
+// (field.assumedValue, default 0) is what "-" is assumed to be when + or - is
+// pressed. An older field that only has defaultValue reads it as the assumed value
+// (the stored form is never rewritten). ======
+function counterNumberOr(raw, fallback) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function counterAssumedValue(field) {
+  const assumed = counterNumberOr(field.assumedValue, null);
+  return assumed !== null ? assumed : counterNumberOr(field.defaultValue, 0);
+}
+
+function counterLimits(field) {
+  return {
+    min: counterNumberOr(field.min, 0),
+    max: counterNumberOr(field.max, null),
+    step: counterNumberOr(field.step, 1)
+  };
+}
+
+// What pressing + (direction 1) or - (direction -1) does: the new number, or null
+// when nothing happens. current is a number, or null while the counter shows "-".
+//  - from "-": + = min(max, assumed + step) but never below min (nothing when assumed is
+//    already above max); - = assumed - step when that is still >= min, else nothing. An
+//    assumed value outside min..max gives a result that is clamped into the range.
+//  - from a number: steps by step, never past min / max; + at max and - at min do
+//    nothing. The buttons never set "-" (only typing does).
+function counterNextValue(field, current, direction) {
+  const { min, max, step } = counterLimits(field);
+  const clamp = (n) => {
+    let r = Math.max(min, n);
+    if (max !== null) r = Math.min(max, r);
+    return r;
+  };
+  if (current === null || current === undefined) {
+    const assumed = counterAssumedValue(field);
+    // + from an Assumed value already ABOVE the maximum does nothing (the twin of - below the minimum); - then
+    // gives the maximum. An Assumed value below the minimum: + gives the minimum, - does nothing.
+    if (direction > 0) return max !== null && assumed > max ? null : clamp(assumed + step);
+    const next = assumed - step;
+    return next >= min ? clamp(next) : null;
+  }
+  if (direction > 0) {
+    if (max !== null && current >= max) return null;
+    return max !== null ? Math.min(max, current + step) : current + step;
+  }
+  if (current <= min) return null;
+  return Math.max(min, current - step);
+}
+
+function isFormFieldElementBlank(field, el) {
+  const v = el.value; // a counter at "-" reads as '' (see renderCounter()'s value getter)
+  if (field.type === 'buttonGroup' && Array.isArray(v)) return v.length === 0;
+  return String(v ?? '').trim() === '';
+}
+
+function withRetiredFieldsHavingValues(config, existingData) {
+  const fields = config.fields;
+  if (!existingData) return fields;
+  const activeIds = new Set(fields.map(f => f.id));
+  const extra = (config.retiredFields || [])
+    .filter(f => f && f.id && !activeIds.has(f.id) && !isBlankFieldValue(existingData[f.id]))
+    // A retired counter is shown as a plain number box (blank when null).
+    .map(f => ({ ...f, required: false, retired: true, ...(f.type === 'counter' ? { type: 'number' } : {}) }));
+  return extra.length > 0 ? [...fields, ...extra] : fields;
+}
+
+async function loadFormConfigForEntry(teamId, season, existingData) {
+  const config = await loadSeasonScopedFormConfig(teamId, season, 'pitScouting', getDefaultPitFields, formConfigCache);
+  return withRetiredFieldsHavingValues(config, existingData);
+}
+
+async function loadMatchFormConfigForEntry(teamId, season, existingData) {
+  const config = await loadSeasonScopedFormConfig(teamId, season, 'matchScouting', getDefaultMatchFields, matchFormConfigCache);
+  return withRetiredFieldsHavingValues(config, existingData);
 }
 
 // ====== Load (or create/migrate) pit scouting form config for a team +
@@ -255,10 +395,15 @@ function renderDynamicForm(container, fields, existingData) {
     fieldDiv.dataset.fieldId = field.id;
     fieldDivs[field.id] = fieldDiv;
 
+    // A retired field (see withRetiredFieldsHavingValues()) is never required:
+    // no asterisk, no required state on the input, whatever its stored
+    // definition says.
+    const showAsRequired = !!field.required && !field.retired;
+
     // Label
     const label = document.createElement('label');
     label.setAttribute('for', 'dyn-' + field.id);
-    label.textContent = field.label + (field.required ? ' *' : '');
+    label.textContent = field.label + (showAsRequired ? ' *' : '');
     labelElements[field.id] = label;
 
     const savedValue = existingData ? existingData[field.id] : undefined;
@@ -288,6 +433,13 @@ function renderDynamicForm(container, fields, existingData) {
 
     fieldElements[field.id] = input;
     fieldDiv.appendChild(label);
+    if (field.retired) {
+      fieldDiv.classList.add('field-retired');
+      const note = document.createElement('div');
+      note.className = 'retired-field-note';
+      note.textContent = 'Deleted field: no longer on the form. Clear it and save to remove it from this entry, or leave it to keep the value.';
+      fieldDiv.appendChild(note);
+    }
     fieldDiv.appendChild(input);
     container.appendChild(fieldDiv);
   });
@@ -306,7 +458,8 @@ function renderDynamicForm(container, fields, existingData) {
           const raw = el.value.trim();
           val = raw !== '' ? Number(raw) : null;
         } else if (field.type === 'counter') {
-          val = Number(el.value);
+          // "-" (not answered) reads as '' and is saved as null.
+          val = el.value === '' ? null : Number(el.value);
         } else if (field.type === 'textarea') {
           val = el.value.trim() || null;
         } else if (field.type === 'buttonGroup') {
@@ -318,10 +471,20 @@ function renderDynamicForm(container, fields, existingData) {
       });
       return values;
     },
+    // True when nothing on the form has a real value (see EMPTY_ENTRY_ERROR above).
+    isEmpty() {
+      return fields.every(field => {
+        if (field.retired || field.id === 'matchNumber') return true;
+        const el = fieldElements[field.id];
+        return !el || isFormFieldElementBlank(field, el);
+      });
+    },
     // Validate required fields. Returns null if valid, or error string.
     validate() {
       for (const field of fields) {
-        if (!field.required) continue;
+        // A retired field is never required, even if its stored definition
+        // says it was before it was removed (clearing it must always save).
+        if (!field.required || field.retired) continue;
         const el = fieldElements[field.id];
         if (!el) continue;
         // Multi-select button-group value is an array, not a string — .trim()
@@ -356,6 +519,15 @@ function renderDynamicForm(container, fields, existingData) {
     // Get a specific field element
     getField(id) {
       return fieldElements[id] || null;
+    },
+    // Ids of retired fields (see withRetiredFieldsHavingValues()) whose value
+    // the user has cleared — the save paths remove these keys from the stored
+    // entry instead of leaving a null behind.
+    getClearedRetiredFieldIds() {
+      return fields
+        .filter(field => field.retired && fieldElements[field.id])
+        .filter(field => isBlankFieldValue(this.getValues()[field.id]))
+        .map(field => field.id);
     },
     // Show/hide a lightweight "someone else is focused here" indicator on one
     // field. Pass a display name to show it, or null/undefined to clear it.
@@ -569,12 +741,10 @@ function renderCounter(field, savedValue) {
   wrapper.className = 'counter-field';
   wrapper.id = 'dyn-' + field.id;
 
-  const min = (field.min !== undefined && field.min !== null && field.min !== '') ? Number(field.min) : 0;
-  const max = (field.max !== undefined && field.max !== null && field.max !== '') ? Number(field.max) : null;
-  const step = (field.step !== undefined && field.step !== null && field.step !== '') ? Number(field.step) : 1;
-  const startValue = (field.defaultValue !== undefined && field.defaultValue !== null && field.defaultValue !== '') ? Number(field.defaultValue) : min;
+  const { min, max, step } = counterLimits(field);
 
-  let current = (savedValue !== undefined && savedValue !== null && savedValue !== '') ? Number(savedValue) : startValue;
+  // null = "-" (not answered). A saved number (including an old entry's stored 0) shows as itself.
+  let current = counterNumberOr(savedValue, null);
 
   const minusBtn = document.createElement('button');
   minusBtn.type = 'button';
@@ -598,9 +768,10 @@ function renderCounter(field, savedValue) {
   plusBtn.setAttribute('aria-label', `Increase ${field.label}`);
 
   function render() {
-    display.textContent = current;
-    minusBtn.disabled = current <= min;
-    plusBtn.disabled = max !== null && current >= max;
+    display.textContent = current === null ? '-' : current;
+    display.classList.toggle('counter-display-blank', current === null);
+    minusBtn.disabled = counterNextValue(field, current, -1) === null;
+    plusBtn.disabled = counterNextValue(field, current, 1) === null;
   }
 
   // Dispatches a synthetic 'input' on the wrapper itself after each tap, so
@@ -614,16 +785,18 @@ function renderCounter(field, savedValue) {
   }
 
   minusBtn.addEventListener('click', () => {
-    if (current <= min) return;
-    current = Math.max(min, current - step);
+    const next = counterNextValue(field, current, -1);
+    if (next === null) return;
+    current = next;
     render();
     playCounterTone('down');
     notifyChanged();
   });
 
   plusBtn.addEventListener('click', () => {
-    if (max !== null && current >= max) return;
-    current = max !== null ? Math.min(max, current + step) : current + step;
+    const next = counterNextValue(field, current, 1);
+    if (next === null) return;
+    current = next;
     render();
     playCounterTone('up');
     notifyChanged();
@@ -653,7 +826,8 @@ function renderCounter(field, savedValue) {
     editInput = document.createElement('input');
     editInput.type = 'number';
     editInput.className = 'counter-edit-input';
-    editInput.value = String(current);
+    editInput.value = current === null ? '' : String(current);
+    editInput.placeholder = '-';
     editInput.min = String(min);
     if (max !== null) editInput.max = String(max);
     editInput.step = String(step);
@@ -664,15 +838,25 @@ function renderCounter(field, savedValue) {
         suppressBlurCommit = false;
         return;
       }
+      // Typing a number sets it (clamped to min / max, a typed 0 is 0). Typing "-" or
+      // clearing the box (a number box reads both as '') sets the counter to "-" (null).
       const raw = editInput.value.trim();
-      let num = raw === '' ? current : Number(raw);
-      if (!Number.isFinite(num)) num = current;
-      num = Math.max(min, num);
-      if (max !== null) num = Math.min(max, num);
+      let num = null;
+      if (raw !== '' && raw !== '-') {
+        num = Number(raw);
+        if (!Number.isFinite(num)) num = current;
+        if (num !== null) {
+          num = Math.max(min, num);
+          if (max !== null) num = Math.min(max, num);
+        }
+      }
       const changed = num !== current;
       current = num;
-      editInput.remove();
+      // Clear editInput BEFORE removing it: removing a still-focused input fires a native
+      // blur, which would otherwise re-enter this function on an input that is already going.
+      const finished = editInput;
       editInput = null;
+      finished.remove();
       display.classList.remove('hidden');
       render();
       if (changed) notifyChanged();
@@ -716,11 +900,13 @@ function renderCounter(field, savedValue) {
   // generic getValues/validate/setValues code the same way a real <input> would be.
   Object.defineProperty(wrapper, 'value', {
     get() {
-      return String(current);
+      // '' while it shows "-", exactly like an empty number box.
+      return current === null ? '' : String(current);
     },
     set(val) {
-      const num = Number(val);
-      current = Number.isFinite(num) ? num : min;
+      // A blank (null / '' — e.g. a live doc that has no value for this counter yet) shows
+      // "-"; a number shows as itself (never clamped: an old entry keeps what it stored).
+      current = counterNumberOr(val, null);
       render();
     }
   });

@@ -15,7 +15,7 @@
 // tester's browser was simply never running the new code. Bumping the
 // version here changes this file's bytes, which is what makes a browser's
 // normal update check (on next navigation) notice a new worker at all.
-const CACHE_VERSION = 'v6';
+const CACHE_VERSION = 'v14';
 const CACHE_NAME = `fe2o3-shell-${CACHE_VERSION}`;
 
 const SHELL_ASSETS = [
@@ -43,6 +43,9 @@ const SHELL_ASSETS = [
   '/js/match-scores.js',
   '/js/team-info.js',
   '/js/match-scouted-modal.js',
+  '/js/official-forms.js',
+  '/js/official-form-merge.js',
+  '/js/official-form-admin.js',
   '/js/form-builder.js',
   '/js/app.js',
   '/js/sheets-export.js',

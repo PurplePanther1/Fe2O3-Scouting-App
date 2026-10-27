@@ -54,6 +54,68 @@ service cloud.firestore {
         );
     }
 
+    // ====== Official (app-wide) scouting forms ======
+    // The admin is the one account whose email is leviticus.sietman@gmail.com AND
+    // whose email is VERIFIED. email_verified is what makes the address mean
+    // anything: Firebase Auth lets anyone register an email/password account
+    // with any address they type, and only flips email_verified to true once
+    // the link mailed TO that address has been clicked (a Google sign-in is
+    // verified by Google). Checking the address alone would let anyone who
+    // signs up as leviticus.sietman@gmail.com without ever receiving its mail
+    // publish a form to every team in the app.
+    function isOfficialFormsAdmin() {
+      return isAuth()
+        && request.auth.token.email == 'leviticus.sietman@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    // Shape of officialForms/{season}_{formType} AND of each officialForms/.../versions/{n}
+    // copy of it. Fields themselves are not validated (the form builder owns
+    // that, same as formConfig), only that they are a list of sane size.
+    function isValidOfficialForm(formId) {
+      return request.resource.data.keys().hasOnly(['season', 'formType', 'version', 'fields', 'publishedAt', 'publishedBy'])
+        && request.resource.data.keys().hasAll(['season', 'formType', 'version', 'fields', 'publishedAt', 'publishedBy'])
+        && request.resource.data.season is string
+        && request.resource.data.season.matches('^20[0-9]{2}$')
+        && request.resource.data.formType in ['pitScouting', 'matchScouting']
+        && formId == request.resource.data.season + '_' + request.resource.data.formType
+        && request.resource.data.version is int
+        && request.resource.data.version >= 1
+        && request.resource.data.fields is list
+        && request.resource.data.fields.size() >= 1
+        && request.resource.data.fields.size() <= 100
+        && request.resource.data.publishedAt == request.time
+        && request.resource.data.publishedBy == request.auth.uid;
+    }
+
+    // Shape of officialFormDrafts/{season}_{formType}: the admin screen's autosaved
+    // DRAFT of an official form (official-form-admin.js). basisVersion is the
+    // published version the draft started from (0 = nothing was published yet).
+    // Fields themselves are not validated (the form builder owns that); the
+    // timestamp and uid are the server's, so they can't be forged.
+    function isValidOfficialFormDraft(draftId) {
+      return request.resource.data.keys().hasOnly(['fields', 'basisVersion', 'updatedAt', 'updatedBy'])
+        && request.resource.data.keys().hasAll(['fields', 'basisVersion', 'updatedAt', 'updatedBy'])
+        && draftId.matches('^20[0-9]{2}_(pitScouting|matchScouting)$')
+        && request.resource.data.fields is list
+        && request.resource.data.fields.size() <= 100
+        && request.resource.data.basisVersion is int
+        && request.resource.data.basisVersion >= 0
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.updatedBy == request.auth.uid;
+    }
+
+    // The version fields a team's formConfig doc may carry (official-forms.js):
+    // baseVersion = the official version the form was last accepted/merged from
+    // (null = never), handledVersion = the highest official version the team
+    // has dealt with, retiredFields = definitions of fields an Accept removed.
+    // Absent on every pre-existing doc, so each is only checked when present.
+    function isValidFormConfigVersioning(data) {
+      return (!('handledVersion' in data) || (data.handledVersion is int && data.handledVersion >= 0))
+        && (!('baseVersion' in data) || data.baseVersion == null || (data.baseVersion is int && data.baseVersion >= 0))
+        && (!('retiredFields' in data) || (data.retiredFields is list && data.retiredFields.size() <= 200));
+    }
+
     // ====== Unofficial scrimmages (teams/{teamId}/scrimmages/{scrimId}) ======
     // canManageScrimmages gates scrimmage create / rename-or-change-date /
     // delete (and removing a roster team, see the scrimmage block below) —
@@ -455,7 +517,8 @@ service cloud.firestore {
         allow read: if isTeamMember(teamId);
         allow create, update: if isAuth()
           && exists(/databases/$(database)/documents/teams/$(teamId))
-          && canEditTemplates(teamId);
+          && canEditTemplates(teamId)
+          && isValidFormConfigVersioning(request.resource.data);
         // Same last-member-only condition as the team doc's own delete rule
         // above — this subcollection doc isn't the team doc itself, so it
         // needs its own get() rather than inheriting resource.data directly.
@@ -463,6 +526,39 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/teams/$(teamId))
           && get(/databases/$(database)/documents/teams/$(teamId)).data.members.size() == 1
           && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([request.auth.uid]);
+      }
+
+      // A copy of a form saved just BEFORE an Accept / Merge / Restore replaced
+      // it (official-forms.js), so "Restore previous form" can put it back.
+      // Same audience as formConfig writes (captain or canEditTemplates), create-
+      // once (a snapshot is never edited), and stamped with the real time and
+      // the real uid so history can't be forged. formKey is "{season}_{formType}"
+      // — the single field the client queries on (no composite index needed).
+      // Deletable by the same people (pruning) and, like formConfig, by the last
+      // member so deleting a team can clear the whole subcollection.
+      match /formSnapshots/{snapshotId} {
+        allow read: if canEditTemplates(teamId);
+        allow create: if canEditTemplates(teamId)
+          && request.resource.data.keys().hasOnly(['season', 'formType', 'formKey', 'fields', 'retiredFields', 'baseVersion', 'handledVersion', 'appliedVersion', 'action', 'createdAt', 'createdBy', 'createdByName'])
+          && request.resource.data.keys().hasAll(['season', 'formType', 'formKey', 'fields', 'action', 'createdAt', 'createdBy'])
+          && request.resource.data.season is string
+          && request.resource.data.season.matches('^20[0-9]{2}$')
+          && request.resource.data.formType in ['pitScouting', 'matchScouting']
+          && request.resource.data.formKey == request.resource.data.season + '_' + request.resource.data.formType
+          && request.resource.data.fields is list
+          && request.resource.data.fields.size() <= 200
+          && request.resource.data.get('retiredFields', []) is list
+          && request.resource.data.get('retiredFields', []).size() <= 200
+          && (request.resource.data.get('baseVersion', null) == null || request.resource.data.baseVersion is int)
+          && request.resource.data.action in ['accept', 'merge', 'restore']
+          && request.resource.data.createdAt == request.time
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update: if false;
+        allow delete: if canEditTemplates(teamId)
+          || (isAuth()
+              && exists(/databases/$(database)/documents/teams/$(teamId))
+              && get(/databases/$(database)/documents/teams/$(teamId)).data.members.size() == 1
+              && get(/databases/$(database)/documents/teams/$(teamId)).data.members.hasAny([request.auth.uid]));
       }
 
       // Nested pit-scouting subcollection — lives alongside the flat
@@ -836,6 +932,46 @@ service cloud.firestore {
     match /teamDetails/{documentId} {
       allow read: if isAuth();
       allow write: if isAuth() && request.resource.data.name is string;
+    }
+
+    // Official (app-wide) scouting forms: one doc per season + form type, id
+    // "{season}_{pitScouting|matchScouting}" (pit and match are versioned
+    // separately). Readable by any signed-in user (every team has to be able to
+    // compare against it); writable ONLY by the admin (isOfficialFormsAdmin).
+    // `version` starts at 1 and must go up by exactly 1 on every publish, so a
+    // stale second admin tab can't overwrite a newer publish or move it back.
+    // versions/{n} keeps an immutable copy of each published version (the admin
+    // screen's short history); a history doc must carry the same version the
+    // parent doc ends up with (getAfter), so the two can only be written together.
+    match /officialForms/{formId} {
+      allow read: if isAuth();
+      allow create: if isOfficialFormsAdmin()
+        && isValidOfficialForm(formId)
+        && request.resource.data.version == 1;
+      allow update: if isOfficialFormsAdmin()
+        && isValidOfficialForm(formId)
+        && request.resource.data.version == resource.data.version + 1;
+      allow delete: if isOfficialFormsAdmin();
+
+      match /versions/{versionId} {
+        allow read: if isAuth();
+        allow create: if isOfficialFormsAdmin()
+          && isValidOfficialForm(formId)
+          && versionId == string(request.resource.data.version)
+          && existsAfter(/databases/$(database)/documents/officialForms/$(formId))
+          && getAfter(/databases/$(database)/documents/officialForms/$(formId)).data.version == request.resource.data.version;
+        allow update: if false;
+        allow delete: if isOfficialFormsAdmin();
+      }
+    }
+
+    // The admin screen's autosaved drafts of official forms (not yet published).
+    // Private to the admin: nobody else can read, write or even see that a draft
+    // exists, and a draft never reaches a team (only officialForms does).
+    match /officialFormDrafts/{draftId} {
+      allow read: if isOfficialFormsAdmin();
+      allow create, update: if isOfficialFormsAdmin() && isValidOfficialFormDraft(draftId);
+      allow delete: if isOfficialFormsAdmin();
     }
 
     match /pitScouting/{documentId} {

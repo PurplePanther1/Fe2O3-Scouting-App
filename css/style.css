@@ -361,6 +361,7 @@ input[type="password"]::placeholder {
 /* ====== User Info Bar ====== */
 .user-info {
   display: flex;
+  flex-wrap: wrap; /* the Admin button (admin account only) makes a third button: wrap rather than overflow on a 320px screen */
   align-items: center;
   gap: 12px;
   padding: 12px 0;
@@ -817,6 +818,13 @@ input[type="password"]::placeholder {
 
 .suggestions-dropdown.hidden {
   display: none;
+}
+
+.suggestion-status {
+  padding: 10px 14px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
 }
 
 .suggestion-item {
@@ -1660,6 +1668,11 @@ input[type="password"]::placeholder {
   padding: 2px 4px;
 }
 
+/* "-" = not answered (value null) */
+.counter-display-blank {
+  color: var(--text-muted);
+}
+
 .counter-display:hover,
 .counter-display:focus {
   background: var(--surface);
@@ -1865,6 +1878,7 @@ input[type="password"]::placeholder {
 
 .builder-field-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
@@ -1885,7 +1899,10 @@ input[type="password"]::placeholder {
   cursor: grab;
   user-select: none;
   line-height: 1;
-  padding: 0 2px;
+  padding: 4px 4px;
+  /* The handle alone takes over touches (drag to reorder, builder-drag in form-builder.js);
+     the rest of the row and the page keep scrolling normally. */
+  touch-action: none;
 }
 
 .builder-move-group {
@@ -1917,7 +1934,7 @@ input[type="password"]::placeholder {
 }
 
 .builder-field-summary {
-  flex: 1;
+  flex: 1 1 120px;
   min-width: 0;
 }
 
@@ -1925,6 +1942,7 @@ input[type="password"]::placeholder {
   display: block;
   font-weight: 600;
   font-size: 0.9rem;
+  overflow-wrap: anywhere;
 }
 
 .builder-field-meta {
@@ -1932,12 +1950,15 @@ input[type="password"]::placeholder {
   font-size: 0.75rem;
   color: var(--text-muted);
   margin-top: 2px;
+  overflow-wrap: anywhere;
 }
 
 .builder-field-actions {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+  gap: 6px;
+  margin-left: auto;
 }
 
 .builder-field-actions .btn {
@@ -2882,4 +2903,261 @@ input[type="password"]::placeholder {
 
 .scrimmage-excluded-note:empty {
   display: none;
+}
+
+/* ====== Official (app-wide) scouting forms (official-forms.js,
+   official-form-merge.js, official-form-admin.js) ====== */
+
+/* The "new official version" notice: My Team banner (under Edit Scouting
+   Forms) and the My Account card. One item per form that updated. */
+.official-notice {
+  margin-top: 12px;
+}
+
+.official-notice-item {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--presence);
+  border-radius: 8px;
+  background: var(--presence-bg);
+}
+
+.official-notice-title {
+  margin: 0 0 4px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.official-notice-detail {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.official-notice-actions,
+.builder-official-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.official-notice-actions .btn,
+.builder-official-actions .btn {
+  width: auto;
+  flex: 1 1 auto;
+  white-space: normal;
+}
+
+/* "Official form" bar / admin panel above the form builder's field list. */
+.builder-official-bar {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.builder-official-bar .help-text {
+  overflow-wrap: anywhere;
+}
+
+.official-admin-warning,
+.help-text.official-admin-warning {
+  color: var(--presence);
+}
+
+.official-admin-history {
+  margin-top: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+.official-admin-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.official-admin-history-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.official-admin-history-row .btn {
+  width: auto;
+  flex-shrink: 0;
+}
+
+/* Viewer + Merge screens: same flex-column card as the scrimmage Compare
+   screen (.merge-compare-card) — only the list scrolls, the buttons stay. */
+#official-form-view-modal,
+#official-merge-modal {
+  z-index: 1002;
+}
+
+#official-form-view-modal .pit-modal-actions,
+#official-merge-modal .pit-modal-actions {
+  flex-wrap: wrap;
+}
+
+#official-form-view-modal .pit-modal-actions .btn,
+#official-merge-modal .pit-modal-actions .btn {
+  flex: 1 1 auto;
+}
+
+.builder-field-item--readonly:hover {
+  border-color: var(--border);
+}
+
+.merge-field-diff {
+  margin: 0 0 4px;
+}
+
+.merge-field > .merge-opt-value {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* A retired (deleted-by-an-Accept) field shown on an old entry that still has
+   a value in it. */
+.pit-field.field-retired {
+  padding: 8px 10px;
+  border: 1px dashed var(--presence);
+  border-radius: 8px;
+}
+
+.retired-field-note {
+  margin: 0 0 6px;
+  color: var(--presence);
+  font-size: 0.8rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* On a 320x480 screen the intro + summary + buttons leave little room: let the list shrink further than the
+   scrimmage Compare screen's 96px so Cancel / Merge stay on screen (only the list scrolls). */
+#official-merge-modal .merge-compare-list,
+#official-form-view-modal .merge-compare-list {
+  min-height: 48px;
+}
+
+/* ====== Official forms, round 3 (official-forms.js, official-form-admin.js, form-builder.js) ====== */
+
+/* One line under the My Team banner when other seasons have an update too. */
+.official-other-seasons {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+/* Admin panel: "Saving..." / "Draft saved" / "Not saved: ..." */
+.admin-save-state {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+/* "See what changed": same card as the viewer (z-index 1002 so the generic confirm layers over it). */
+#admin-changes-modal,
+#form-differences-modal {
+  z-index: 1002;
+}
+
+#admin-changes-modal .pit-modal-actions,
+#form-differences-modal .pit-modal-actions {
+  flex-wrap: wrap;
+}
+
+#admin-changes-modal .pit-modal-actions .btn,
+#form-differences-modal .pit-modal-actions .btn {
+  flex: 1 1 auto;
+}
+
+#admin-changes-modal .merge-compare-list,
+#form-differences-modal .merge-compare-list {
+  min-height: 48px;
+}
+
+.admin-change-status {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.admin-change-row[data-status="unchanged"] .admin-change-status {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.admin-change-row[data-status="changed"] .admin-change-status,
+.admin-change-row[data-status="moved"] .admin-change-status {
+  color: var(--presence);
+}
+
+.admin-change-row[data-status="removed"] {
+  border-color: var(--error);
+}
+
+.admin-change-row[data-status="removed"] .admin-change-status {
+  color: var(--error);
+}
+
+.admin-change-row[data-status="added"] {
+  border-color: var(--success);
+}
+
+.admin-change-row[data-status="added"] .admin-change-status {
+  color: var(--success);
+}
+
+.admin-change-heading {
+  margin: 12px 0 6px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+/* Builder: Copy button and drag-to-reorder (a pointer drag from the six-dot handle). */
+.builder-copy-btn {
+  white-space: nowrap;
+}
+
+.builder-field-list {
+  position: relative;
+}
+
+.builder-field-item--dragging {
+  opacity: 0.45;
+  border-color: var(--primary);
+}
+
+/* Absolutely positioned (set from JS) so showing it never shifts the rows being dragged over. */
+.builder-drop-indicator {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--primary);
+  pointer-events: none;
+  z-index: 2;
+}
+
+body.builder-dragging {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grabbing;
+}
+
+/* Back button + Admin button side by side on the standalone My Account / Account Activity pages. */
+.account-back-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
 }

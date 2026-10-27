@@ -574,7 +574,7 @@ function buildComparisonStatsRows(matchFields, includedEntries) {
   const stats = computeMatchFieldStats(includedEntries, matchFields);
   stats.forEach((stat) => {
     if (stat.count === 0) {
-      rows.push([stat.field.label, stat.type, 'No data', '']);
+      rows.push([stat.field.label, stat.type, 'No data', typeof EXPORT_NO_ANSWER !== 'undefined' ? EXPORT_NO_ANSWER : 'N/A']);
       return;
     }
     if (stat.type === 'number' || stat.type === 'counter') {

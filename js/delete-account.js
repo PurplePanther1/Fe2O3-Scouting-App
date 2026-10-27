@@ -353,6 +353,22 @@ async function deleteEntireTeam(teamId, uid, teamData) {
     console.warn(`Failed to query formConfig for team deletion:`, err);
   }
 
+  // "Previous form" snapshots saved before an Accept / Merge / Restore
+  // (official-forms.js) — same reasoning as formConfig: they have to go
+  // BEFORE the team doc, since the rule that allows the delete reads it.
+  try {
+    const snapshotsSnap = await db.collection('teams').doc(teamId).collection('formSnapshots').get();
+    for (const doc of snapshotsSnap.docs) {
+      try {
+        await doc.ref.delete();
+      } catch (err) {
+        console.warn(`Failed to delete formSnapshots/${doc.id} for team ${teamId}:`, err);
+      }
+    }
+  } catch (err) {
+    console.warn(`Failed to query formSnapshots for team deletion:`, err);
+  }
+
   // Scrimmage docs (their entries were already removed by
   // deleteAllScoutingEntriesForTeam() above, which is unfiltered by event).
   // Like formConfig, they must go BEFORE the team doc: the captain's

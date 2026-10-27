@@ -163,6 +163,8 @@
         <img id="user-avatar" src="" alt="" />
         <span id="user-name"></span>
         <button id="btn-open-my-account-standalone" class="btn btn-small btn-outline">My Account <span id="account-activity-nav-badge-team" class="match-count-badge hidden"></span></button>
+        <!-- Admin (js/official-form-admin.js): shown only to the verified admin account; works before joining a team. -->
+        <button id="btn-open-admin-from-team" class="btn btn-small btn-outline hidden">Admin</button>
         <button id="btn-sign-out" class="btn btn-small btn-outline">Sign Out</button>
       </div>
 
@@ -205,8 +207,9 @@
         <div id="dashboard-team-info">
           <h2 id="main-team-name"></h2>
         </div>
-        <div style="display:flex; align-items:center; gap:8px; flex-shrink:0">
-          <button id="btn-open-my-account-from-dashboard" class="btn btn-small btn-outline">My Account <span id="account-activity-nav-badge-header" class="match-count-badge hidden"></span></button>
+        <div style="display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px; flex:0 1 auto; min-width:0">
+          <button id="btn-open-my-account-from-dashboard" class="btn btn-small btn-outline">My Account <span id="account-activity-nav-badge-header" class="match-count-badge hidden"></span> <span id="official-forms-nav-badge-header" class="match-count-badge hidden" title="New official scouting forms"></span></button>
+          <button id="btn-open-admin-from-dashboard" class="btn btn-small btn-outline hidden">Admin</button>
           <button id="btn-main-sign-out" class="btn btn-small btn-outline">Sign Out</button>
         </div>
       </div>
@@ -501,6 +504,14 @@
           <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">SCOUTING FORMS</h3>
           <p class="help-text">Configure what fields appear on the pit and match scouting forms.</p>
           <button id="btn-open-form-builder" class="btn btn-primary">Edit Scouting Forms</button>
+          <!-- "New official version" notice (js/official-forms.js): only for a captain or a
+               member with the forms-editing permission (canEditTemplates); names only the
+               form(s) that updated. -->
+          <div id="official-forms-notice-myteam" class="official-notice hidden"></div>
+          <!-- One line when OTHER seasons (not the selected one) also have an update; My Account lists them all. -->
+          <p id="official-forms-other-seasons" class="help-text official-other-seasons hidden"></p>
+          <p id="official-forms-myteam-error" class="error-message"></p>
+          <p id="official-forms-myteam-success" class="success-message"></p>
         </div>
 
         <!-- Export team data — standalone entry point, always visible (not
@@ -532,7 +543,11 @@
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap">
           <!-- Back label/target set dynamically by openStandaloneMyAccount() depending on
                whether this was reached from the dashboard or the Join/Create Team screen -->
-          <button id="btn-my-account-standalone-back" class="btn btn-outline hidden" style="width:auto">← Back</button>
+          <div class="account-back-group">
+            <button id="btn-my-account-standalone-back" class="btn btn-outline hidden" style="width:auto">← Back</button>
+            <!-- Admin (js/official-form-admin.js): verified admin only; closing the admin screen returns here. -->
+            <button id="btn-open-admin-from-account" class="btn btn-small btn-outline hidden">Admin</button>
+          </div>
           <div style="display:flex; align-items:center; gap:8px; flex-shrink:0; margin-left:auto">
             <!-- Same btn-small/btn-outline treatment as the dashboard header's
                  "My Account" button (#btn-open-my-account-from-dashboard) —
@@ -664,6 +679,16 @@
           <p id="account-teams-status" class="help-text"></p>
         </div>
 
+        <!-- Scouting forms: the same "new official version" notice as My Team's banner
+             (js/official-forms.js); the whole card is hidden while nothing is pending
+             or for a member who can't edit forms. -->
+        <div id="official-forms-account-card" class="account-section-card hidden">
+          <h3 style="margin-bottom:12px; font-size:1rem; color:var(--text-muted)">SCOUTING FORMS</h3>
+          <div id="official-forms-notice-account" class="official-notice"></div>
+          <p id="official-forms-account-error" class="error-message"></p>
+          <p id="official-forms-account-success" class="success-message"></p>
+        </div>
+
         <!-- Data: one button that re-caches what can be re-cached and makes event data reload
              fresh (js/data-refresh.js). Device-level, so it lives here (visible to every
              signed-in user, team or not), with a per-device cooldown. -->
@@ -690,7 +715,10 @@
            query — see js/activity-log.js's renderAccountActivity(). ====== -->
       <div id="dtab-activity" class="dtab-content">
         <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:20px; flex-wrap:wrap">
-          <button id="btn-account-activity-back" class="btn btn-outline" style="width:auto">← Back to My Account</button>
+          <div class="account-back-group">
+            <button id="btn-account-activity-back" class="btn btn-outline" style="width:auto">← Back to My Account</button>
+            <button id="btn-open-admin-from-activity" class="btn btn-small btn-outline hidden">Admin</button>
+          </div>
           <button id="btn-activity-page-sign-out" class="btn btn-small btn-outline" style="width:auto; margin-left:auto">Sign Out</button>
         </div>
 
@@ -970,8 +998,11 @@
           <button class="tab builder-type-tab active" data-builder-type="pitScouting">Pit Scouting</button>
           <button class="tab builder-type-tab" data-builder-type="matchScouting">Match Scouting</button>
         </div>
-        <p class="help-text" style="margin-bottom:16px">
+        <p id="builder-help-team" class="help-text" style="margin-bottom:16px">
           Add, edit, reorder, or remove fields. Changes affect all team members immediately.
+        </p>
+        <p id="builder-help-admin" class="help-text hidden" style="margin-bottom:16px">
+          You are editing a DRAFT of an official form. Nothing here reaches any team until you press Publish.
         </p>
         <!-- Season being edited — defaults to the app's globally-selected season on open,
              but is independently switchable here so a captain can build/maintain a past
@@ -980,6 +1011,31 @@
         <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap">
           <label for="builder-season-select" class="help-text" style="font-weight:600; margin:0">Editing season:</label>
           <select id="builder-season-select" class="awards-season-select" style="flex:1; min-width:160px; padding:10px 30px 10px 12px; font-size:0.95rem"></select>
+        </div>
+        <!-- Team mode: the latest official form for this season + type
+             (js/form-builder.js refreshBuilderOfficialBar()). Always reachable, so a team
+             that kept its own form can still view / Accept / Merge it later. -->
+        <div id="builder-official-bar" class="builder-official-bar">
+          <p id="builder-official-text" class="help-text" style="margin:0 0 8px"></p>
+          <div class="builder-official-actions">
+            <button type="button" id="btn-builder-official-view" class="btn btn-small btn-outline">Official form</button>
+            <button type="button" id="btn-builder-official-differences" class="btn btn-small btn-outline hidden">See differences</button>
+            <button type="button" id="btn-builder-restore-previous" class="btn btn-small btn-outline hidden">Restore previous form</button>
+          </div>
+        </div>
+        <!-- Admin mode: what is published and the Publish button (js/official-form-admin.js). -->
+        <div id="builder-admin-panel" class="builder-official-bar hidden">
+          <p id="admin-status" class="help-text" style="margin:0 0 4px"></p>
+          <p id="admin-draft-state" class="help-text" style="margin:0 0 4px"></p>
+          <!-- Autosave state of the draft: "Saving..." / "Draft saved" / "Not saved: ..." (js/official-form-admin.js). -->
+          <p id="admin-save-state" class="help-text admin-save-state hidden" role="status" aria-live="polite"></p>
+          <div class="builder-official-actions">
+            <button type="button" id="btn-admin-publish" class="btn btn-small btn-primary">Publish</button>
+            <button type="button" id="btn-admin-changes" class="btn btn-small btn-outline hidden">See what changed</button>
+            <button type="button" id="btn-admin-reset" class="btn btn-small btn-outline hidden">Discard my changes</button>
+            <button type="button" id="btn-admin-history" class="btn btn-small btn-outline">History</button>
+          </div>
+          <div id="admin-history-list" class="official-admin-history hidden"></div>
         </div>
         <div id="builder-field-list" class="builder-field-list"></div>
         <button id="btn-builder-add-field" class="btn btn-outline" style="margin-top:12px; width:100%">+ Add Field</button>
@@ -1053,9 +1109,9 @@
               <label for="bld-field-step" style="font-size:0.75rem; font-weight:400">Step</label>
               <input type="number" id="bld-field-step" value="1" />
             </div>
-            <div>
-              <label for="bld-field-default" style="font-size:0.75rem; font-weight:400">Starting Value</label>
-              <input type="number" id="bld-field-default" placeholder="Same as minimum" />
+            <div style="grid-column:1 / -1">
+              <label for="bld-field-assumed" style="font-size:0.75rem; font-weight:400">Assumed value (what - counts as when you press + or -)</label>
+              <input type="number" id="bld-field-assumed" value="0" placeholder="0" />
             </div>
           </div>
         </div>
@@ -1430,6 +1486,95 @@
     </div>
   </div>
 
+  <!-- Official form viewer (js/official-forms.js): the latest official version for one season +
+       form type, read-only, with Accept / Merge. Opened from the new-version notice ("View
+       official form") and from the form builder's "Official form" button. -->
+  <div id="official-form-view-modal" class="modal-overlay hidden">
+    <div id="official-form-view-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--lg merge-compare-card">
+      <div class="modal-header">
+        <h3 id="official-view-title">Official scouting form</h3>
+        <button id="btn-official-view-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div class="merge-compare-body">
+        <p id="official-view-info" class="help-text"></p>
+        <p id="official-view-status" class="help-text"></p>
+        <div id="official-view-fields" class="merge-compare-list"></div>
+        <div class="pit-modal-actions">
+          <button type="button" id="btn-official-view-close-inline" class="btn btn-outline">Close</button>
+          <button type="button" id="btn-official-view-merge" class="btn btn-outline">Merge</button>
+          <button type="button" id="btn-official-view-accept" class="btn btn-primary">Accept this form</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- "See differences" (js/official-forms.js openFormDifferences()): the official form's fields with their status on the
+       team's own form (unchanged / changed / moved / removed), then the fields the team added. Read-only; same card as
+       "See what changed" below. -->
+  <div id="form-differences-modal" class="modal-overlay hidden">
+    <div id="form-differences-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--lg merge-compare-card">
+      <div class="modal-header">
+        <h3 id="form-diff-title">How your form differs</h3>
+        <button id="btn-form-diff-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div class="merge-compare-body">
+        <p id="form-diff-info" class="help-text"></p>
+        <p id="form-diff-summary" class="help-text"></p>
+        <div id="form-diff-list" class="merge-compare-list"></div>
+        <div class="pit-modal-actions">
+          <button type="button" id="btn-form-diff-close-inline" class="btn btn-outline">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- "See what changed" (js/official-form-admin.js): the version the admin draft started from, read-only,
+       each field in its original order with its status against the draft, then the added fields. Same
+       layout as the viewer above: only the list scrolls. -->
+  <div id="admin-changes-modal" class="modal-overlay hidden">
+    <div id="admin-changes-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--lg merge-compare-card">
+      <div class="modal-header">
+        <h3 id="admin-changes-title">What changed in the draft</h3>
+        <button id="btn-admin-changes-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div class="merge-compare-body">
+        <p id="admin-changes-info" class="help-text"></p>
+        <p id="admin-changes-summary" class="help-text"></p>
+        <div id="admin-changes-list" class="merge-compare-list"></div>
+        <div class="pit-modal-actions">
+          <button type="button" id="btn-admin-changes-close-inline" class="btn btn-outline">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Merge an official form into the team's own form (js/official-form-merge.js). Same layout
+       as the scrimmage Compare screen above; z-index 1002 so the generic confirm (1003) layers
+       over it. Staged: nothing is saved until the final Merge button. -->
+  <div id="official-merge-modal" class="modal-overlay hidden">
+    <div id="official-merge-modal-overlay" class="modal-overlay-bg"></div>
+    <div class="modal-card modal-card--lg merge-compare-card">
+      <div class="modal-header">
+        <h3 id="official-merge-title">Merge the official form</h3>
+        <button id="btn-official-merge-close" class="btn-modal-close">&times;</button>
+      </div>
+      <div class="merge-compare-body">
+        <p id="official-merge-intro" class="help-text"></p>
+        <p id="official-merge-summary" class="help-text"></p>
+        <p id="official-merge-notice" class="official-admin-warning help-text hidden"></p>
+        <div id="official-merge-list" class="merge-compare-list"></div>
+        <p id="official-merge-error" class="error-message"></p>
+        <div class="pit-modal-actions">
+          <button type="button" id="btn-official-merge-cancel" class="btn btn-outline">Cancel</button>
+          <button type="button" id="btn-official-merge-confirm" class="btn btn-primary">Merge</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Bulk link review (js/scrimmages.js): shown AFTER the one FTCScout lookup and
        BEFORE anything is written. Found teams are checkboxes (all checked); the
        list scrolls, the footer buttons never leave the screen. -->
@@ -1481,6 +1626,12 @@
         <div id="export-choice-scrimmage-option" class="hidden">
           <label class="export-choice-check"><input type="checkbox" id="chk-export-include-scrimmages" /> <span>Include scrimmages</span></label>
           <p id="export-choice-scrimmage-note" class="help-text" style="margin:4px 0 0"></p>
+        </div>
+        <!-- Shown only when at least one entry in THIS export has a value in a deleted field
+             (context.deletedFieldsOption, js/sheets-export.js). Default OFF every time. -->
+        <div id="export-choice-deleted-option" class="hidden">
+          <label class="export-choice-check"><input type="checkbox" id="chk-export-include-deleted" /> <span>Include deleted fields</span></label>
+          <p class="help-text" style="margin:4px 0 0">Some entries have answers in fields that are no longer on the form. Adds them as extra columns marked "(deleted)".</p>
         </div>
         <button id="btn-export-choice-excel" class="btn btn-outline">📥 Download as Excel (.xlsx)</button>
         <button id="btn-export-choice-sheets" class="btn btn-primary">📊 Export to Google Sheets</button>
@@ -1652,6 +1803,9 @@
   <script src="/js/match-scores.js"></script>
   <script src="/js/team-info.js"></script>
   <script src="/js/match-scouted-modal.js"></script>
+  <script src="/js/official-forms.js"></script>
+  <script src="/js/official-form-merge.js"></script>
+  <script src="/js/official-form-admin.js"></script>
   <script src="/js/form-builder.js"></script>
   <script src="/js/app.js"></script>
   <script src="/js/sheets-export.js"></script>

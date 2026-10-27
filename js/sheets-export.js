@@ -231,6 +231,40 @@ function formatCellValue(val) {
   return val;
 }
 
+// ====== A FORM FIELD's cell in every export (Excel, Sheets, whole-team, per-event, per-team, pit-only,
+// match-only, and the Pit vs Match sheets — they all go through buildSheetRows() below) ======
+// A field nobody filled in is "N/A" however it happens to be stored: a missing key (a live-session entry
+// only writes a field once it is touched), null (a batch save from Team View writes nulls), undefined, an
+// empty / whitespace-only string, or an empty multi-select list. A real 0 stays 0; any real text, number or
+// choice stays as it is. Display only: nothing stored is changed.
+const EXPORT_NO_ANSWER = 'N/A';
+function formatFieldCellValue(val) {
+  if (val === null || val === undefined) return EXPORT_NO_ANSWER;
+  if (typeof val === 'string' && val.trim() === '') return EXPORT_NO_ANSWER;
+  if (Array.isArray(val) && val.length === 0) return EXPORT_NO_ANSWER;
+  return formatCellValue(val);
+}
+
+// ====== The FIXED columns (the ones that are not form fields) that can really be blank, and so also show
+// "N/A" when unknown (same rule as a form field, same display-only guarantee):
+//  - Team Name: attachTeamNames() sets '' when the event roster has no name for that team (an event that is not
+//    cached, a scrimmage team added without a name and not linked to FTCScout).
+//  - Scouted By: neither scoutedByEmail nor scoutedByName on an old entry.
+//  - Scouted At: absent on an old entry, or still null while the server timestamp is pending.
+// Team Number and Match Number are not listed: they are the entry's identity (an entry cannot be saved without
+// them), so they are never blank in a real entry and keep their old formatting. ======
+const EXPORT_FIXED_NA_KEYS = new Set(['teamName']);
+
+// The first of these that is not blank (null / undefined / empty / whitespace-only text), else ''.
+function firstNonBlank(...values) {
+  for (const v of values) {
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'string' && v.trim() === '') continue;
+    return v;
+  }
+  return '';
+}
+
 function formatTimestamp(ts) {
   if (!ts) return '';
   if (typeof ts.toDate === 'function') {
@@ -251,42 +285,59 @@ const RESERVED_DOC_KEYS = new Set([
   'id', 'eventCode', 'teamNumber', 'teamId', 'matchNumber', 'teamName', 'season',
   'scoutedBy', 'scoutedByEmail', 'scoutedByName', 'scoutedAt', 'updatedAt',
   'lastEditedBy', 'lastEditedByEmail', 'lastEditedByName', 'lastEditedByTimestamp',
-  'scrimmageId' // marks a scrimmage's entries (scrimmages.js) — metadata, not a form field
+  'scrimmageId', // marks a scrimmage's entries (scrimmages.js) — metadata, not a form field
+  // Live-collaboration bookkeeping (live-entry-sync.js) every committed entry carries.
+  'checkpoint', 'activeEditors', 'deletionNotice'
 ]);
+
+// ====== Which doc keys are "deleted fields" for this export: keys that hold a
+// VALUE on at least one doc but are no longer a field on the form (and aren't
+// fixed columns or bookkeeping) — a field removed from the form, either by an
+// Accept of an official form (its definition is kept in `fields.retiredFields`,
+// so it keeps its label) or by the builder's remove button (no definition: the
+// key itself is the label). Sorted for a stable column order. ======
+function findDeletedFieldKeys(fields, docs, fixedKeys) {
+  const currentFieldKeys = new Set(fields.map(f => f.id));
+  const deletedFieldKeys = new Set();
+  docs.forEach(doc => {
+    // An empty shell left by a cancelled form is not an entry (isEntryCommitted()).
+    if (!isEntryCommitted(doc)) return;
+    Object.keys(doc).forEach(key => {
+      if (fixedKeys.includes(key)) return;
+      if (currentFieldKeys.has(key)) return;
+      if (RESERVED_DOC_KEYS.has(key)) return;
+      if (isBlankFieldValue(doc[key])) return;
+      deletedFieldKeys.add(key);
+    });
+  });
+  return Array.from(deletedFieldKeys).sort();
+}
+
+function deletedFieldLabel(fields, key) {
+  const retired = (fields.retiredFields || []).find(f => f && f.id === key);
+  return (retired && retired.label) || key;
+}
 
 // ====== Turn formConfig fields + Firestore docs into a 2D array of sheet rows ======
 // fixedColumns: [{ header, key }] columns that always exist regardless of formConfig
 // (e.g. Team Number, Match Number) — any formConfig field sharing one of their keys
 // is skipped so the column isn't duplicated.
 //
-// Also includes a column for any field that's no longer on the current form
-// config but still has data on at least one doc in THIS export's scope — a
-// field deleted from the form shouldn't silently drop its historical data
-// from every export forever after. Skipped entirely (not just left empty)
-// when nothing being exported this time has it, so it doesn't accumulate as
-// a permanent empty column across unrelated exports.
-function buildSheetRows(fields, docs, fixedColumns) {
+// "Deleted field" columns — a field that's no longer on the form but still has
+// data on at least one doc in THIS export's scope — are added only when
+// opts.includeDeleted is set (the export modal's "Include deleted fields"
+// box, default off, offered only when some included entry actually has such
+// a value — see exportDeletedFieldsOffered()). They are labelled
+// "<field label> (deleted)".
+function buildSheetRows(fields, docs, fixedColumns, { includeDeleted = false } = {}) {
   const fixedKeys = fixedColumns.map(c => c.key);
   const currentFieldColumns = fields
     .filter(f => !fixedKeys.includes(f.id))
     .map(f => ({ header: f.label, key: f.id }));
 
-  const currentFieldKeys = new Set(fields.map(f => f.id));
-  const deletedFieldKeys = new Set();
-  docs.forEach(doc => {
-    Object.keys(doc).forEach(key => {
-      if (fixedKeys.includes(key)) return;
-      if (currentFieldKeys.has(key)) return;
-      if (RESERVED_DOC_KEYS.has(key)) return;
-      deletedFieldKeys.add(key);
-    });
-  });
-  // Sorted for a stable, deterministic column order — otherwise it'd vary
-  // export to export based on incidental key-iteration order.
-  const deletedFieldColumns = Array.from(deletedFieldKeys).sort().map(key => ({
-    header: `${key} (deleted field)`,
-    key
-  }));
+  const deletedFieldColumns = includeDeleted
+    ? findDeletedFieldKeys(fields, docs, fixedKeys).map(key => ({ header: `${deletedFieldLabel(fields, key)} (deleted)`, key }))
+    : [];
 
   const dynamicColumns = [...currentFieldColumns, ...deletedFieldColumns];
   const dynamicKeys = new Set(dynamicColumns.map(c => c.key));
@@ -301,17 +352,14 @@ function buildSheetRows(fields, docs, fixedColumns) {
   const rows = [columns.map(c => c.header)];
   docs.forEach(doc => {
     rows.push(columns.map(c => {
-      if (c.key === '__scoutedBy') return doc.scoutedByEmail || doc.scoutedByName || '';
-      if (c.key === '__scoutedAt') return formatTimestamp(doc.scoutedAt);
+      // The fixed columns that can really be blank (see EXPORT_FIXED_NA_KEYS) use the same "N/A" rule as a form field.
+      if (c.key === '__scoutedBy') return formatFieldCellValue(firstNonBlank(doc.scoutedByEmail, doc.scoutedByName));
+      if (c.key === '__scoutedAt') return formatFieldCellValue(formatTimestamp(doc.scoutedAt));
+      if (EXPORT_FIXED_NA_KEYS.has(c.key)) return formatFieldCellValue(doc[c.key]);
       if (dynamicKeys.has(c.key)) {
-        // Distinguish "this field existed on the form when the entry was
-        // made and was left blank" (key present, even as '') from "this
-        // field didn't exist yet on this entry" (key entirely absent — a
-        // field added to the form after this entry was scouted, or a
-        // deleted field being included via the rule above): the latter
-        // renders as N/A rather than an indistinguishable blank cell.
-        if (!(c.key in doc)) return 'N/A';
-        return formatCellValue(doc[c.key]);
+        // A field without an answer is "N/A" whatever the reason (never filled in / left blank / a
+        // field added to the form after this entry was scouted): see formatFieldCellValue().
+        return formatFieldCellValue(doc[c.key]);
       }
       return formatCellValue(doc[c.key]);
     }));
@@ -319,19 +367,41 @@ function buildSheetRows(fields, docs, fixedColumns) {
   return rows;
 }
 
-function buildPitSheetRows(fields, docs) {
-  return buildSheetRows(fields, docs, [
-    { header: 'Team Name', key: 'teamName' },
-    { header: 'Team Number', key: 'teamNumber' }
-  ]);
+const PIT_FIXED_COLUMNS = [
+  { header: 'Team Name', key: 'teamName' },
+  { header: 'Team Number', key: 'teamNumber' }
+];
+const MATCH_FIXED_COLUMNS = [
+  { header: 'Team Name', key: 'teamName' },
+  { header: 'Team Number', key: 'teamNumber' },
+  { header: 'Match Number', key: 'matchNumber' }
+];
+
+function buildPitSheetRows(fields, docs, opts) {
+  return buildSheetRows(fields, docs, PIT_FIXED_COLUMNS, opts);
 }
 
-function buildMatchSheetRows(fields, docs) {
-  return buildSheetRows(fields, docs, [
-    { header: 'Team Name', key: 'teamName' },
-    { header: 'Team Number', key: 'teamNumber' },
-    { header: 'Match Number', key: 'matchNumber' }
-  ]);
+function buildMatchSheetRows(fields, docs, opts) {
+  return buildSheetRows(fields, docs, MATCH_FIXED_COLUMNS, opts);
+}
+
+// Does any entry in this export have a value in a deleted field? That is the ONLY
+// time the "Include deleted fields" option is offered. `r` is a gather result:
+// pit/match fields + docs for a single event / team, or `byEvent` buckets for the
+// whole-team export (`onlyEventCodes` limits those to the buckets being exported).
+function exportHasDeletedFieldValues(r, onlyEventCodes) {
+  const pitFixed = PIT_FIXED_COLUMNS.map(c => c.key);
+  const matchFixed = MATCH_FIXED_COLUMNS.map(c => c.key);
+  if (r.byEvent) {
+    return (onlyEventCodes || r.eventCodes).some(code => {
+      const bucket = r.byEvent[code];
+      return !!bucket && (
+        findDeletedFieldKeys(r.pitFields, bucket.pitDocs, pitFixed).length > 0
+        || findDeletedFieldKeys(r.matchFields, bucket.matchDocs, matchFixed).length > 0);
+    });
+  }
+  return (!!r.pitDocs && findDeletedFieldKeys(r.pitFields || [], r.pitDocs, pitFixed).length > 0)
+    || (!!r.matchDocs && findDeletedFieldKeys(r.matchFields || [], r.matchDocs, matchFixed).length > 0);
 }
 
 // ====== Split match docs into normal vs "mismatched" (the match number
@@ -440,6 +510,14 @@ function attachTeamNames(docs, nameMap) {
 // (e.g. nobody has opened the Form Builder since this shipped), fall back to
 // the pre-season-scoping shared doc so export doesn't show hardcoded defaults
 // for a team that's actually customized its form.
+// The fields array every export reads, carrying the team's retired-field
+// definitions (official-forms.js: fields an Accept removed) as a `retiredFields`
+// property — only used to label "Include deleted fields" columns.
+function withRetiredFieldDefinitions(fields, retiredFields) {
+  fields.retiredFields = Array.isArray(retiredFields) ? retiredFields : [];
+  return fields;
+}
+
 async function loadFormConfigReadOnly(teamId, season, configType, defaultsFn) {
   const resolvedSeason = typeof resolveFormConfigSeason === 'function' ? resolveFormConfigSeason(season) : String(season);
   try {
@@ -447,7 +525,7 @@ async function loadFormConfigReadOnly(teamId, season, configType, defaultsFn) {
       .collection('formConfig').doc(`${resolvedSeason}_${configType}`).get();
     if (doc.exists) {
       const data = doc.data();
-      return (data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+      return withRetiredFieldDefinitions((data.fields || []).sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0)), data.retiredFields);
     }
 
     if (resolvedSeason === String(getCurrentFtcSeason())) {
@@ -494,11 +572,18 @@ async function loadUnionFormConfig(teamId, docs, configType, defaultsFn) {
 
   const seen = new Set();
   const union = [];
+  const retiredSeen = new Set();
+  union.retiredFields = [];
   perSeasonFields.forEach(fields => {
     fields.forEach(field => {
       if (seen.has(field.id)) return;
       seen.add(field.id);
       union.push(field);
+    });
+    (fields.retiredFields || []).forEach(field => {
+      if (!field || retiredSeen.has(field.id)) return;
+      retiredSeen.add(field.id);
+      union.retiredFields.push(field);
     });
   });
   return union;
@@ -533,7 +618,7 @@ async function fetchMatchDocsForEvent(eventCode, teamId) {
 // that; the whole-team export also needs spreadsheetId to move the file into
 // its event folder afterward. tokenGetter defaults to the shared token (see
 // sheetsApiFetch above); the whole-team export passes its own broader one.
-async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs, tokenGetter) {
+async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs, tokenGetter, opts) {
   const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
   const sheetTitles = ['Pit Scouting', 'Match Scouting'];
   if (mismatched.length > 0) sheetTitles.push('Mismatched Match Numbers');
@@ -541,13 +626,13 @@ async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, ma
   const createResp = await createSpreadsheet(title, sheetTitles, tokenGetter);
   const spreadsheetId = createResp.spreadsheetId;
 
-  const pitRows = buildPitSheetRows(pitFields, pitDocs);
-  const matchRows = buildMatchSheetRows(matchFields, normal);
+  const pitRows = buildPitSheetRows(pitFields, pitDocs, opts);
+  const matchRows = buildMatchSheetRows(matchFields, normal, opts);
 
   await writeSheetValues(spreadsheetId, 'Pit Scouting', pitRows, tokenGetter);
   await writeSheetValues(spreadsheetId, 'Match Scouting', matchRows, tokenGetter);
   if (mismatched.length > 0) {
-    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched, opts);
     await writeSheetValues(spreadsheetId, 'Mismatched Match Numbers', mismatchedRows, tokenGetter);
   }
 
@@ -557,20 +642,20 @@ async function exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, ma
 // ====== Build & download an .xlsx workbook from the same row data used for the
 // Google Sheets export (buildPitSheetRows/buildMatchSheetRows) — same two-tab shape,
 // just rendered client-side via SheetJS instead of written through the Sheets API. ======
-async function downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs) {
+async function downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs, opts) {
   if (typeof XLSX === 'undefined') {
     throw new Error('Excel export library failed to load. Check your connection and try again.');
   }
 
   const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
-  const pitRows = buildPitSheetRows(pitFields, pitDocs);
-  const matchRows = buildMatchSheetRows(matchFields, normal);
+  const pitRows = buildPitSheetRows(pitFields, pitDocs, opts);
+  const matchRows = buildMatchSheetRows(matchFields, normal, opts);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
   if (mismatched.length > 0) {
-    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched, opts);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mismatchedRows), 'Mismatched Match Numbers');
   }
   XLSX.writeFile(wb, filename);
@@ -579,20 +664,20 @@ async function downloadScoutingWorkbook(filename, pitFields, pitDocs, matchField
 // ====== Build a 2-tab workbook as raw bytes (not a file download) — used by
 // the whole-team export to bundle one small workbook per event into a single
 // ZIP, rather than triggering a separate browser download for each. ======
-async function buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs) {
+async function buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs, opts) {
   if (typeof XLSX === 'undefined') {
     throw new Error('Excel export library failed to load. Check your connection and try again.');
   }
 
   const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
-  const pitRows = buildPitSheetRows(pitFields, pitDocs);
-  const matchRows = buildMatchSheetRows(matchFields, normal);
+  const pitRows = buildPitSheetRows(pitFields, pitDocs, opts);
+  const matchRows = buildMatchSheetRows(matchFields, normal, opts);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
   if (mismatched.length > 0) {
-    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched, opts);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mismatchedRows), 'Mismatched Match Numbers');
   }
   return XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
@@ -601,7 +686,7 @@ async function buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs) {
 // ====== Create a spreadsheet with just a Match Scouting tab — the "View
 // Matches Scouted" modal's export button, which has no pit-scouting section
 // to include. ======
-async function exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs) {
+async function exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs, opts) {
   const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
   const sheetTitles = ['Match Scouting'];
   if (mismatched.length > 0) sheetTitles.push('Mismatched Match Numbers');
@@ -609,10 +694,10 @@ async function exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs) {
   const createResp = await createSpreadsheet(title, sheetTitles);
   const spreadsheetId = createResp.spreadsheetId;
 
-  const matchRows = buildMatchSheetRows(matchFields, normal);
+  const matchRows = buildMatchSheetRows(matchFields, normal, opts);
   await writeSheetValues(spreadsheetId, 'Match Scouting', matchRows);
   if (mismatched.length > 0) {
-    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched, opts);
     await writeSheetValues(spreadsheetId, 'Mismatched Match Numbers', mismatchedRows);
   }
 
@@ -621,18 +706,18 @@ async function exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs) {
 
 // ====== Build & download a single-tab .xlsx workbook — match-only counterpart
 // to downloadScoutingWorkbook() above. ======
-async function downloadMatchOnlyWorkbook(filename, matchFields, matchDocs) {
+async function downloadMatchOnlyWorkbook(filename, matchFields, matchDocs, opts) {
   if (typeof XLSX === 'undefined') {
     throw new Error('Excel export library failed to load. Check your connection and try again.');
   }
 
   const { normal, mismatched } = await splitMismatchedMatchEntries(matchDocs);
-  const matchRows = buildMatchSheetRows(matchFields, normal);
+  const matchRows = buildMatchSheetRows(matchFields, normal, opts);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(matchRows), 'Match Scouting');
   if (mismatched.length > 0) {
-    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched);
+    const mismatchedRows = buildMatchSheetRows(matchFields, mismatched, opts);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(mismatchedRows), 'Mismatched Match Numbers');
   }
   XLSX.writeFile(wb, filename);
@@ -641,11 +726,11 @@ async function downloadMatchOnlyWorkbook(filename, matchFields, matchDocs) {
 // ====== Create a spreadsheet with just a Pit Scouting tab — pit-only
 // counterpart to exportMatchOnlyToNewSpreadsheet() above, used by the Pit
 // Scouting tab's "Export All Pit Data" button and per-row export button. ======
-async function exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs) {
+async function exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs, opts) {
   const createResp = await createSpreadsheet(title, ['Pit Scouting']);
   const spreadsheetId = createResp.spreadsheetId;
 
-  const pitRows = buildPitSheetRows(pitFields, pitDocs);
+  const pitRows = buildPitSheetRows(pitFields, pitDocs, opts);
   await writeSheetValues(spreadsheetId, 'Pit Scouting', pitRows);
 
   return createResp.spreadsheetUrl;
@@ -653,12 +738,12 @@ async function exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs) {
 
 // ====== Build & download a single-tab .xlsx workbook — pit-only counterpart
 // to downloadMatchOnlyWorkbook() above. ======
-function downloadPitOnlyWorkbook(filename, pitFields, pitDocs) {
+function downloadPitOnlyWorkbook(filename, pitFields, pitDocs, opts) {
   if (typeof XLSX === 'undefined') {
     throw new Error('Excel export library failed to load. Check your connection and try again.');
   }
 
-  const pitRows = buildPitSheetRows(pitFields, pitDocs);
+  const pitRows = buildPitSheetRows(pitFields, pitDocs, opts);
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pitRows), 'Pit Scouting');
@@ -1010,8 +1095,10 @@ function clearStatusMessage(prefix) {
 // data again once actually invoked (kept deliberately unchanged/self-
 // contained) — this only decides whether the modal opens at all, at the cost
 // of one extra (small, already-permitted) read when there IS data. Returns
-// true if the modal should proceed to open, false if it already showed the
-// empty-state message (or an error) and the caller should stop. ======
+// the gathered result (truthy) if the modal should proceed to open — callers
+// use it to decide whether to offer "Include deleted fields" — or false if it
+// already showed the empty-state message (or an error) and the caller should
+// stop. ======
 async function precheckExportData(statusPrefix, gatherFn, isEmptyFn, emptyMessage) {
   showLoading('Checking for scouting data...');
   try {
@@ -1021,7 +1108,7 @@ async function precheckExportData(statusPrefix, gatherFn, isEmptyFn, emptyMessag
       setStatusMessage(statusPrefix, 'success', emptyMessage);
       return false;
     }
-    return true;
+    return result;
   } catch (err) {
     hideLoading();
     console.error('Export precheck failed:', err);
@@ -1031,7 +1118,7 @@ async function precheckExportData(statusPrefix, gatherFn, isEmptyFn, emptyMessag
 }
 
 // ====== Export a single team's pit + match scouting data for the selected event ======
-async function handleExportTeamClick(statusPrefix) {
+async function handleExportTeamClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1059,7 +1146,7 @@ async function handleExportTeamClick(statusPrefix) {
     const teamName = pitDocs[0]?.teamName || matchDocs[0]?.teamName || '';
     const title = `${teamLabel(teamNumber, teamName)} Scouting — ${selectedEvent?.name || eventCode}`;
     const { spreadsheetUrl } = await withStep('Creating/writing Google Sheet', () =>
-      exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs));
+      exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs, undefined, opts));
 
     hideLoading();
     if (pitDocs.length === 0 && matchDocs.length === 0) {
@@ -1076,7 +1163,7 @@ async function handleExportTeamClick(statusPrefix) {
 }
 
 // ====== Download a single team's pit + match scouting data as an .xlsx file ======
-async function handleExportTeamExcelClick(statusPrefix) {
+async function handleExportTeamExcelClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1099,7 +1186,7 @@ async function handleExportTeamExcelClick(statusPrefix) {
 
     const teamName = pitDocs[0]?.teamName || matchDocs[0]?.teamName || '';
     const filename = sanitizeFilename(`${teamLabel(teamNumber, teamName)} Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
-    await downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
+    await downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs, opts);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
@@ -1116,7 +1203,7 @@ async function handleExportTeamExcelClick(statusPrefix) {
 // same shape as handleExportTeamClick() above, but for the "View Matches
 // Scouted" modal (currentMatchScoutedTeamNumber/EventCode, match-scouted-
 // modal.js) and with no pit-scouting sheet. ======
-async function handleExportTeamMatchOnlyClick(statusPrefix) {
+async function handleExportTeamMatchOnlyClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1143,7 +1230,7 @@ async function handleExportTeamMatchOnlyClick(statusPrefix) {
     showLoading('Creating Google Sheet...');
     const title = `${teamLabel(teamNumber, matchDocs[0]?.teamName || '')} Match Scouting — ${selectedEvent?.name || eventCode}`;
     const url = await withStep('Creating/writing Google Sheet', () =>
-      exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs));
+      exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs, opts));
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', matchDocs.length === 0
@@ -1159,7 +1246,7 @@ async function handleExportTeamMatchOnlyClick(statusPrefix) {
 
 // ====== Download a single team's MATCH-ONLY scouting data as an .xlsx file —
 // Excel counterpart to handleExportTeamMatchOnlyClick() above. ======
-async function handleExportTeamMatchOnlyExcelClick(statusPrefix) {
+async function handleExportTeamMatchOnlyExcelClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1181,7 +1268,7 @@ async function handleExportTeamMatchOnlyExcelClick(statusPrefix) {
     const { matchFields, matchDocs } = await gatherTeamMatchExportData(teamNumber, eventCode, teamId);
 
     const filename = sanitizeFilename(`${teamLabel(teamNumber, matchDocs[0]?.teamName || '')} Match Scouting - ${selectedEvent?.name || eventCode}.xlsx`);
-    await downloadMatchOnlyWorkbook(filename, matchFields, matchDocs);
+    await downloadMatchOnlyWorkbook(filename, matchFields, matchDocs, opts);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', matchDocs.length === 0
@@ -1200,7 +1287,7 @@ async function handleExportTeamMatchOnlyExcelClick(statusPrefix) {
 // Scouted" modal opens), there's no modal here to hold "currently showing"
 // state — many rows can exist at once — so teamNumber/eventCode/teamId are
 // passed explicitly instead. ======
-async function handleExportTeamPitOnlyClick(teamNumber, eventCode, teamId, statusPrefix) {
+async function handleExportTeamPitOnlyClick(teamNumber, eventCode, teamId, statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1219,7 +1306,7 @@ async function handleExportTeamPitOnlyClick(teamNumber, eventCode, teamId, statu
     showLoading('Creating Google Sheet...');
     const title = `${teamLabel(teamNumber, pitDocs[0]?.teamName || '')} Pit Data — ${selectedEvent?.name || eventCode}`;
     const url = await withStep('Creating/writing Google Sheet', () =>
-      exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs));
+      exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs, opts));
 
     hideLoading();
     // Includes the team number in the message since this status line is
@@ -1238,7 +1325,7 @@ async function handleExportTeamPitOnlyClick(teamNumber, eventCode, teamId, statu
 
 // ====== Download one team's PIT-ONLY entry as an .xlsx file — Excel
 // counterpart to handleExportTeamPitOnlyClick() above. ======
-async function handleExportTeamPitOnlyExcelClick(teamNumber, eventCode, teamId, statusPrefix) {
+async function handleExportTeamPitOnlyExcelClick(teamNumber, eventCode, teamId, statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1252,7 +1339,7 @@ async function handleExportTeamPitOnlyExcelClick(teamNumber, eventCode, teamId, 
     const { pitFields, pitDocs } = await gatherTeamPitOnlyExportData(teamNumber, eventCode, teamId);
 
     const filename = sanitizeFilename(`${teamLabel(teamNumber, pitDocs[0]?.teamName || '')} Pit Data - ${selectedEvent?.name || eventCode}.xlsx`);
-    downloadPitOnlyWorkbook(filename, pitFields, pitDocs);
+    downloadPitOnlyWorkbook(filename, pitFields, pitDocs, opts);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', pitDocs.length === 0
@@ -1291,13 +1378,14 @@ async function openTeamPitExportChoice(teamNumber, eventCode, teamId, statusPref
   openExportChoiceModal({
     title: `Export Pit Data — Team #${teamNumber}`,
     statusPrefix,
-    excelHandler: (prefix) => handleExportTeamPitOnlyExcelClick(teamNumber, eventCode, teamId, prefix),
-    sheetsHandler: (prefix) => handleExportTeamPitOnlyClick(teamNumber, eventCode, teamId, prefix)
+    excelHandler: (prefix, opts) => handleExportTeamPitOnlyExcelClick(teamNumber, eventCode, teamId, prefix, opts),
+    sheetsHandler: (prefix, opts) => handleExportTeamPitOnlyClick(teamNumber, eventCode, teamId, prefix, opts),
+    deletedFieldsOption: exportHasDeletedFieldValues(hasData)
   });
 }
 
 // ====== Export every team's pit + match scouting data for the selected event ======
-async function handleExportEventClick(statusPrefix) {
+async function handleExportEventClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1323,7 +1411,7 @@ async function handleExportEventClick(statusPrefix) {
     showLoading('Creating Google Sheet...');
     const title = `${selectedEvent?.name || eventCode} — All Teams Scouting Export`;
     const { spreadsheetUrl } = await withStep('Creating/writing Google Sheet', () =>
-      exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs));
+      exportToNewSpreadsheet(title, pitFields, pitDocs, matchFields, matchDocs, undefined, opts));
 
     hideLoading();
     if (pitDocs.length === 0 && matchDocs.length === 0) {
@@ -1340,7 +1428,7 @@ async function handleExportEventClick(statusPrefix) {
 }
 
 // ====== Download every team's pit + match scouting data for the event as one .xlsx file ======
-async function handleExportEventExcelClick(statusPrefix) {
+async function handleExportEventExcelClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1361,7 +1449,7 @@ async function handleExportEventExcelClick(statusPrefix) {
     const { pitFields, matchFields, pitDocs, matchDocs } = await gatherEventExportData(eventCode, teamId);
 
     const filename = sanitizeFilename(`${selectedEvent?.name || eventCode} - All Teams Scouting.xlsx`);
-    await downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs);
+    await downloadScoutingWorkbook(filename, pitFields, pitDocs, matchFields, matchDocs, opts);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', pitDocs.length === 0 && matchDocs.length === 0
@@ -1376,7 +1464,7 @@ async function handleExportEventExcelClick(statusPrefix) {
 
 // ====== Export every team's PIT-ONLY scouting data for the selected event —
 // used by the Pit Scouting tab's "Export All Pit Data" button. ======
-async function handleExportEventPitOnlyClick(statusPrefix) {
+async function handleExportEventPitOnlyClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1402,7 +1490,7 @@ async function handleExportEventPitOnlyClick(statusPrefix) {
     showLoading('Creating Google Sheet...');
     const title = `${selectedEvent?.name || eventCode} — All Teams Pit Data`;
     const url = await withStep('Creating/writing Google Sheet', () =>
-      exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs));
+      exportPitOnlyToNewSpreadsheet(title, pitFields, pitDocs, opts));
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', pitDocs.length === 0
@@ -1418,7 +1506,7 @@ async function handleExportEventPitOnlyClick(statusPrefix) {
 
 // ====== Download every team's PIT-ONLY scouting data for the event as one
 // .xlsx file — Excel counterpart to handleExportEventPitOnlyClick() above. ======
-async function handleExportEventPitOnlyExcelClick(statusPrefix) {
+async function handleExportEventPitOnlyExcelClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1439,7 +1527,7 @@ async function handleExportEventPitOnlyExcelClick(statusPrefix) {
     const { pitFields, pitDocs } = await gatherEventPitOnlyExportData(eventCode, teamId);
 
     const filename = sanitizeFilename(`${selectedEvent?.name || eventCode} - All Teams Pit Data.xlsx`);
-    downloadPitOnlyWorkbook(filename, pitFields, pitDocs);
+    downloadPitOnlyWorkbook(filename, pitFields, pitDocs, opts);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', pitDocs.length === 0
@@ -1454,7 +1542,7 @@ async function handleExportEventPitOnlyExcelClick(statusPrefix) {
 
 // ====== Export every team's MATCH-ONLY scouting data for the selected event —
 // used by the Match Scouting tab's "Export All Match Data" button. ======
-async function handleExportEventMatchOnlyClick(statusPrefix) {
+async function handleExportEventMatchOnlyClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1480,7 +1568,7 @@ async function handleExportEventMatchOnlyClick(statusPrefix) {
     showLoading('Creating Google Sheet...');
     const title = `${selectedEvent?.name || eventCode} — All Teams Match Data`;
     const url = await withStep('Creating/writing Google Sheet', () =>
-      exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs));
+      exportMatchOnlyToNewSpreadsheet(title, matchFields, matchDocs, opts));
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', matchDocs.length === 0
@@ -1496,7 +1584,7 @@ async function handleExportEventMatchOnlyClick(statusPrefix) {
 
 // ====== Download every team's MATCH-ONLY scouting data for the event as one
 // .xlsx file — Excel counterpart to handleExportEventMatchOnlyClick() above. ======
-async function handleExportEventMatchOnlyExcelClick(statusPrefix) {
+async function handleExportEventMatchOnlyExcelClick(statusPrefix, opts = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1517,7 +1605,7 @@ async function handleExportEventMatchOnlyExcelClick(statusPrefix) {
     const { matchFields, matchDocs } = await gatherEventMatchOnlyExportData(eventCode, teamId);
 
     const filename = sanitizeFilename(`${selectedEvent?.name || eventCode} - All Teams Match Data.xlsx`);
-    await downloadMatchOnlyWorkbook(filename, matchFields, matchDocs);
+    await downloadMatchOnlyWorkbook(filename, matchFields, matchDocs, opts);
 
     hideLoading();
     setStatusMessage(statusPrefix, 'success', matchDocs.length === 0
@@ -1535,7 +1623,7 @@ async function handleExportEventMatchOnlyExcelClick(statusPrefix) {
 // when leaving/deleting a team as its LAST remaining member, right before
 // that data is permanently deleted — see openWholeTeamExportChoice() below
 // for how teamId/teamName get bound in from the leave/delete-account flows. ======
-async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix, { includeScrimmages = false } = {}) {
+async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix, { includeScrimmages = false, includeDeleted = false } = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1562,7 +1650,7 @@ async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix, {
     const zip = new JSZip();
     for (const eventCode of eventCodes) {
       const { pitDocs, matchDocs } = byEvent[eventCode];
-      const bytes = await buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs);
+      const bytes = await buildWorkbookBytes(pitFields, pitDocs, matchFields, matchDocs, { includeDeleted });
       zip.file(`${sanitizeFilename(eventLabels[eventCode])}.xlsx`, bytes);
     }
 
@@ -1594,7 +1682,7 @@ async function handleExportWholeTeamExcelClick(teamId, teamName, statusPrefix, {
 // + drive.file) since folder creation/moving needs Drive API access none of
 // this file's other exports request. Used only by the leave/delete-as-last-
 // member flow, right before the team's data is gone for good. ======
-async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix, { includeScrimmages = false } = {}) {
+async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix, { includeScrimmages = false, includeDeleted = false } = {}) {
   setStatusMessage(statusPrefix, 'error', '');
   setStatusMessage(statusPrefix, 'success', '');
 
@@ -1631,7 +1719,7 @@ async function handleExportWholeTeamSheetsClick(teamId, teamName, statusPrefix, 
         createDriveFolder(label, rootFolder.id));
 
       const created = await withStep(`Creating spreadsheet for ${label}`, () =>
-        exportToNewSpreadsheet(`${folderLabel} — ${label}`, pitFields, pitDocs, matchFields, matchDocs, getGoogleWholeTeamAccessToken));
+        exportToNewSpreadsheet(`${folderLabel} — ${label}`, pitFields, pitDocs, matchFields, matchDocs, getGoogleWholeTeamAccessToken, { includeDeleted }));
 
       await withStep(`Moving spreadsheet for ${label} into its folder`, () =>
         moveFileToFolder(created.spreadsheetId, eventFolder.id));
@@ -1685,9 +1773,27 @@ async function openWholeTeamExportChoice(teamId, teamName, statusPrefix) {
   if (offerNote && counted) offerNote.textContent = scrimmageEntryCount > 0 ? scrimmageEntriesNotIncludedText(scrimmageEntryCount) : '';
   if (!hasData) return;
 
+  // "Include deleted fields" is offered only when an INCLUDED entry has such a
+  // value — and what is included depends on the scrimmage box — so work out the
+  // answer for both settings now (the scrimmage entries are only read when
+  // there are any).
+  const deletedWithoutScrimmages = exportHasDeletedFieldValues(hasData);
+  let deletedWithScrimmages = deletedWithoutScrimmages;
+  if (scrimmageEntryCount > 0) {
+    showLoading('Checking for scouting data...');
+    try {
+      deletedWithScrimmages = exportHasDeletedFieldValues(await gatherFullTeamExportData(teamId, { includeScrimmages: true }));
+    } catch (err) {
+      console.warn('Could not check scrimmage entries for deleted fields:', err);
+    } finally {
+      hideLoading();
+    }
+  }
+
   openExportChoiceModal({
     title: 'Export Whole Team Data',
     statusPrefix,
+    deletedFieldsOption: { base: deletedWithoutScrimmages, withScrimmages: deletedWithScrimmages },
     includeScrimmagesOption: { count: scrimmageEntryCount },
     excelHandler: (prefix, opts) => handleExportWholeTeamExcelClick(teamId, teamName, prefix, opts),
     sheetsHandler: (prefix, opts) => handleExportWholeTeamSheetsClick(teamId, teamName, prefix, opts)
@@ -1733,6 +1839,7 @@ async function openTeamExportChoice(statusPrefix) {
   openExportChoiceModal({
     title: 'Export Pit + Match Data',
     statusPrefix,
+    deletedFieldsOption: exportHasDeletedFieldValues(hasData),
     sheetsHandler: handleExportTeamClick,
     excelHandler: handleExportTeamExcelClick
   });
@@ -1768,6 +1875,7 @@ async function openTeamMatchOnlyExportChoice(statusPrefix) {
   openExportChoiceModal({
     title: 'Export Match Data',
     statusPrefix,
+    deletedFieldsOption: exportHasDeletedFieldValues(hasData),
     sheetsHandler: handleExportTeamMatchOnlyClick,
     excelHandler: handleExportTeamMatchOnlyExcelClick
   });
@@ -1803,6 +1911,7 @@ async function openEventExportChoice(statusPrefix) {
   openExportChoiceModal({
     title: 'Export Pit + Match Data',
     statusPrefix,
+    deletedFieldsOption: exportHasDeletedFieldValues(hasData),
     sheetsHandler: handleExportEventClick,
     excelHandler: handleExportEventExcelClick
   });
@@ -1838,6 +1947,7 @@ async function openEventPitExportChoice(statusPrefix) {
   openExportChoiceModal({
     title: 'Export Pit Data',
     statusPrefix,
+    deletedFieldsOption: exportHasDeletedFieldValues(hasData),
     sheetsHandler: handleExportEventPitOnlyClick,
     excelHandler: handleExportEventPitOnlyExcelClick
   });
@@ -1873,6 +1983,7 @@ async function openEventMatchOnlyExportChoice(statusPrefix) {
   openExportChoiceModal({
     title: 'Export Match Data',
     statusPrefix,
+    deletedFieldsOption: exportHasDeletedFieldValues(hasData),
     sheetsHandler: handleExportEventMatchOnlyClick,
     excelHandler: handleExportEventMatchOnlyExcelClick
   });
@@ -1906,6 +2017,31 @@ function openExportChoiceModal(context) {
   if (checkbox) checkbox.checked = false;
   if (optionEl) optionEl.classList.toggle('hidden', !context?.includeScrimmagesOption);
   updateExportChoiceScrimmageNote();
+
+  // "Include deleted fields" starts UNCHECKED every time and is offered only when
+  // an entry in this export has a value in a deleted field.
+  const deletedBox = document.getElementById('chk-export-include-deleted');
+  if (deletedBox) deletedBox.checked = false;
+  updateExportChoiceDeletedOption();
+}
+
+// Whether "Include deleted fields" is on offer right now. A whole-team export
+// has one answer with the scrimmage box off and one with it on.
+function exportChoiceDeletedOptionOffered() {
+  const opt = exportChoiceContext && exportChoiceContext.deletedFieldsOption;
+  if (opt && typeof opt === 'object') {
+    const scrimBox = document.getElementById('chk-export-include-scrimmages');
+    return !!(scrimBox && scrimBox.checked ? opt.withScrimmages : opt.base);
+  }
+  return !!opt;
+}
+
+function updateExportChoiceDeletedOption() {
+  const wrap = document.getElementById('export-choice-deleted-option');
+  const box = document.getElementById('chk-export-include-deleted');
+  const offered = exportChoiceDeletedOptionOffered();
+  if (wrap) wrap.classList.toggle('hidden', !offered);
+  if (box && !offered) box.checked = false;
 }
 
 function updateExportChoiceScrimmageNote() {
@@ -1923,7 +2059,11 @@ function updateExportChoiceScrimmageNote() {
 // What the whole-team handlers receive as their second argument.
 function readExportChoiceOptions() {
   const checkbox = document.getElementById('chk-export-include-scrimmages');
-  return { includeScrimmages: !!(exportChoiceContext && exportChoiceContext.includeScrimmagesOption && checkbox && checkbox.checked) };
+  const deletedBox = document.getElementById('chk-export-include-deleted');
+  return {
+    includeScrimmages: !!(exportChoiceContext && exportChoiceContext.includeScrimmagesOption && checkbox && checkbox.checked),
+    includeDeleted: !!(exportChoiceDeletedOptionOffered() && deletedBox && deletedBox.checked)
+  };
 }
 
 // `opts.chose` is set by the Excel/Sheets/Print buttons (the user picked an
@@ -1991,7 +2131,10 @@ document.addEventListener('DOMContentLoaded', () => {
   if (overlay) overlay.addEventListener('click', closeExportChoiceModal);
 
   const includeScrimmagesBox = document.getElementById('chk-export-include-scrimmages');
-  if (includeScrimmagesBox) includeScrimmagesBox.addEventListener('change', updateExportChoiceScrimmageNote);
+  if (includeScrimmagesBox) {
+    includeScrimmagesBox.addEventListener('change', updateExportChoiceScrimmageNote);
+    includeScrimmagesBox.addEventListener('change', updateExportChoiceDeletedOption);
+  }
 
   const excelBtn = document.getElementById('btn-export-choice-excel');
   if (excelBtn) {

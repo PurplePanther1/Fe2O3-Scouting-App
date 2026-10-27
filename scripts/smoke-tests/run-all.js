@@ -40,8 +40,8 @@ const testFiles = [...ruleTests, ...browserTests];
 
 async function main() {
   const results = [];
-  let staticServer, emulators, browser, rulesEnv;
-  const state = { blockedRequests: [], pageErrors: [], consoleErrors: [], workerRequests: [], ftcScoutRequests: [], ftcScoutMode: 'ok', ftcScoutDelays: {}, ftcScoutListMode: 'ok', ftcScoutListDelay: 0, ftcScoutListRequests: 0 };
+  let staticServer, emulators, browser, rulesEnv, adminUserPromise;
+  const state = { blockedRequests: [], pageErrors: [], consoleErrors: [], workerRequests: [], ftcScoutRequests: [], ftcScoutMode: 'ok', ftcScoutDelays: {}, ftcScoutListMode: 'ok', ftcScoutListDelay: 0, ftcScoutListRequests: 0, eventsMode: 'ok', eventsDelay: 0, eventsRequests: 0 };
 
   try {
     if (testFiles.length > 0) {
@@ -70,6 +70,14 @@ async function main() {
         async makeUser(displayName = 'Smoke Scout') {
           const { uniqueEmail } = require('./lib/app');
           return harness.createVerifiedUser(uniqueEmail(), 'smoke-pass-123', displayName);
+        },
+        // The app admin: an emulator account with the REAL admin address and a verified email
+        // (the rules hard-code that address, so end-to-end publishing needs exactly it). One
+        // account for the whole run — an address can only be registered once — so a test that
+        // gives it a team must delete that team again.
+        adminUser() {
+          if (!adminUserPromise) adminUserPromise = harness.createVerifiedUser(require('./lib/app').ADMIN_EMAIL, 'smoke-pass-123', 'Test Admin');
+          return adminUserPromise;
         }
       };
       const errorsBefore = state.pageErrors.length;

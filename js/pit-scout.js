@@ -160,14 +160,16 @@ async function openPitScoutForm(teamNumber, eventCode) {
     // Access confirmed — safe to show the modal now.
     document.getElementById('pit-modal').classList.remove('hidden');
 
-    const fields = await loadFormConfig(teamId, entrySeason(existingData));
+    // Includes any retired (deleted-by-an-Accept) field this entry still has
+    // a value in — see dynamic-form.js's withRetiredFieldsHavingValues().
+    const fields = await loadFormConfigForEntry(teamId, entrySeason(existingData), existingData);
     currentPitFields = fields;
     const container = document.getElementById('pit-dynamic-fields');
     currentFormController = renderDynamicForm(container, fields, existingData);
 
-    if (existingData) {
-      document.getElementById('pit-delete-btn').classList.remove('hidden');
-    }
+    // Delete is only for an entry that has been COMMITTED (Done clicked at least once) — not for a brand-new
+    // entry, and not for the empty shell a live session creates the moment a form is opened.
+    setPitDeleteButtonVisible(isEntryCommitted(existingData));
 
     const teamId2 = teamId; // captured for the closures below
     const docId = existingData ? existingData.id
@@ -231,6 +233,7 @@ async function openPitScoutForm(teamNumber, eventCode) {
       onSnapshotData: (data) => {
         if (!currentFormController || !currentPitFields) return;
         applyRemoteFieldValues(currentFormController, currentPitFields, data, currentPitLiveSession);
+        setPitDeleteButtonVisible(isEntryCommitted(data)); // follows the live document (e.g. someone else just committed it)
         applyPresenceIndicators(currentFormController, currentPitFields, data?.activeEditors, currentUser.uid);
         renderPresenceBanner(document.getElementById('pit-presence-banner'), data?.activeEditors, currentUser.uid, !!data?.checkpoint);
       }
@@ -291,6 +294,11 @@ function pitEntryIsCommitted(entry) {
   return isEntryCommitted(entry);
 }
 
+// The form's "Delete this scouting data" button: shown only while the open entry is a committed one.
+function setPitDeleteButtonVisible(visible) {
+  document.getElementById('pit-delete-btn').classList.toggle('hidden', !visible);
+}
+
 // ====== Load existing pit scouting data ======
 async function loadExistingPitData(teamId, eventCode, teamNumber) {
   try {
@@ -315,6 +323,12 @@ async function commitPitScoutForm() {
     const validationError = currentFormController.validate();
     if (validationError) {
       errorEl.textContent = validationError;
+      return;
+    }
+    // Nothing is saved (or committed on the live doc) for an entry with no data;
+    // Cancel still works as before and cleans up the empty shell.
+    if (currentFormController.isEmpty()) {
+      errorEl.textContent = EMPTY_ENTRY_ERROR;
       return;
     }
   }

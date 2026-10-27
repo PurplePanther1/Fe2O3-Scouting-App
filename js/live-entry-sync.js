@@ -565,6 +565,13 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
 
       const update = { checkpoint: newCheckpoint };
 
+      // A retired field (dynamic-form.js withRetiredFieldsHavingValues(): a field
+      // an Accept removed, shown only on an old entry that still has a value in
+      // it) that the editor CLEARED is removed from the stored entry — the value
+      // key and its checkpoint key — rather than left behind as a null. The
+      // change check below still sees it as the plain null it replaced.
+      const clearedRetired = fields.filter((f) => f.retired && isBlankFieldValue(data[f.id]));
+
       if (data.scoutedBy == null) {
         update.scoutedBy = uid;
         update.scoutedByName = displayName;
@@ -577,6 +584,11 @@ function createLiveEntrySession({ docRef, uid, displayName, onSnapshotData, canE
           update.lastEditedByTimestamp = Date.now();
         }
       }
+
+      clearedRetired.forEach((f) => {
+        update[f.id] = firebase.firestore.FieldValue.delete();
+        newCheckpoint[f.id] = firebase.firestore.FieldValue.delete();
+      });
 
       tx.set(docRef, update, { merge: true });
     });

@@ -117,6 +117,8 @@ function resetDashboardOnEnterTeam() {
       seasonSelect.value = currentSeason;
       // The Pinned tab's season filter follows the app's season (pinned-events.js).
       if (typeof syncPinnedSeasonToApp === 'function') syncPinnedSeasonToApp();
+      // ...and so does the My Team official-form banner (official-forms.js).
+      if (typeof onAppSeasonChangedForOfficialForms === 'function') onAppSeasonChangedForOfficialForms();
       if (typeof eventCache !== 'undefined' && !eventCache[currentSeason] && typeof ensureEventsLoaded === 'function') {
         ensureEventsLoaded(currentSeason).catch(() => {});
       }

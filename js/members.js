@@ -1435,7 +1435,7 @@ let pendingGenericConfirmCallback = null;
 let pendingGenericSecondaryCallback = null;
 let pendingGenericCancelCallback = null;
 
-function showConfirmModal({ title, message, confirmLabel, danger, hideCancel, onConfirm, secondaryLabel, onSecondary, onCancel, multiline }) {
+function showConfirmModal({ title, message, confirmLabel, cancelLabel, danger, hideCancel, onConfirm, secondaryLabel, onSecondary, onCancel, multiline }) {
   const titleEl = document.getElementById('generic-confirm-title');
   const messageEl = document.getElementById('generic-confirm-message');
   const proceedBtn = document.getElementById('btn-generic-confirm-proceed');
@@ -1460,7 +1460,10 @@ function showConfirmModal({ title, message, confirmLabel, danger, hideCancel, on
   // Reset every call, not just when true — otherwise a hideCancel:true call
   // would leave Cancel hidden for the NEXT (normal) confirm too, since this
   // modal's markup is shared/reused rather than rebuilt per call.
-  if (cancelBtn) cancelBtn.classList.toggle('hidden', !!hideCancel);
+  if (cancelBtn) {
+    cancelBtn.classList.toggle('hidden', !!hideCancel);
+    cancelBtn.textContent = cancelLabel || 'Cancel'; // reset every call, like the rest of this shared modal
+  }
   pendingGenericConfirmCallback = typeof onConfirm === 'function' ? onConfirm : null;
 
   const modal = document.getElementById('generic-confirm-modal');
